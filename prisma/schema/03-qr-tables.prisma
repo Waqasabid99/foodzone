@@ -1,0 +1,84 @@
+// ---------------------------------------------------------------------------
+// Dine-in surface: tables and printable QR codes.
+//
+// QR is view-only here (scan -> see the menu). The code is an opaque short
+// token so the printed sticker survives menu changes; repoint it by editing
+// the row. Scans are logged so you can see which table/poster actually gets
+// used, and a table-ordering flow can be layered on later without reprinting.
+// ---------------------------------------------------------------------------
+
+enum QrTargetType {
+  MENU // whole menu for a branch
+  TABLE // a specific table's menu
+  CATEGORY
+  PRODUCT
+  CUSTOM_URL
+}
+
+model RestaurantTable {
+  id        String   @id @default(cuid())
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId  String
+  name      String // "T-12"
+  area      String? // "Terrace", "Family hall"
+  seats     Int      @default(4)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  qrCodes QrCode[]
+  orders  Order[]
+
+  @@unique([branchId, name])
+  @@index([branchId])
+}
+
+model QrCode {
+  id            String           @id @default(cuid())
+  /// Short opaque token embedded in the printed code: /m/{code}
+  code          String           @unique
+  branch        Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId      String
+  targetType    QrTargetType     @default(MENU)
+  menu          Menu?            @relation(fields: [menuId], references: [id], onDelete: SetNull)
+  menuId        String?
+  table         RestaurantTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  tableId       String?
+  /// Targets for CATEGORY and PRODUCT codes. SetNull rather than Cascade: a
+  /// deleted product must not silently delete a sticker that is already on a
+  /// table — the code survives and is repointed.
+  category      Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  categoryId    String?
+  product       Product?         @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productId     String?
+  customUrl     String?
+  label         String? // "Table 12 stand", "Window poster"
+  /// Cached render of the printable asset.
+  imageUrl      String?
+  isActive      Boolean          @default(true)
+  scanCount     Int              @default(0)
+  lastScannedAt DateTime?
+  printedAt     DateTime?
+  createdById   String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  scans QrScan[]
+
+  @@index([branchId])
+  @@index([tableId])
+}
+
+model QrScan {
+  id        String   @id @default(cuid())
+  qrCode    QrCode   @relation(fields: [qrCodeId], references: [id], onDelete: Cascade)
+  qrCodeId  String
+  /// Anonymous browser/session id so repeat scans can be de-duplicated without
+  /// requiring a login.
+  sessionId String?
+  userId    String?
+  ipAddress String?
+  userAgent String?
+  scannedAt DateTime @default(now())
+
+  @@index([qrCodeId, scannedAt])
+}

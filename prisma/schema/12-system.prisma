@@ -1,0 +1,120 @@
+// ---------------------------------------------------------------------------
+// Platform plumbing.
+// ---------------------------------------------------------------------------
+
+enum SettingScope {
+  GLOBAL
+  BRANCH
+}
+
+enum NotificationChannel {
+  IN_APP
+  PUSH
+  EMAIL
+  SMS
+  WHATSAPP
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+/// Runtime configuration: tax mode, delivery fee rules, feature flags, business
+/// hours defaults. `isPublic` rows may be served to unauthenticated clients.
+model Setting {
+  id          String       @id @default(cuid())
+  key         String
+  scope       SettingScope @default(GLOBAL)
+  branch      Branch?      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId    String?
+  value       Json
+  valueType   String       @default("json") // json | string | number | boolean
+  label       String?
+  isPublic    Boolean      @default(false)
+  updatedById String?
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([key, branchId])
+  @@index([scope])
+}
+
+/// Gap-free per-document numbering (orders, invoices, GRNs, journal entries).
+/// Allocate inside the same transaction as the document, with a row lock.
+model NumberSequence {
+  id           String   @id @default(cuid())
+  /// "ORDER" | "INVOICE" | "GRN" | "JOURNAL" | ...
+  documentType String
+  branchId     String?
+  prefix       String   @default("")
+  /// Optional period bucket ("2026-09") so counters reset monthly.
+  periodKey    String?
+  padding      Int      @default(4)
+  nextValue    Int      @default(1)
+  updatedAt    DateTime @updatedAt
+
+  @@unique([documentType, branchId, periodKey])
+}
+
+model Notification {
+  id            String              @id @default(cuid())
+  user          User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        String?
+  channel       NotificationChannel @default(IN_APP)
+  status        NotificationStatus  @default(QUEUED)
+  type          String // "order.status_changed", "stock.low", "attendance.missing_punch"
+  title         String
+  body          String?
+  /// Deep-link payload for the mobile app.
+  data          Json?
+  referenceType String?
+  referenceId   String?
+  sentAt        DateTime?
+  readAt        DateTime?
+  error         String?
+  createdAt     DateTime            @default(now())
+
+  @@index([userId, readAt])
+  @@index([status])
+}
+
+/// Uploaded files (product photos, wastage evidence, receipts, and later the
+/// customer videos).
+model MediaAsset {
+  id              String   @id @default(cuid())
+  url             String
+  storageKey      String   @unique
+  mimeType        String
+  sizeBytes       Int
+  width           Int?
+  height          Int?
+  durationSeconds Int?
+  /// What it is attached to, kept loose so any module can use it.
+  ownerType       String?
+  ownerId         String?
+  uploadedById    String?
+  createdAt       DateTime @default(now())
+
+  @@index([ownerType, ownerId])
+}
+
+/// Transactional outbox: side effects (push, email, webhook, ledger posting)
+/// are enqueued in the same transaction as the change that triggered them, then
+/// dispatched by a worker. Keeps notifications and postings from being lost
+/// when a request dies mid-flight.
+model OutboxEvent {
+  id          String    @id @default(cuid())
+  eventType   String
+  payload     Json
+  status      String    @default("PENDING") // PENDING | PROCESSING | DONE | FAILED
+  attempts    Int       @default(0)
+  lastError   String?
+  availableAt DateTime  @default(now())
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([status, availableAt])
+}

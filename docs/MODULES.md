@@ -1,0 +1,598 @@
+# FoodZone — Build Plan
+
+Every module the system needs, in dependency order. Tick items off as they land.
+
+**Status key:** `[ ]` not started · `[~]` partially built, needs rework · `[x]` done
+
+**Scope reminder:** backend only for now — schema, services, API endpoints. The
+website and the React Native app both consume the same `/api/v1` endpoints, so
+every module ships as API + service, never as page-specific logic.
+
+**Conventions every module follows**
+- Route handlers use `apiHandler` from `@/lib/api` and declare their own
+  `permissions` — never rely on `proxy.js` for authorisation.
+- Business logic lives in `src/server/services/*.service.js`; route handlers
+  only parse, authorise and format.
+- Anything touching money or stock runs inside `withTransaction`.
+- Permission keys already exist in the seeded catalogue (294 of them). If a
+  module needs a key that isn't there, add it to `prisma/seeds/permissions.js`
+  and re-run the seed — never invent one at the call site.
+
+**Running the tests**
+
+```bash
+npm run test:unit          # pure logic, no server or database writes
+
+# the end-to-end suites drive a real server over HTTP
+APP_URL=http://localhost:3100 CRON_SECRET=phase2-test-secret \
+  npx next dev -p 3100 > /tmp/foodzone-e2e-server.log 2>&1 &
+
+npm run test:e2e           # phases 1 to 13 in sequence
+```
+
+Four details are easy to trip over, and each one fails as a confusing
+assertion rather than an obvious error:
+
+- **`APP_URL` must match the port.** The local storage driver builds public URLs
+  from it, so a mismatch serves files from a server that is not running.
+- **`CRON_SECRET` must be set.** Without it the internal job endpoints
+  deliberately run open in development, so Phase 2's "hidden without the secret"
+  checks cannot pass. Use the same value the suite sends (`E2E_CRON_SECRET`,
+  default `phase2-test-secret`).
+- **Phase 1 reads emailed codes from the server's log**, because codes are
+  hashed in the database. Redirect the server's output to the path above, or
+  point `E2E_LOG` somewhere else.
+- **Do not rebuild while a suite is running.** `next build` and `next dev` share
+  the `.next` directory, so a build mid-run restarts the server underneath the
+  tests and the suite dies partway through its cleanup.
+- **Restart `next dev` after adding a dynamic route directory.** A new
+  `[param]` folder created while the dev server is up is not always picked up,
+  and the request comes back as an HTML 404 rather than an API error — which
+  reads like a broken handler rather than a missing route.
+
+Every suite cleans up after itself and fails if the database is not back to its
+seeded baseline.
+
+---
+
+## Phase 0 — Foundation
+
+- [x] **Database schema** — 137 models across 13 domain files in `prisma/schema/`
+- [x] **Initial migration** — squashed to `20260908120000_init_full_schema`, applied
+- [x] **RBAC seed** — 294 permissions, 20 system roles, idempotent
+- [x] **API helper layer** — `apiHandler`, errors, validation, tokens, cookies,
+      RBAC resolution, rate limiting, pagination, audit, logging, doc numbering
+- [ ] **Bootstrap seed** — owner account + first branch, so the system can be used
+- [x] **Test harness** — `npm test` (59 unit + 385 end-to-end), self-cleaning
+
+---
+
+## Phase 1 — Identity & Access
+
+- [x] **Authentication** — register, login, refresh rotation with reuse detection, logout, logout-all
+- [x] **Account verification** — emailed 6-digit codes, attempt caps, resend cooldown *(phone OTP deferred)*
+- [x] **Password lifecycle** — forgot, reset, change, `tokensValidFrom` force-logout
+- [x] **Sessions & devices** — list and revoke sessions, Expo push-token registry
+- [x] **User management (admin)** — CRUD, suspend, reactivate, staff invitations
+- [x] **Roles & permissions (admin)** — catalogue, create/edit roles, assign per
+      branch, per-user allow/deny overrides, escalation guards
+- [x] **Customer profile (self)** — profile read/update, address book CRUD
+- [x] **Audit log** — query API with filters, distinct-action list
+
+## Phase 2 — Platform & Branches
+
+- [x] **Branches** — CRUD, opening hours (split shifts, overnight, per-channel), closures, live open state
+- [x] **Settings** — typed registry, branch → global → default layering, public subset
+- [x] **Media & uploads** — direct signed uploads + confirm, Cloudinary/S3-R2/local drivers, compression policy
+- [x] **Notifications** — in-app feed, admin send by user or role, Expo push registry and dispatch
+- [x] **Outbox worker** — SKIP LOCKED claiming, leases, backoff; in-process loop *and* cron endpoint
+
+### Deferred from Phase 2
+
+- [ ] **Orphaned upload sweep** — delete objects uploaded but never confirmed
+- [ ] **SMS / WhatsApp channels** — provider not chosen yet
+- [ ] **Notification preferences** — per-user, per-type opt-outs
+- [ ] **Distributed rate-limit store** — needed before running several instances
+
+## Phase 3 — Catalog & Menu
+
+- [x] **Categories** — CRUD, 4-level tree with cycle and depth guards, bulk reorder
+- [x] **Products & variants** — CRUD, images, dietary tags, station routing,
+      auto default variant, generated SKUs, draft-by-default publishing, soft delete + restore
+- [x] **Modifiers** — reusable groups, options, per-product overrides, rule satisfiability checks
+- [x] **Combos** — combo groups and options, default-variant resolution, no self- or nested combos
+- [x] **Menus** — per-branch menus by channel, sections, per-variant price overrides,
+      scheduled time windows (overnight-safe), 86 switch with timed expiry
+- [x] **Kitchen stations** — CRUD and product routing
+- [x] **Public catalog API** — categories, products, product page, search, and the
+      branch menu read model with schedule resolution
+
+### Deferred from Phase 3
+
+- [x] **Bulk import/export** — CSV round-trip for categories, products, variants
+      and menu items, matched on natural keys so re-importing an export updates
+      rather than duplicates; blank leaves a value alone and `--` clears it;
+      validate-then-apply in one transaction, with `dryRun`; never deletes
+- [x] **Menu cloning** — copy a menu with its sections and items to another
+      branch or channel; the clone is inactive, is not the default, and does not
+      inherit the source's 86 state
+- [ ] **Full-text search** — `ILIKE` is fine at this size; revisit with `tsvector`
+      or a search service once the catalog is large
+
+## Phase 4 — Dine-in surface
+
+- [x] **Tables** — CRUD per branch, areas, seats, bulk layout, per-branch unique names
+- [x] **QR codes** — opaque permanent tokens, five target types, repointing,
+      printable SVG/PNG, scan tracking, per-code and per-branch analytics
+- [x] **Public QR menu** — `/qr/{code}` resolves a scan to a branch menu, table,
+      category, product or redirect, with no auth and a stale-target fallback
+
+### Deferred from Phase 4
+
+- [ ] **Table ordering** — a scan currently views the menu; ordering from the
+      table lands with the cart in Phase 5
+- [ ] **Table state** — occupied/free, party size, server assignment *(needs orders)*
+- [ ] **Batch print sheet** — a single PDF of every code for a branch, laid out
+      for a sticker sheet
+
+## Phase 5 — Ordering
+
+- [x] **Cart** — server-side, guest carts by `x-session-id`, claimed and merged on
+      login, full modifier/combo validation, repriced from the live menu on every read
+- [x] **Pricing engine** — pure and Decimal-based: per-unit modifiers, inclusive and
+      exclusive tax, compound rates, configurable fees, rounding with `roundOff`
+- [x] **Checkout** — availability and branch guards, quote endpoint, one-transaction
+      order creation, per-branch daily document numbering
+- [x] **Order lifecycle** — a per-type state machine with guards, cancellation rules
+      split between customer and staff, status history, narrow tracking endpoint
+- [x] **Counter & table orders (POS)** — staff order entry through the same
+      `placeOrder` as customer checkout
+- [x] **Kitchen display (KDS)** — per-station queue, item status machine, ticket bump,
+      auto-advance of the order, live summary
+- [x] **Invoices** — issue with their own number series, void, replace, receipt payload
+- [x] **Reviews** — purchase-verified, moderation queue, public summary with distribution
+
+### Deferred from Phase 5
+
+- [ ] **Stock reservation at checkout** — needs the inventory ledger (Phase 9);
+      `costTotal` is already snapshotted per line, so depletion can be added
+      without touching the order write
+- [x] **Discounts at checkout** — delivered in Phase 6
+- [ ] **Editing a placed order** — `orders.edit_items` exists as a permission but
+      adding or removing lines after placement needs the payment and refund
+      flows to reconcile against (Phase 7)
+- [ ] **Scheduled orders** — `ordering.max_scheduled_days_ahead` is defined and
+      `promisedAt` is populated, but choosing a future slot is not exposed yet
+- [ ] **Invoice PDF rendering** — the receipt payload is complete; turning it
+      into a PDF is a presentation concern per client
+
+## Phase 6 — Pricing, Discounts & Tax
+
+- [x] **Tax engine** — tax group and rate CRUD, inclusive vs exclusive, compound
+      rates with a computed `effectiveRate`, per-line tax lines; rates that have
+      been charged are immutable so filed invoices stay true
+- [x] **Promotions** — a pure rules engine covering percentage, fixed, free
+      delivery, free item, buy-x-get-y and bundle price, with product / variant
+      / category targeting (exclusions beating inclusions), date, day, branch-
+      timezone time window, branch, channel and order-type scheduling, and
+      stacking resolved by "the customer gets the better deal"
+- [x] **Coupons** — codes as keys onto promotions, case-insensitive, bulk
+      generation under a revocable campaign tag, per-user and global limits
+      enforced by the write rather than the read, redemption tracking
+- [x] **Manual discounts** — separate permission, non-overridable percentage
+      cap checked in aggregate, mandatory reason, synchronous audit naming the
+      approver
+
+### Deferred from Phase 6
+
+- [ ] **Loyalty** — `OrderDiscountSource.LOYALTY` exists in the schema and the
+      engine takes the resolved amount, but points, tiers and earn/burn rules
+      are a programme of their own
+- [ ] **Discount reporting** — "what did this campaign cost us" is answerable
+      from `OrderDiscount` today, but the aggregate report lands with the rest
+      of reporting in Phase 11
+- [ ] **Promotion previews** — "who would this have applied to last week" needs
+      a replay over historical orders
+- [ ] **Per-region tax** — `TaxRate.region` is modelled and stored, but choosing
+      a rate by the delivery address's jurisdiction is not wired up; every
+      branch currently uses its products' groups as configured
+
+## Phase 7 — Payments
+
+Provider decision: **build the adapter, defer the acquirer.** The whole online
+path is implemented and tested against a `mock` gateway, and a real provider is
+one file implementing the interface. That avoids committing to an acquirer
+before there are merchant credentials, and nothing downstream depends on which
+one it turns out to be.
+
+- [x] **Payment gateway integration** — provider adapter interface and registry,
+      intent creation, capture, void, client-supplied idempotency keys, `cash`
+      and `mock` providers
+- [x] **Cash on delivery** — collection marking that lands the money in a
+      register session and writes a cash movement
+- [x] **Webhooks** — raw-body signature verification, store-then-process, `(provider,
+      eventId)` idempotency, replay, unknown event types ignored rather than failed
+- [x] **Refunds** — request/approve/reject lifecycle on separate permissions,
+      partial refunds capped against in-flight ones, derived order state sync
+- [x] **Cash registers** — open/close/reconcile, signed movements, expected cash
+      derived from rows, blind count with variance
+- [x] **Payment state** — a pure derivation from the payment and refund rows,
+      never assigned by hand
+
+### Deferred from Phase 7
+
+- [ ] **A real acquirer** — implement the adapter for whichever gateway is
+      chosen (Safepay, JazzCash/Easypaisa, or another). Nothing outside
+      `src/server/payments/providers/` changes
+- [ ] **Store credit as tender** — `STORE_CREDIT` is in the method enum and the
+      wallet is modelled, but spending creator credit at checkout depends on
+      Phase 12
+- [ ] **Driver cash-in-hand and handover** — COD collected by a driver is
+      recorded against a session today; the driver-specific float, reconciliation
+      and handover flow belong with drivers in Phase 8
+- [ ] **Prepayment enforcement** — `payments.require_prepayment_for` is defined
+      and defaults to empty; wiring it into checkout as a hard gate needs the
+      hosted-checkout redirect a real provider supplies
+- [ ] **Settlement reconciliation** — matching a provider's payout file against
+      captured payments and fees; belongs with finance in Phase 11
+- [ ] **Payment retries and dunning** — retrying a failed charge is possible
+      manually; scheduled retry policy is not modelled
+
+## Phase 8 — Delivery
+
+- [x] **Drivers** — a `User` with a `Driver` record (one login, one reset flow),
+      vehicle details, availability with guards, shifts that bring a driver on
+      and off the board, cash-in-hand reconciled at shift end
+- [x] **Dispatch** — one board call, manual assignment and reassignment,
+      per-driver concurrency limits, jobs returned to the pool
+- [x] **Delivery lifecycle** — a pure state machine, hashed single-use handover
+      code, optional proof photo, failures with a mandatory reason, order status
+      mirrored so the customer is never behind
+- [x] **Live tracking** — last known position on `Driver` for the first paint,
+      breadcrumbs sampled at ~30s on the active delivery, pruned on a retention
+      schedule, and a public tracking endpoint that exposes a first name only
+- [x] **Driver payouts** — period generation counting each drop exactly once,
+      COD deducted, approve/pay/cancel lifecycle, audited
+
+### Deferred from Phase 8
+
+- [ ] **Auto-assignment** — the dispatch board and every guard assignment needs
+      are in place; choosing *which* driver automatically wants distance
+      (a routing provider) and a fairness policy, both decisions of their own
+- [ ] **Batching** — `Delivery.sequence` is modelled and the driver queue is
+      ordered by it, but grouping drops into a planned multi-stop run is not
+      exposed yet
+- [ ] **Realtime channel** — positions are pushed over HTTP and read back on
+      poll. The schema comment is explicit that the live stream belongs in Redis
+      or a socket channel; that is infrastructure, not modelling
+- [ ] **Distance and ETA** — `distanceKm` and `estimatedMinutes` are stored and
+      returned but nothing computes them; they need a routing provider
+- [ ] **Driver ratings** — `ratingAverage` is on the model and `Review` already
+      relates to a driver; surfacing a per-driver rating flow is its own feature
+- [ ] **Proof-of-delivery signatures** — `signatureUrl` is modelled; the photo
+      path works today through the existing media uploads
+
+## Phase 9 — Inventory & Procurement
+
+- [x] **Units of measure** — one-hop conversion to a base unit, refused across
+      measurement types, immutable once used
+- [x] **Inventory items** — CRUD, categories, costing method, reorder policy,
+      prep yield; deactivated rather than deleted, and never while stock remains
+- [x] **Stock locations** — per-branch stores, kitchens, bars, one default
+- [x] **Stock ledger** — `postMovement` is the single write path, `StockLevel`
+      is a cache, and `rebuildLevels` replays the ledger to prove it
+- [x] **Batches & expiry** — lot tracking, FIFO by expiry then receipt date,
+      quarantine, write-off, an expiry report and a nightly expiry flag
+- [x] **Suppliers** — CRUD, price lists, preferred supplier, lead times
+- [x] **Purchase orders** — draft/approve/send/receive/close lifecycle, priced
+      from the agreed list, moving no stock
+- [x] **Goods receipts** — one-transaction posting, rejections excluded from
+      stock, landed cost spread by line value, batches created with expiry
+- [x] **Transfers** — two-step dispatch and receive with stock in transit, and
+      shortfalls recorded as loss at the source
+- [x] **Stock counts** — system quantity frozen at open, blind sheets, variance
+      posted once as `COUNT_CORRECTION`
+- [x] **Adjustments & wastage** — reason-coded; adjustments approval-gated,
+      wastage posted immediately because the food is already in the bin
+- [x] **Sale-time depletion** — recursive recipe explosion with sub-recipes,
+      modifier ingredients, unit conversion and yield gross-up; idempotent per
+      order and reversed on cancellation
+
+### Deferred from Phase 9
+
+- [ ] **Stock reservation at checkout** — `StockLevel.reservedQuantity` is
+      modelled and read by `onHand`, but holding stock for confirmed-but-unmade
+      orders needs a release-on-cancel path and a timeout sweeper
+- [ ] **Supplier bills and AP** — `SupplierBill` relates to a GRN; turning a
+      receipt into a payable belongs with finance in Phase 11
+- [ ] **Journal postings** — every movement here has a ledger consequence
+      (COGS, stock asset, wastage expense); the posting rules land in Phase 11
+- [ ] **Purchase requisitions** — an internal "we need this" step before a PO
+      is not modelled
+- [ ] **Batch-level valuation report** — valuation runs at average cost for
+      speed; a lot-by-lot report is a separate read
+- [ ] **Barcode scanning flows** — `barcode` is stored and searchable, but
+      scan-to-receive and scan-to-count are client concerns
+- [ ] **Recipe management** — recipes are *read* here for depletion; their CRUD,
+      versioning and costing roll-up are Phase 10
+
+## Phase 10 — Production
+
+- [x] **Recipes (BOM)** — CRUD, nested sub-recipes, versioning, yield, cycle
+      guard, unit validation at save time, one live version per output
+- [x] **Recipe costing** — recursive roll-up from ingredient costs plus labour
+      and overhead, `missingCosts` propagated up through sub-recipes, cached on
+      the recipe and on the variant's `standardCost`, menu food-cost report
+- [x] **Modifier ingredients** — CRUD and costing for add-ons, which depletion
+      has read since Phase 9 but nothing could write
+- [x] **Production orders** — plan, start (issues material), consume, complete
+      (books output, credits by-products, writes off yield loss), cancel
+      (reverses onto the original batches)
+- [x] **Production variance** — cost and yield variance per run and per recipe
+
+### Fixed while building Phase 10
+
+- **Sub-recipe quantities were never converted into the sub-recipe's yield
+      unit.** "150 ml of sauce" against a sauce recipe yielding 2 litres handed
+      150 to the recursion instead of 0.15, exploding the sub-recipe a thousand
+      times over. The explosion is now one shared module
+      (`src/server/production/explode.js`) used by depletion, production
+      planning and costing alike, so the three can no longer disagree.
+- **Inbound movements against a named batch left the batch remainder behind.**
+      `postMovement` now takes `restoreBatch`, used by production cancellation.
+      Opt-in rather than inferred, because a goods receipt also posts inbound
+      against a batch it created a moment earlier.
+
+### Deferred from Phase 10
+
+- [ ] **Journal postings for production** — a run turns raw-material asset into
+      WIP and then finished-goods asset, with labour and overhead absorbed and
+      yield loss expensed. The quantities and costs are all correct here; the
+      accounts they belong in are Phase 11
+- [ ] **Recipe allergens and nutrition** — modelled on the catalog side, but
+      rolling them up through a recipe tree is its own piece of work
+- [ ] **Production scheduling** — `scheduledFor` is stored and filterable, but
+      capacity planning and a suggested-runs-from-forecast job are not built
+- [ ] **Partial completion** — a run completes once. A batch produced across two
+      shifts is two runs today
+- [ ] **Recipe cost history** — only the current roll-up is cached; a
+      cost-over-time series needs its own table
+
+## Phase 11 — Finance
+
+- [x] **Chart of accounts** — 37 seeded system accounts, CRUD, hierarchy,
+      `GET /admin/accounts/verify` proves the chart still supports every rule
+- [x] **Fiscal calendar** — years, generated monthly periods, close in order,
+      reopen with a reason, one-way lock
+- [x] **Journal engine** — balanced posting, period guard inside the
+      transaction, reversal-only corrections, idempotency by source,
+      `GET /admin/journal-entries/audit` re-checks debits equal credits
+- [x] **Posting rules** — sale, COGS, payment, refund, goods receipt,
+      production, wastage, stock adjustment, driver payout, cash variance,
+      supplier bill, bill payment, expense
+- [x] **Accounts payable** — bills from GRNs, approval, payments, ageing
+- [x] **Expenses** — categories, recording, approval, summary by category
+- [x] **Financial reports** — P&L, balance sheet, trial balance, cash flow,
+      close pack with its own tie-out checks
+- [~] **Operational reports** — sales, product mix, inventory and delivery are
+      built; creator and HR reports wait on Phases 12 and 13
+
+### Design notes
+
+- **A sale debits receivable, never cash**, even for a cash order. The sale and
+  the money are separate events that can happen in either order; the payment
+  rule clears the receivable.
+- **Tax-inclusive pricing is derived from the order's own figures**, not from
+  the `ordering.prices_include_tax` setting. The setting is mutable — flipping
+  it would silently re-post historical orders — while the document's arithmetic
+  cannot change after the fact.
+- **A goods receipt credits GRNI, not payables.** The delivery and the invoice
+  are days apart, and crediting payables on arrival makes every unbilled
+  delivery look like an approved invoice.
+- **Discounts are contra-income, tips are a liability.** A discount is revenue
+  never earned rather than a cost incurred; a tip belongs to the staff.
+- **Postings run out of band, from the outbox.** The sale has happened and the
+  stock has moved: refusing to record an operational fact because an account
+  was missing would make the system less true. Every rule is idempotent on its
+  source, and `POST /admin/journal-entries/backfill` fills any gap.
+
+### Fixed while building Phase 11
+
+- **`pg_advisory_xact_lock` through `$queryRaw` failed on every posting.** The
+  function returns `void`, which Prisma cannot deserialize, so the idempotency
+  lock threw and *no* business event reached the ledger. Now `$executeRaw`.
+- **Three posting rules wrote the wrong entity's id into a foreign key.** The
+  entry's foreign key was inferred from the source name, which is wrong for a
+  bill payment (source id is the payment, the key is the bill), a refund (the
+  column is `paymentId`) and COGS (whose source id is a synthetic
+  `<orderId>:COGS`). Links are now passed explicitly by each rule.
+- **A production entry double-counted labour and overhead.** They were debited
+  *and* included in the output value the production module had already rolled
+  them into, leaving the entry out of balance by exactly the conversion cost.
+  Absorption credits them instead.
+- **The P&L added contra-income to revenue instead of subtracting it.** Balances
+  arrived signed in each account's own normal direction, so DEBIT-normal
+  "Discounts given" read as +100 inside a credit-normal section. Statements now
+  derive the sign from the section.
+
+### Deferred from Phase 11
+
+- [x] **Payroll postings** — built in Phase 12: approval posts the wage bill
+      gross, payment clears the payable
+- [ ] **Creator and HR operational reports** — Phases 12 and 13
+- [ ] **Year-end close** — periods close and lock, but rolling income and
+      expense into retained earnings and opening the next year is not built.
+      The balance sheet carries current earnings into equity instead, which is
+      correct to read but is not a posted closing entry
+- [ ] **Multi-currency** — accounts and documents carry a currency, but there
+      is no revaluation, no rate table and no gain/loss account
+- [ ] **Accounts receivable ageing** — the sale rule creates receivables and
+      `ageBalances` is shared, but an AR ageing report is not exposed; every
+      order is paid at or near completion today
+- [ ] **Budgets and forecasting** — not modelled
+- [ ] **Tax filing returns** — tax payable accumulates correctly; producing a
+      filing period return is its own piece of work
+
+## Phase 12 — HR & Attendance
+
+- [x] **Departments & employees** — CRUD, employment details, salary components,
+      pay behind its own `employees.view_salary` / `manage_salary` permissions
+- [x] **Shifts & rosters** — shift definitions with night shifts expressed as an
+      end past 1440, per-date roster, weekly offs as roster rows
+- [x] **Attendance devices** — registry, hashed API key shown once, sync cursor,
+      health derived from silence
+- [x] **Punch ingestion** — device push endpoint, de-duplication on
+      `(device, deviceLogId)`, unmatched punches kept and claimable
+- [x] **Attendance derivation** — folds punches into days, late/OT/half-day
+      rules, manual correction with a reason, approval
+- [x] **Leave** — types, quotas, balances with carry-forward, requests and
+      approvals that re-derive the days they cover
+- [x] **Holidays** — company-wide and per-branch calendars
+- [x] **Payroll** — period generation from attendance, payslip lines showing
+      their working, approval, payment marking, ledger posting
+
+### Design notes
+
+- **Punches are raw, append-only and never edited.** The terminal's record is
+  evidence; a correction is a MANUAL punch added alongside and the day is
+  re-derived. Every manual punch carries who added it.
+- **An unknown biometric id is kept, not dropped.** Enrolment lags hiring, and
+  discarding those punches loses attendance nobody can recover. They queue for
+  HR and are claimed when the id is enrolled.
+- **A missing punch-out is flagged, never guessed.** Assuming somebody left at
+  their shift end pays unworked hours; assuming they never arrived steals worked
+  ones. `MISSING_PUNCH` pays nothing until a human looks — the safe direction,
+  because an under-payment gets reported by the person affected.
+- **A manual correction survives re-derivation.** One that evaporates on the
+  next nightly run is worse than none, because whoever made it believes it stuck.
+- **Approving payroll locks the attendance it paid**, and only then — freezing
+  at generation would block the corrections generation exists to pick up.
+- **Payroll posts gross, not net.** Deductions are money withheld from a wage
+  fully earned; posting net understates the cost of employing people by exactly
+  the amount deducted.
+
+### Operational note
+
+Postings need the fiscal calendar. A system with no `FiscalYear` covering a
+date accumulates business events that never reach the books, and
+`POST /admin/journal-entries/backfill` cannot help until the year exists. Create
+the fiscal year before going live, not after the first payroll.
+
+### Deferred from Phase 12
+
+- [ ] **Device pull/sync** — terminals push to `/devices/punches`. Polling a
+      device over its own vendor protocol needs a per-vendor adapter and a
+      worker that can reach the LAN the device sits on
+- [ ] **Payslip PDFs** — `pdfUrl` is modelled; rendering and storing the
+      document is its own piece of work
+- [ ] **Statutory deductions** — provident fund, income tax and social security
+      are expressible as salary components, but the rules that compute them per
+      jurisdiction are not built. The withheld total posts to tax payable
+- [ ] **Overtime approval** — overtime is derived from time worked beyond the
+      shift and paid automatically; a pre-approval workflow is not modelled
+- [ ] **Attendance regularisation requests** — an employee raising their own
+      correction for a supervisor to approve; today only a supervisor can
+      correct a day
+- [ ] **Shift swaps and open shifts** — the roster is assigned, not bid on
+- [ ] **HR operational report** — the `reports.view_hr` key exists and the data
+      is all here; the report itself is not built
+
+## Phase 13 — Creator Program
+
+- [x] **Creator onboarding** — eligibility proved from a completed order, terms
+      versioned and acceptance pinned to the version seen, profile on the same
+      user account
+- [x] **Video upload** — bound to one purchased `OrderItem`, duration and size
+      enforced from config, every attempt kept
+- [x] **Moderation** — review queue, approve/reject with a required reason and
+      recorded checks, attempt limit locks the line, takedown and reinstate,
+      viewer reports, strikes with automatic suspension and ban
+- [x] **Public video feed** — videos on the product page, a creator page, a
+      browse feed, add-to-cart carrying the video
+- [x] **Attribution** — created only on add-to-cart, one row per cart+product,
+      last touch wins with every touch kept, survives a guest-cart merge,
+      window expiry, frozen onto the order at checkout
+- [x] **Commission rules** — CRUD, single-winner resolution, and a simulator
+- [x] **Earnings engine** — runs on completion, hold window, crediting job,
+      reversal on refund, `NOT_QUALIFIED` rows for near-misses
+- [x] **Creator wallet** — append-only ledger with a rebuildable cached balance,
+      redemption quote with a per-order cap, expiry
+- [x] **Engagement & sharing** — views, likes, share links, click tracking,
+      daily rollups, milestone appreciation
+- [x] **Creator dashboard API** — earnings, the views→carts→orders funnel, and
+      the appreciation feed
+
+### Design notes
+
+- **A view attributes nothing; only add-to-cart does.** A product page with six
+  videos would otherwise credit all six for a sale any of them, or none of them,
+  caused — and whichever video sorted first would win every time.
+- **Exactly one commission rule applies per line.** Never stacked: two
+  overlapping campaigns paying together produce a promotion nobody modelled and
+  an unbounded payout. Priority, then specificity, then recency.
+- **A sale that earns nothing still writes a row.** `NOT_QUALIFIED` with the
+  reason, so the dashboard can say "your video drove this sale but it missed the
+  threshold" instead of showing silence — which is indistinguishable from the
+  program being broken.
+- **Proof of purchase is structural.** A video is bound to the order line the
+  creator bought, and the product it goes live against comes from that line, not
+  from the request.
+- **Earnings snapshot the rule.** Editing a campaign next month must not rewrite
+  what somebody was already paid.
+- **Store credit is an append-only ledger** with a cached balance and a
+  `rebuildBalances` replay, the same shape as the stock ledger.
+
+### Fixed while building Phase 13
+
+- **A guest cart merged at sign-in destroyed its attributions.**
+  `CreatorAttribution` cascades from `Cart`, and `claimGuestCart` deletes the
+  guest cart after moving its items — so a shopper who added from a video and
+  only signed in at checkout silently cost the creator the sale, in precisely
+  the flow the program depends on most. Attributions now move across first, with
+  last-touch still deciding any clash.
+
+### Deferred from Phase 13
+
+- [ ] **Store credit as a tender at checkout** — the wallet, the redemption
+      quote and the cap are built, and `Payment.method` has `STORE_CREDIT`, but
+      the checkout path does not yet accept it. `redeem()` is written and
+      transactional, waiting on a checkout that calls it
+- [ ] **Video transcoding and moderation automation** — uploads are validated on
+      declared duration and size; a real pipeline would probe the file, generate
+      thumbnails, and pre-screen for nudity before a human sees it
+- [ ] **Attribution beyond last touch** — no fractional or multi-touch model
+- [ ] **Creator payouts in cash** — deliberately out of scope; the program is
+      store credit only
+- [ ] **Leaderboards and `TOP_CREATOR_OF_WEEK`** — the appreciation type exists,
+      the job that awards it does not
+- [ ] **Creator report** — `reports.view_creator` exists and the data is here
+
+## Phase 14 — Cross-cutting
+
+- [ ] **Background jobs** — scheduler plus: attendance folding, earning crediting,
+      cart and attribution expiry, stat rollups, credit expiry, batch expiry
+      alerts, low-stock alerts, outbox drain
+- [ ] **Realtime** — order status and driver location channels for both clients
+- [ ] **Search** — product and order search
+- [x] **API documentation** — OpenAPI 3.1 generated from the route options by
+      `npm run docs:api`, served as Swagger UI at `/api/docs`; `docs/API.md`
+      stays the narrative and is kept current per module
+- [ ] **Security hardening** — rate-limit tuning, distributed limiter store,
+      CORS review, secret rotation, dependency audit
+- [ ] **Observability** — error tracking, request metrics, slow-query logging
+- [ ] **Deployment** — environments, migration strategy, backups, restore drill
+
+---
+
+## Sequencing notes
+
+- **Phase 1 → 3 → 5 is the critical path** to a working ordering system. Phases
+  6–8 make it complete; 9–11 make it a business.
+- **Phase 11 (Finance) depends on 5, 7, 9, 10 and 12** — the ledger posts from
+  those events, so build the posting rules only once the events exist.
+- **Phase 12's payroll depends on attendance derivation**, which depends on punch
+  ingestion. Do not start payroll before punches are landing correctly.
+- **Phase 13 depends on ordering (5) and payments (7)**, and its wallet-as-tender
+  work loops back into Phase 7.
+- **Decide the payment provider before Phase 7** — it changes the adapter, the
+  webhook contract and the refund flow.

@@ -1,0 +1,185 @@
+// ---------------------------------------------------------------------------
+// Recipes (bill of materials) and production.
+//
+// A Recipe turns ingredients into either a sellable ProductVariant (a burger)
+// or an InventoryItem of type SEMI_FINISHED (a batch of sauce, which is then an
+// ingredient in other recipes — nesting is how prep kitchens actually work).
+//
+// Two ways stock leaves for a sale:
+//   * made to order  -> the recipe is exploded at sale time and raw stock is
+//                       deducted directly (SALE_OUT movements)
+//   * batch produced -> a ProductionOrder consumes raw stock and creates a
+//                       finished/semi-finished batch; the sale then deducts
+//                       that batch instead
+// `Recipe.isBatchProduced` says which path an item takes.
+// ---------------------------------------------------------------------------
+
+enum ProductionStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Recipe {
+  id           String          @id @default(cuid())
+  name         String
+  /// Exactly one of these is set: what the recipe produces.
+  variant      ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId    String?
+  outputItem   InventoryItem?  @relation(fields: [outputItemId], references: [id], onDelete: Cascade)
+  outputItemId String?
+
+  /// Quantity produced by one run of the recipe, in `yieldUom`.
+  yieldQuantity Decimal       @default(1) @db.Decimal(18, 6)
+  yieldUom      UnitOfMeasure @relation(fields: [yieldUomId], references: [id])
+  yieldUomId    String
+
+  /// Versioned: costing history must not change when a chef edits the recipe.
+  version         Int     @default(1)
+  isActive        Boolean @default(true)
+  isBatchProduced Boolean @default(false)
+
+  prepTimeMinutes  Int?
+  cookTimeMinutes  Int?
+  instructions     String?
+  /// Non-material costs allocated per run, used to land a true unit cost.
+  laborCost        Decimal   @default(0) @db.Decimal(18, 4)
+  overheadCost     Decimal   @default(0) @db.Decimal(18, 4)
+  /// Rolled up from ingredients + labor + overhead by the costing job.
+  computedUnitCost Decimal?  @db.Decimal(18, 6)
+  costUpdatedAt    DateTime?
+  createdById      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  ingredients      RecipeIngredient[]
+  usedAsSubRecipe  RecipeIngredient[] @relation("SubRecipe")
+  productionOrders ProductionOrder[]
+
+  @@unique([variantId, version])
+  @@unique([outputItemId, version])
+  @@index([isActive])
+}
+
+model RecipeIngredient {
+  id             String         @id @default(cuid())
+  recipe         Recipe         @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  recipeId       String
+  /// Either a raw/semi-finished item, or another recipe used inline.
+  item           InventoryItem? @relation(fields: [itemId], references: [id])
+  itemId         String?
+  subRecipe      Recipe?        @relation("SubRecipe", fields: [subRecipeId], references: [id])
+  subRecipeId    String?
+  quantity       Decimal        @db.Decimal(18, 6)
+  uom            UnitOfMeasure  @relation(fields: [uomId], references: [id])
+  uomId          String
+  /// Extra loss expected for this ingredient in this recipe, on top of the
+  /// item's own yield percentage.
+  wastagePercent Decimal        @default(0) @db.Decimal(6, 3)
+  isOptional     Boolean        @default(false)
+  sortOrder      Int            @default(0)
+  note           String?
+
+  @@index([recipeId])
+  @@index([itemId])
+}
+
+/// Add-ons consume stock too — "extra cheese" is 30g of cheese.
+model ModifierOptionIngredient {
+  id       String         @id @default(cuid())
+  option   ModifierOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  optionId String
+  item     InventoryItem  @relation(fields: [itemId], references: [id])
+  itemId   String
+  quantity Decimal        @db.Decimal(18, 6)
+  uom      UnitOfMeasure  @relation(fields: [uomId], references: [id])
+  uomId    String
+
+  @@unique([optionId, itemId])
+}
+
+/// One prep/production run. Consumption and output are recorded as their own
+/// rows so the actual cost of the run can be compared with the recipe standard.
+model ProductionOrder {
+  id               String           @id @default(cuid())
+  productionNumber String           @unique
+  branch           Branch           @relation(fields: [branchId], references: [id])
+  branchId         String
+  location         StockLocation    @relation(fields: [locationId], references: [id])
+  locationId       String
+  recipe           Recipe           @relation(fields: [recipeId], references: [id])
+  recipeId         String
+  status           ProductionStatus @default(PLANNED)
+
+  plannedQuantity  Decimal @db.Decimal(18, 6)
+  producedQuantity Decimal @default(0) @db.Decimal(18, 6)
+  wastedQuantity   Decimal @default(0) @db.Decimal(18, 6)
+
+  /// Actuals for this run.
+  materialCost Decimal  @default(0) @db.Decimal(18, 4)
+  laborCost    Decimal  @default(0) @db.Decimal(18, 4)
+  overheadCost Decimal  @default(0) @db.Decimal(18, 4)
+  totalCost    Decimal  @default(0) @db.Decimal(18, 4)
+  unitCost     Decimal? @db.Decimal(18, 6)
+  /// Standard cost the recipe predicted, frozen at start — the variance is the
+  /// number the kitchen is managed on.
+  standardCost Decimal? @db.Decimal(18, 4)
+
+  batchNumber  String?
+  expiryDate   DateTime?
+  scheduledFor DateTime?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  supervisorId String?
+  createdById  String?
+  notes        String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  consumptions   ProductionConsumption[]
+  outputs        ProductionOutput[]
+  wastages       Wastage[]
+  journalEntries JournalEntry[]
+
+  @@index([branchId, status])
+  @@index([recipeId])
+  @@index([scheduledFor])
+}
+
+model ProductionConsumption {
+  id                String          @id @default(cuid())
+  productionOrder   ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  productionOrderId String
+  item              InventoryItem   @relation(fields: [itemId], references: [id])
+  itemId            String
+  batch             StockBatch?     @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  batchId           String?
+  plannedQuantity   Decimal?        @db.Decimal(18, 6)
+  quantity          Decimal         @db.Decimal(18, 6)
+  unitCost          Decimal         @default(0) @db.Decimal(18, 6)
+  totalCost         Decimal         @default(0) @db.Decimal(18, 4)
+  consumedAt        DateTime        @default(now())
+
+  @@index([productionOrderId])
+  @@index([itemId])
+}
+
+model ProductionOutput {
+  id                String          @id @default(cuid())
+  productionOrder   ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  productionOrderId String
+  item              InventoryItem   @relation(fields: [itemId], references: [id])
+  itemId            String
+  /// Batch created by this output, when the item is batch-tracked.
+  batchId           String?
+  quantity          Decimal         @db.Decimal(18, 6)
+  unitCost          Decimal         @default(0) @db.Decimal(18, 6)
+  totalCost         Decimal         @default(0) @db.Decimal(18, 4)
+  /// True for the intended product, false for by-products (trimmings, stock).
+  isPrimary         Boolean         @default(true)
+  producedAt        DateTime        @default(now())
+
+  @@index([productionOrderId])
+  @@index([itemId])
+}

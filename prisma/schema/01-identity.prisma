@@ -1,0 +1,291 @@
+// ---------------------------------------------------------------------------
+// Identity, sessions and RBAC.
+//
+// Permissions are SEEDED and immutable to admins (`isSystem`). Admins compose
+// them into Roles, and grant a Role to a User either globally (branchId = null)
+// or for one branch. UserPermissionOverride is the escape hatch for a single
+// extra allow/deny without inventing a whole role.
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum RoleScope {
+  GLOBAL // grant applies across every branch
+  BRANCH // grant must name a branch
+}
+
+enum PermissionEffect {
+  ALLOW
+  DENY // always wins over any ALLOW from a role
+}
+
+enum ClientType {
+  WEB
+  IOS
+  ANDROID
+  POS
+  KIOSK
+}
+
+enum VerificationChannel {
+  EMAIL
+  SMS
+  WHATSAPP
+}
+
+model User {
+  id              String     @id @default(cuid())
+  name            String
+  email           String?    @unique
+  phone           String?    @unique
+  passwordHash    String?
+  status          UserStatus @default(ACTIVE)
+  avatarUrl       String?
+  locale          String     @default("en")
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  lastLoginAt     DateTime?
+  /// Bypasses every permission check. Reserved for the bootstrap owner account;
+  /// never grantable through the admin UI.
+  isSuperAdmin    Boolean    @default(false)
+  /// Optimistic-concurrency / force-logout marker: bump to invalidate all
+  /// access tokens issued before this instant.
+  tokensValidFrom DateTime   @default(now())
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  deletedAt       DateTime?
+
+  roleAssignments     UserRoleAssignment[]
+  permissionOverrides UserPermissionOverride[]
+  sessions            RefreshToken[]
+  credentialTokens    CredentialToken[]
+  devices             UserDevice[]
+  addresses           Address[]
+  carts               Cart[]
+  orders              Order[]
+  reviews             Review[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  employee            Employee?
+  creatorProfile      CreatorProfile?
+  driver              Driver?
+  couponRedemptions   CouponRedemption[]
+  assignedCoupons     Coupon[]                 @relation("CouponAssignee")
+
+  @@index([status])
+  @@index([deletedAt])
+}
+
+/// Seeded catalogue of everything the system can authorise, e.g.
+/// key = "order.refund", module = "orders". Admins can read these but never
+/// create, rename or delete them.
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  module      String // grouping for the admin UI: "orders", "inventory", ...
+  action      String // "create" | "read" | "update" | "delete" | "approve" ...
+  label       String
+  description String?
+  /// True for every seeded permission. Guards the API against admin writes.
+  isSystem    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  roles     RolePermission[]
+  overrides UserPermissionOverride[]
+
+  @@index([module])
+}
+
+model Role {
+  id          String    @id @default(cuid())
+  key         String    @unique // "branch-manager"
+  name        String
+  description String?
+  scope       RoleScope @default(BRANCH)
+  /// System roles (SUPER_ADMIN, CUSTOMER, ...) cannot be renamed or deleted;
+  /// admin-created roles can.
+  isSystem    Boolean   @default(false)
+  /// Lower number = more senior. A user may only grant roles at or below their
+  /// own level.
+  level       Int       @default(100)
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  permissions RolePermission[]
+  assignments UserRoleAssignment[]
+
+  @@index([scope])
+}
+
+model RolePermission {
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  roleId       String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  permissionId String
+  grantedById  String?
+  createdAt    DateTime   @default(now())
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+}
+
+/// A role held by a user, optionally pinned to one branch. `branchId = null`
+/// on a BRANCH-scoped role means "all branches".
+model UserRoleAssignment {
+  id          String    @id @default(cuid())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  role        Role      @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  roleId      String
+  branch      Branch?   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId    String?
+  grantedById String?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@unique([userId, roleId, branchId])
+  @@index([userId])
+  @@index([roleId])
+  @@index([branchId])
+}
+
+/// Per-user allow/deny on top of role permissions. DENY beats everything.
+model UserPermissionOverride {
+  id           String           @id @default(cuid())
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId       String
+  permission   Permission       @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  permissionId String
+  branch       Branch?          @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId     String?
+  effect       PermissionEffect @default(ALLOW)
+  reason       String?
+  grantedById  String?
+  expiresAt    DateTime?
+  createdAt    DateTime         @default(now())
+
+  @@unique([userId, permissionId, branchId])
+  @@index([userId])
+}
+
+/// One row per logged-in device. Rotated on every refresh: the old row is
+/// revoked and points at its successor, so replay of a used token is detectable
+/// (and should revoke the whole chain).
+model RefreshToken {
+  id            String        @id @default(cuid())
+  tokenHash     String        @unique
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        String
+  client        ClientType    @default(WEB)
+  deviceId      String?
+  ipAddress     String?
+  userAgent     String?
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+  replacedBy    RefreshToken? @relation("TokenRotation", fields: [replacedById], references: [id])
+  replacedById  String?       @unique
+  replaces      RefreshToken? @relation("TokenRotation")
+  createdAt     DateTime      @default(now())
+  lastUsedAt    DateTime?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+enum CredentialTokenType {
+  PASSWORD_RESET
+  EMAIL_VERIFICATION
+  PHONE_OTP
+  LOGIN_OTP
+  STAFF_INVITE
+}
+
+/// Short-lived single-use codes. Value is stored hashed.
+model CredentialToken {
+  id          String              @id @default(cuid())
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  type        CredentialTokenType
+  tokenHash   String
+  channel     VerificationChannel @default(EMAIL)
+  destination String? // email or phone the code was sent to
+  attempts    Int                 @default(0)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime            @default(now())
+
+  @@index([userId, type])
+  @@index([tokenHash])
+}
+
+/// Push targets for the mobile app (order updates, driver assignment).
+model UserDevice {
+  id         String     @id @default(cuid())
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  pushToken  String     @unique
+  platform   ClientType
+  deviceName String?
+  appVersion String?
+  isActive   Boolean    @default(true)
+  lastSeenAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  @@index([userId])
+}
+
+model Address {
+  id            String    @id @default(cuid())
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        String
+  label         String    @default("Home")
+  recipientName String?
+  phone         String
+  line1         String
+  line2         String?
+  landmark      String?
+  city          String
+  state         String
+  postalCode    String
+  country       String    @default("IN")
+  latitude      Decimal?  @db.Decimal(10, 7)
+  longitude     Decimal?  @db.Decimal(10, 7)
+  deliveryNote  String?
+  isDefault     Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  orders Order[]
+
+  @@index([userId])
+}
+
+/// Append-only trail of who changed what. `changes` holds a { before, after }
+/// diff of the touched fields only.
+model AuditLog {
+  id         String   @id @default(cuid())
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorId    String?
+  branch     Branch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  branchId   String?
+  action     String // "order.refund", "role.update"
+  entityType String
+  entityId   String?
+  changes    Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([branchId, createdAt])
+}

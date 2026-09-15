@@ -1,0 +1,313 @@
+// ---------------------------------------------------------------------------
+// Catalog: what the kitchen can sell.
+//
+// Product is the sellable concept; ProductVariant carries the price and SKU
+// (a SIMPLE product still gets exactly one default variant, so ordering,
+// recipes and stock only ever have to deal with variants). Modifiers are
+// add-ons/choices with min/max rules; combos bundle other products.
+//
+// Menu/MenuSection/MenuItem is what a branch actually shows on a given channel
+// at a given time (lunch menu, delivery menu with different prices).
+// ---------------------------------------------------------------------------
+
+enum ProductType {
+  SIMPLE
+  VARIANT
+  COMBO
+}
+
+enum DietaryTag {
+  VEG
+  NON_VEG
+  VEGAN
+  EGG
+  HALAL
+  JAIN
+  GLUTEN_FREE
+}
+
+enum ModifierSelectionType {
+  SINGLE
+  MULTIPLE
+}
+
+enum MenuType {
+  DINE_IN
+  DELIVERY
+  TAKEAWAY
+  QR
+  POS
+  CATERING
+}
+
+model Category {
+  id          String     @id @default(cuid())
+  name        String
+  slug        String     @unique
+  description String?
+  imageUrl    String?
+  parent      Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  parentId    String?
+  children    Category[] @relation("CategoryTree")
+  sortOrder   Int        @default(0)
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  products Product[]
+  qrCodes  QrCode[]
+
+  @@index([parentId])
+}
+
+model Product {
+  id               String          @id @default(cuid())
+  name             String
+  slug             String          @unique
+  description      String?
+  shortDescription String?
+  type             ProductType     @default(SIMPLE)
+  category         Category        @relation(fields: [categoryId], references: [id])
+  categoryId       String
+  imageUrl         String?
+  dietary          DietaryTag[]
+  spiceLevel       Int? // 0-5, null when not applicable
+  allergens        String[]
+  calories         Int?
+  prepTimeMinutes  Int             @default(15)
+  taxGroup         TaxGroup?       @relation(fields: [taxGroupId], references: [id])
+  taxGroupId       String?
+  /// Kitchen section the ticket prints to.
+  station          KitchenStation? @relation(fields: [stationId], references: [id])
+  stationId        String?
+  isActive         Boolean         @default(true)
+  isFeatured       Boolean         @default(false)
+  /// Ordered from the QR menu only when true; lets you hide dine-in-only items
+  /// from delivery without a whole separate menu.
+  sortOrder        Int             @default(0)
+  createdById      String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  deletedAt        DateTime?
+
+  variants            ProductVariant[]
+  images              ProductImage[]
+  modifierGroups      ProductModifierGroup[]
+  comboGroups         ComboGroup[]
+  menuItems           MenuItem[]
+  orderItems          OrderItem[]
+  reviews             Review[]
+  comboOptions        ComboGroupOption[]
+  creatorVideos       CreatorVideo[]
+  creatorAttributions CreatorAttribution[]
+  qrCodes             QrCode[]
+
+  @@index([categoryId])
+  @@index([isActive, isFeatured])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  url       String
+  altText   String?
+  sortOrder Int     @default(0)
+
+  @@index([productId])
+}
+
+/// The priced, stocked unit. Every product has at least one.
+model ProductVariant {
+  id             String   @id @default(cuid())
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId      String
+  name           String   @default("Regular") // "Small" / "10 inch"
+  sku            String   @unique
+  barcode        String?
+  price          Decimal  @db.Decimal(18, 4)
+  /// Struck-through reference price for "was X now Y" display.
+  compareAtPrice Decimal? @db.Decimal(18, 4)
+  /// Rolled up from the recipe; refreshed when costs change. Kept here so the
+  /// order line can snapshot COGS at sale time.
+  standardCost   Decimal? @db.Decimal(18, 4)
+  servingSize    String?
+  isDefault      Boolean  @default(false)
+  isActive       Boolean  @default(true)
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  recipes      Recipe[]
+  menuItems    MenuItem[]
+  orderItems   OrderItem[]
+  comboOptions ComboGroupOption[]
+
+  @@index([productId])
+}
+
+/// Reusable set of choices: "Choose your side", "Extras".
+model ModifierGroup {
+  id            String                @id @default(cuid())
+  name          String
+  internalName  String?               @unique
+  selectionType ModifierSelectionType @default(SINGLE)
+  minSelect     Int                   @default(0)
+  maxSelect     Int                   @default(1)
+  /// Allows the same option to be picked more than once (double cheese).
+  allowQuantity Boolean               @default(false)
+  isActive      Boolean               @default(true)
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  options  ModifierOption[]
+  products ProductModifierGroup[]
+}
+
+model ModifierOption {
+  id         String        @id @default(cuid())
+  group      ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  name       String
+  /// Added to (or subtracted from) the line price.
+  priceDelta Decimal       @default(0) @db.Decimal(18, 4)
+  sku        String?
+  isDefault  Boolean       @default(false)
+  isActive   Boolean       @default(true)
+  sortOrder  Int           @default(0)
+
+  ingredients   ModifierOptionIngredient[]
+  orderItemMods OrderItemModifier[]
+
+  @@index([groupId])
+}
+
+/// Attaching a group to a product, with optional per-product rule overrides.
+model ProductModifierGroup {
+  product    Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId  String
+  group      ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  isRequired Boolean       @default(false)
+  minSelect  Int?
+  maxSelect  Int?
+  sortOrder  Int           @default(0)
+
+  @@id([productId, groupId])
+  @@index([groupId])
+}
+
+/// A slot inside a combo: "Pick 1 drink", "Pick 2 sides".
+model ComboGroup {
+  id             String  @id @default(cuid())
+  combo          Product @relation(fields: [comboProductId], references: [id], onDelete: Cascade)
+  comboProductId String
+  name           String
+  minSelect      Int     @default(1)
+  maxSelect      Int     @default(1)
+  sortOrder      Int     @default(0)
+
+  options ComboGroupOption[]
+
+  @@index([comboProductId])
+}
+
+model ComboGroupOption {
+  id         String          @id @default(cuid())
+  group      ComboGroup      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  product    Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId  String
+  variant    ProductVariant? @relation(fields: [variantId], references: [id])
+  variantId  String?
+  quantity   Int             @default(1)
+  /// Surcharge for picking this option over the baseline.
+  priceDelta Decimal         @default(0) @db.Decimal(18, 4)
+  isDefault  Boolean         @default(false)
+  sortOrder  Int             @default(0)
+
+  @@index([groupId])
+  @@index([productId])
+}
+
+/// What a branch shows, where, and when.
+model Menu {
+  id          String    @id @default(cuid())
+  branch      Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId    String
+  name        String
+  slug        String
+  type        MenuType  @default(DINE_IN)
+  description String?
+  /// Availability window; null on both means always.
+  activeFrom  DateTime?
+  activeTo    DateTime?
+  /// Minutes from midnight, plus the weekdays it runs (0 = Sunday).
+  startMinute Int?
+  endMinute   Int?
+  daysOfWeek  Int[]
+  isActive    Boolean   @default(true)
+  isDefault   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  sections MenuSection[]
+  items    MenuItem[]
+  qrCodes  QrCode[]
+
+  @@unique([branchId, slug])
+  @@index([branchId, type])
+}
+
+model MenuSection {
+  id          String  @id @default(cuid())
+  menu        Menu    @relation(fields: [menuId], references: [id], onDelete: Cascade)
+  menuId      String
+  name        String
+  description String?
+  imageUrl    String?
+  sortOrder   Int     @default(0)
+  isActive    Boolean @default(true)
+
+  items MenuItem[]
+
+  @@index([menuId])
+}
+
+/// A product priced onto one menu. Price override is how delivery pricing,
+/// happy-hour pricing and branch-level pricing are expressed; `isAvailable` is
+/// the 86 switch.
+model MenuItem {
+  id               String          @id @default(cuid())
+  menu             Menu            @relation(fields: [menuId], references: [id], onDelete: Cascade)
+  menuId           String
+  section          MenuSection?    @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+  sectionId        String?
+  product          Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId        String
+  variant          ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId        String?
+  priceOverride    Decimal?        @db.Decimal(18, 4)
+  isAvailable      Boolean         @default(true)
+  /// Set when a manager 86s an item; cleared automatically at day roll-over.
+  unavailableUntil DateTime?
+  isRecommended    Boolean         @default(false)
+  sortOrder        Int             @default(0)
+
+  @@unique([menuId, productId, variantId])
+  @@index([menuId])
+  @@index([productId])
+}
+
+/// Kitchen/bar sections a ticket can route to.
+model KitchenStation {
+  id        String  @id @default(cuid())
+  name      String
+  code      String  @unique
+  printerId String?
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  products   Product[]
+  orderItems OrderItem[]
+}

@@ -1,0 +1,598 @@
+// ---------------------------------------------------------------------------
+// Procurement and inventory.
+//
+// Everything physical is an InventoryItem measured in a UnitOfMeasure. Stock
+// physically sits in a StockLocation (a store room, the line fridge, the bar)
+// belonging to a branch. StockLevel is the fast cached quantity; StockMovement
+// is the append-only truth — every level can be rebuilt by replaying movements.
+//
+// Perishables are tracked as StockBatch rows carrying their own unit cost and
+// expiry, which is what makes FIFO costing and expiry alerts possible.
+// ---------------------------------------------------------------------------
+
+enum UomType {
+  WEIGHT
+  VOLUME
+  COUNT
+  LENGTH
+  TIME
+}
+
+enum InventoryItemType {
+  RAW_MATERIAL
+  SEMI_FINISHED // prepped in-house: sauces, dough, marinated meat
+  FINISHED_GOOD // packaged item sold as-is
+  PACKAGING
+  CONSUMABLE // cleaning supplies, gloves
+}
+
+enum CostingMethod {
+  FIFO
+  WEIGHTED_AVERAGE
+}
+
+enum StockLocationType {
+  MAIN_STORE
+  KITCHEN
+  COLD_STORAGE
+  BAR
+  COUNTER
+  WASTE
+}
+
+enum StockMovementType {
+  PURCHASE_IN
+  PRODUCTION_IN
+  PRODUCTION_OUT
+  SALE_OUT
+  TRANSFER_IN
+  TRANSFER_OUT
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+  WASTAGE
+  RETURN_TO_SUPPLIER
+  CUSTOMER_RETURN
+  OPENING_BALANCE
+  COUNT_CORRECTION
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  SENT
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+  CLOSED
+}
+
+enum StockBatchStatus {
+  ACTIVE
+  DEPLETED
+  EXPIRED
+  QUARANTINED
+}
+
+enum WastageReason {
+  EXPIRED
+  SPOILED
+  DAMAGED
+  OVER_PRODUCTION
+  /// Normal yield loss on a production run — trim, evaporation, a failed batch.
+  PRODUCTION_LOSS
+  COOKING_ERROR
+  CUSTOMER_RETURN
+  SPILLAGE
+  THEFT
+  OTHER
+}
+
+enum DocumentStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  COMPLETED
+  CANCELLED
+}
+
+/// Units, with conversion to a base unit of the same type (kg -> g, factor 1000).
+model UnitOfMeasure {
+  id         String          @id @default(cuid())
+  code       String          @unique // "kg", "g", "l", "pc"
+  name       String
+  type       UomType
+  baseUnit   UnitOfMeasure?  @relation("UomConversion", fields: [baseUnitId], references: [id])
+  baseUnitId String?
+  derived    UnitOfMeasure[] @relation("UomConversion")
+  /// Quantity of the base unit in one of this unit.
+  factor     Decimal         @default(1) @db.Decimal(18, 8)
+  precision  Int             @default(3)
+  isActive   Boolean         @default(true)
+
+  items               InventoryItem[]
+  purchaseOrderItems  PurchaseOrderItem[]
+  goodsReceiptItems   GoodsReceiptItem[]
+  recipeIngredients   RecipeIngredient[]
+  recipes             Recipe[]
+  stockMovements      StockMovement[]
+  supplierItems       SupplierItem[]
+  modifierIngredients ModifierOptionIngredient[]
+}
+
+model InventoryCategory {
+  id       String  @id @default(cuid())
+  name     String  @unique
+  code     String? @unique
+  isActive Boolean @default(true)
+
+  items InventoryItem[]
+}
+
+model InventoryItem {
+  id          String             @id @default(cuid())
+  sku         String             @unique
+  name        String
+  description String?
+  type        InventoryItemType  @default(RAW_MATERIAL)
+  category    InventoryCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  categoryId  String?
+  /// Stocking unit. Purchases and recipes may use any unit of the same type and
+  /// are converted on the way in.
+  uom         UnitOfMeasure      @relation(fields: [uomId], references: [id])
+  uomId       String
+  barcode     String?
+  imageUrl    String?
+
+  costingMethod    CostingMethod @default(WEIGHTED_AVERAGE)
+  /// Maintained by the costing job; the fallback when no batch is specified.
+  averageCost      Decimal       @default(0) @db.Decimal(18, 6)
+  lastPurchaseCost Decimal?      @db.Decimal(18, 6)
+
+  isPerishable    Boolean   @default(false)
+  trackBatches    Boolean   @default(false)
+  shelfLifeDays   Int?
+  /// Reorder policy, evaluated per location.
+  reorderLevel    Decimal?  @db.Decimal(18, 6)
+  reorderQuantity Decimal?  @db.Decimal(18, 6)
+  /// Expected loss when prepping (peeling, trimming), as a percentage.
+  yieldPercent    Decimal   @default(100) @db.Decimal(6, 3)
+  taxGroup        TaxGroup? @relation(fields: [taxGroupId], references: [id], onDelete: SetNull)
+  taxGroupId      String?
+  isActive        Boolean   @default(true)
+  createdById     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  stockLevels         StockLevel[]
+  batches             StockBatch[]
+  movements           StockMovement[]
+  supplierItems       SupplierItem[]
+  purchaseOrderItems  PurchaseOrderItem[]
+  goodsReceiptItems   GoodsReceiptItem[]
+  recipeIngredients   RecipeIngredient[]
+  recipeOutputs       Recipe[]
+  transferItems       StockTransferItem[]
+  countItems          StockCountItem[]
+  adjustmentItems     StockAdjustmentItem[]
+  wastages            Wastage[]
+  consumptions        ProductionConsumption[]
+  outputs             ProductionOutput[]
+  modifierIngredients ModifierOptionIngredient[]
+
+  @@index([type, isActive])
+  @@index([categoryId])
+}
+
+model StockLocation {
+  id        String            @id @default(cuid())
+  branch    Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId  String
+  name      String
+  code      String
+  type      StockLocationType @default(MAIN_STORE)
+  /// The location sales are deducted from by default.
+  isDefault Boolean           @default(false)
+  isActive  Boolean           @default(true)
+
+  levels       StockLevel[]
+  batches      StockBatch[]
+  movements    StockMovement[]
+  transfersOut StockTransfer[]   @relation("TransferFrom")
+  transfersIn  StockTransfer[]   @relation("TransferTo")
+  counts       StockCount[]
+  adjustments  StockAdjustment[]
+  receipts     GoodsReceipt[]
+  productions  ProductionOrder[]
+  wastages     Wastage[]
+
+  @@unique([branchId, code])
+  @@index([branchId])
+}
+
+/// Cached on-hand quantity. Rebuildable from StockMovement.
+model StockLevel {
+  id               String        @id @default(cuid())
+  item             InventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  itemId           String
+  location         StockLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  locationId       String
+  quantity         Decimal       @default(0) @db.Decimal(18, 6)
+  /// Held for confirmed-but-unprepared orders and open production runs.
+  reservedQuantity Decimal       @default(0) @db.Decimal(18, 6)
+  updatedAt        DateTime      @updatedAt
+
+  @@unique([itemId, locationId])
+  @@index([locationId])
+}
+
+/// A received lot. Consumed FIFO by expiry, then by receipt date.
+model StockBatch {
+  id                 String           @id @default(cuid())
+  item               InventoryItem    @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  itemId             String
+  location           StockLocation    @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  locationId         String
+  batchNumber        String
+  /// Supplier's own lot code, when different from ours.
+  supplierLotNumber  String?
+  initialQuantity    Decimal          @db.Decimal(18, 6)
+  remainingQuantity  Decimal          @db.Decimal(18, 6)
+  unitCost           Decimal          @db.Decimal(18, 6)
+  status             StockBatchStatus @default(ACTIVE)
+  manufacturedAt     DateTime?
+  expiryDate         DateTime?
+  receivedAt         DateTime         @default(now())
+  /// Where it came from: a GRN line, or a production run.
+  goodsReceiptItemId String?
+  productionOrderId  String?
+  createdAt          DateTime         @default(now())
+
+  movements     StockMovement[]
+  consumptions  ProductionConsumption[]
+  transferItems StockTransferItem[]
+
+  @@unique([itemId, locationId, batchNumber])
+  @@index([itemId, status])
+  @@index([expiryDate])
+}
+
+/// Append-only stock ledger. `quantity` is signed (negative = out) and always
+/// expressed in the item's stocking unit.
+model StockMovement {
+  id           String            @id @default(cuid())
+  item         InventoryItem     @relation(fields: [itemId], references: [id])
+  itemId       String
+  branch       Branch            @relation(fields: [branchId], references: [id])
+  branchId     String
+  location     StockLocation     @relation(fields: [locationId], references: [id])
+  locationId   String
+  batch        StockBatch?       @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  batchId      String?
+  type         StockMovementType
+  quantity     Decimal           @db.Decimal(18, 6)
+  uom          UnitOfMeasure?    @relation(fields: [uomId], references: [id])
+  uomId        String?
+  unitCost     Decimal           @default(0) @db.Decimal(18, 6)
+  totalCost    Decimal           @default(0) @db.Decimal(18, 4)
+  /// Running on-hand after this movement, for point-in-time valuation without
+  /// replaying the whole ledger.
+  balanceAfter Decimal?          @db.Decimal(18, 6)
+
+  /// What caused it. `order` is linked because sale deductions are queried by
+  /// order constantly; the rest are loose references.
+  order         Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderId       String?
+  referenceType String? // "GRN" | "PRODUCTION" | "TRANSFER" | "COUNT" | "WASTAGE"
+  referenceId   String?
+  notes         String?
+  performedById String?
+  occurredAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([itemId, occurredAt])
+  @@index([branchId, occurredAt])
+  @@index([locationId])
+  @@index([referenceType, referenceId])
+  @@index([orderId])
+}
+
+model Supplier {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  name            String
+  contactPerson   String?
+  email           String?
+  phone           String?
+  addressLine1    String?
+  city            String?
+  state           String?
+  country         String?
+  postalCode      String?
+  taxIdentifier   String?
+  /// Net payment terms in days; drives the AP ageing report.
+  paymentTermDays Int      @default(0)
+  creditLimit     Decimal? @db.Decimal(18, 4)
+  /// Payables control account, when this supplier is tracked separately.
+  accountId       String?
+  rating          Int?
+  notes           String?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  items          SupplierItem[]
+  purchaseOrders PurchaseOrder[]
+  goodsReceipts  GoodsReceipt[]
+  bills          SupplierBill[]
+}
+
+/// Supplier-specific price list for an item.
+model SupplierItem {
+  id               String        @id @default(cuid())
+  supplier         Supplier      @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  supplierId       String
+  item             InventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  itemId           String
+  supplierSku      String?
+  uom              UnitOfMeasure @relation(fields: [uomId], references: [id])
+  uomId            String
+  unitPrice        Decimal       @db.Decimal(18, 6)
+  minOrderQuantity Decimal?      @db.Decimal(18, 6)
+  leadTimeDays     Int?
+  isPreferred      Boolean       @default(false)
+  lastPurchasedAt  DateTime?
+
+  @@unique([supplierId, itemId])
+  @@index([itemId])
+}
+
+model PurchaseOrder {
+  id            String              @id @default(cuid())
+  poNumber      String              @unique
+  branch        Branch              @relation(fields: [branchId], references: [id])
+  branchId      String
+  supplier      Supplier            @relation(fields: [supplierId], references: [id])
+  supplierId    String
+  status        PurchaseOrderStatus @default(DRAFT)
+  orderDate     DateTime            @default(now())
+  expectedAt    DateTime?
+  currency      String              @default("PKR") @db.Char(3)
+  subtotal      Decimal             @default(0) @db.Decimal(18, 4)
+  taxTotal      Decimal             @default(0) @db.Decimal(18, 4)
+  discountTotal Decimal             @default(0) @db.Decimal(18, 4)
+  shippingCost  Decimal             @default(0) @db.Decimal(18, 4)
+  grandTotal    Decimal             @default(0) @db.Decimal(18, 4)
+  notes         String?
+  createdById   String?
+  approvedById  String?
+  approvedAt    DateTime?
+  cancelledAt   DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  items    PurchaseOrderItem[]
+  receipts GoodsReceipt[]
+
+  @@index([branchId, status])
+  @@index([supplierId])
+}
+
+model PurchaseOrderItem {
+  id               String        @id @default(cuid())
+  purchaseOrder    PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  purchaseOrderId  String
+  item             InventoryItem @relation(fields: [itemId], references: [id])
+  itemId           String
+  quantity         Decimal       @db.Decimal(18, 6)
+  uom              UnitOfMeasure @relation(fields: [uomId], references: [id])
+  uomId            String
+  unitPrice        Decimal       @db.Decimal(18, 6)
+  taxRate          Decimal       @default(0) @db.Decimal(9, 4)
+  discountAmount   Decimal       @default(0) @db.Decimal(18, 4)
+  lineTotal        Decimal       @db.Decimal(18, 4)
+  receivedQuantity Decimal       @default(0) @db.Decimal(18, 6)
+  notes            String?
+
+  receiptItems GoodsReceiptItem[]
+
+  @@index([purchaseOrderId])
+  @@index([itemId])
+}
+
+/// Goods receipt note — the moment stock and a payable both come into being.
+model GoodsReceipt {
+  id                    String         @id @default(cuid())
+  grnNumber             String         @unique
+  branch                Branch         @relation(fields: [branchId], references: [id])
+  branchId              String
+  location              StockLocation  @relation(fields: [locationId], references: [id])
+  locationId            String
+  supplier              Supplier       @relation(fields: [supplierId], references: [id])
+  supplierId            String
+  purchaseOrder         PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
+  purchaseOrderId       String?
+  status                DocumentStatus @default(DRAFT)
+  supplierInvoiceNumber String?
+  receivedAt            DateTime       @default(now())
+  subtotal              Decimal        @default(0) @db.Decimal(18, 4)
+  taxTotal              Decimal        @default(0) @db.Decimal(18, 4)
+  /// Freight/handling spread across lines to land the true unit cost.
+  landedCost            Decimal        @default(0) @db.Decimal(18, 4)
+  grandTotal            Decimal        @default(0) @db.Decimal(18, 4)
+  notes                 String?
+  receivedById          String?
+  approvedById          String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  items          GoodsReceiptItem[]
+  bill           SupplierBill?
+  journalEntries JournalEntry[]
+
+  @@index([branchId, receivedAt])
+  @@index([supplierId])
+}
+
+model GoodsReceiptItem {
+  id                  String             @id @default(cuid())
+  goodsReceipt        GoodsReceipt       @relation(fields: [goodsReceiptId], references: [id], onDelete: Cascade)
+  goodsReceiptId      String
+  item                InventoryItem      @relation(fields: [itemId], references: [id])
+  itemId              String
+  purchaseOrderItem   PurchaseOrderItem? @relation(fields: [purchaseOrderItemId], references: [id], onDelete: SetNull)
+  purchaseOrderItemId String?
+  quantity            Decimal            @db.Decimal(18, 6)
+  /// Received but rejected on inspection; does not enter stock.
+  rejectedQuantity    Decimal            @default(0) @db.Decimal(18, 6)
+  uom                 UnitOfMeasure      @relation(fields: [uomId], references: [id])
+  uomId               String
+  unitCost            Decimal            @db.Decimal(18, 6)
+  taxRate             Decimal            @default(0) @db.Decimal(9, 4)
+  lineTotal           Decimal            @db.Decimal(18, 4)
+  batchNumber         String?
+  expiryDate          DateTime?
+  notes               String?
+
+  @@index([goodsReceiptId])
+  @@index([itemId])
+}
+
+model StockTransfer {
+  id             String         @id @default(cuid())
+  transferNumber String         @unique
+  fromLocation   StockLocation  @relation("TransferFrom", fields: [fromLocationId], references: [id])
+  fromLocationId String
+  toLocation     StockLocation  @relation("TransferTo", fields: [toLocationId], references: [id])
+  toLocationId   String
+  status         DocumentStatus @default(DRAFT)
+  /// Set when the receiving side confirms; until then stock is in transit.
+  dispatchedAt   DateTime?
+  receivedAt     DateTime?
+  totalCost      Decimal        @default(0) @db.Decimal(18, 4)
+  notes          String?
+  createdById    String?
+  approvedById   String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  items StockTransferItem[]
+
+  @@index([fromLocationId])
+  @@index([toLocationId])
+}
+
+model StockTransferItem {
+  id               String        @id @default(cuid())
+  transfer         StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  transferId       String
+  item             InventoryItem @relation(fields: [itemId], references: [id])
+  itemId           String
+  batch            StockBatch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  batchId          String?
+  quantitySent     Decimal       @db.Decimal(18, 6)
+  quantityReceived Decimal?      @db.Decimal(18, 6)
+  unitCost         Decimal       @default(0) @db.Decimal(18, 6)
+
+  @@index([transferId])
+}
+
+/// Physical count sheet. Posting it writes COUNT_CORRECTION movements for every
+/// line whose variance is non-zero.
+model StockCount {
+  id            String         @id @default(cuid())
+  countNumber   String         @unique
+  branch        Branch         @relation(fields: [branchId], references: [id])
+  branchId      String
+  location      StockLocation  @relation(fields: [locationId], references: [id])
+  locationId    String
+  status        DocumentStatus @default(DRAFT)
+  /// Partial counts (one category, one shelf) are the norm; full counts are rare.
+  scope         String?
+  startedAt     DateTime       @default(now())
+  completedAt   DateTime?
+  varianceValue Decimal        @default(0) @db.Decimal(18, 4)
+  countedById   String?
+  approvedById  String?
+  notes         String?
+
+  items StockCountItem[]
+
+  @@index([branchId, startedAt])
+}
+
+model StockCountItem {
+  id               String        @id @default(cuid())
+  stockCount       StockCount    @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+  stockCountId     String
+  item             InventoryItem @relation(fields: [itemId], references: [id])
+  itemId           String
+  systemQuantity   Decimal       @db.Decimal(18, 6)
+  countedQuantity  Decimal       @db.Decimal(18, 6)
+  varianceQuantity Decimal       @db.Decimal(18, 6)
+  unitCost         Decimal       @default(0) @db.Decimal(18, 6)
+  varianceValue    Decimal       @default(0) @db.Decimal(18, 4)
+  reason           String?
+
+  @@unique([stockCountId, itemId])
+}
+
+/// Manual correction outside of a count (breakage found, opening balance fix).
+model StockAdjustment {
+  id               String         @id @default(cuid())
+  adjustmentNumber String         @unique
+  location         StockLocation  @relation(fields: [locationId], references: [id])
+  locationId       String
+  status           DocumentStatus @default(DRAFT)
+  reason           String
+  totalValue       Decimal        @default(0) @db.Decimal(18, 4)
+  createdById      String?
+  approvedById     String?
+  approvedAt       DateTime?
+  createdAt        DateTime       @default(now())
+
+  items StockAdjustmentItem[]
+
+  @@index([locationId])
+}
+
+model StockAdjustmentItem {
+  id           String          @id @default(cuid())
+  adjustment   StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  adjustmentId String
+  item         InventoryItem   @relation(fields: [itemId], references: [id])
+  itemId       String
+  /// Signed: positive adds stock, negative removes it.
+  quantity     Decimal         @db.Decimal(18, 6)
+  unitCost     Decimal         @default(0) @db.Decimal(18, 6)
+  totalCost    Decimal         @default(0) @db.Decimal(18, 4)
+  note         String?
+
+  @@index([adjustmentId])
+}
+
+/// Loss recorded against a reason code — the number the kitchen is measured on.
+model Wastage {
+  id                String           @id @default(cuid())
+  item              InventoryItem    @relation(fields: [itemId], references: [id])
+  itemId            String
+  location          StockLocation    @relation(fields: [locationId], references: [id])
+  locationId        String
+  productionOrder   ProductionOrder? @relation(fields: [productionOrderId], references: [id], onDelete: SetNull)
+  productionOrderId String?
+  quantity          Decimal          @db.Decimal(18, 6)
+  unitCost          Decimal          @default(0) @db.Decimal(18, 6)
+  totalCost         Decimal          @default(0) @db.Decimal(18, 4)
+  reason            WastageReason
+  notes             String?
+  photoUrl          String?
+  recordedById      String?
+  approvedById      String?
+  occurredAt        DateTime         @default(now())
+  createdAt         DateTime         @default(now())
+
+  @@index([locationId, occurredAt])
+  @@index([itemId])
+  @@index([reason])
+}

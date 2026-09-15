@@ -1,0 +1,193 @@
+// ---------------------------------------------------------------------------
+// Payments.
+//
+// Provider-agnostic: `provider` + `providerPaymentId` cover Stripe, Razorpay,
+// PayPal, a UPI PSP or the cash drawer. An order may have several Payment rows
+// (split payment, retry after failure, tip added later), so the order's
+// paymentState is derived from the sum of captured payments minus refunds.
+//
+// COD is a Payment with method CASH_ON_DELIVERY that stays PENDING until the
+// driver or cashier marks it collected, at which point it lands in a cash
+// register session and is reconciled at close.
+// ---------------------------------------------------------------------------
+
+enum PaymentMethod {
+  CASH
+  CASH_ON_DELIVERY
+  CARD
+  UPI
+  NET_BANKING
+  WALLET
+  BANK_TRANSFER
+  GIFT_CARD
+  STORE_CREDIT
+  AGGREGATOR // settled by Swiggy/UberEats etc.
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  CANCELLED
+  EXPIRED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  PROCESSING
+  COMPLETED
+  FAILED
+  REJECTED
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  order          Order         @relation(fields: [orderId], references: [id])
+  orderId        String
+  branch         Branch        @relation(fields: [branchId], references: [id])
+  branchId       String
+  method         PaymentMethod
+  provider       String? // "stripe" | "razorpay" | "cash" | "pos-terminal"
+  status         PaymentStatus @default(PENDING)
+  amount         Decimal       @db.Decimal(18, 4)
+  currency       String        @default("PKR") @db.Char(3)
+  /// Provider fee, so net settlement can be posted to the ledger.
+  feeAmount      Decimal       @default(0) @db.Decimal(18, 4)
+  refundedAmount Decimal       @default(0) @db.Decimal(18, 4)
+
+  providerOrderId   String? // the intent/order created before checkout
+  providerPaymentId String? @unique
+  providerSignature String?
+  /// Client-supplied key that makes "charge this order" safe to retry.
+  idempotencyKey    String? @unique
+
+  cardBrand      String?
+  cardLast4      String?
+  upiHandle      String?
+  /// Full provider response, kept for disputes and reconciliation.
+  rawResponse    Json?
+  failureCode    String?
+  failureMessage String?
+
+  /// COD / counter cash: who took the money and into which drawer.
+  collectedById     String?
+  registerSession   CashRegisterSession? @relation(fields: [registerSessionId], references: [id], onDelete: SetNull)
+  registerSessionId String?
+
+  authorizedAt DateTime?
+  capturedAt   DateTime?
+  failedAt     DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  refunds        Refund[]
+  journalEntries JournalEntry[]
+
+  @@index([orderId])
+  @@index([branchId, status])
+  @@index([provider, providerOrderId])
+  @@index([createdAt])
+}
+
+model Refund {
+  id               String       @id @default(cuid())
+  payment          Payment      @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  paymentId        String
+  order            Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId          String
+  amount           Decimal      @db.Decimal(18, 4)
+  reason           String?
+  status           RefundStatus @default(REQUESTED)
+  providerRefundId String?      @unique
+  requestedById    String?
+  approvedById     String?
+  approvedAt       DateTime?
+  processedAt      DateTime?
+  failureMessage   String?
+  rawResponse      Json?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([orderId])
+  @@index([status])
+}
+
+/// Raw gateway callbacks. Stored before processing and keyed on the provider's
+/// own event id so a redelivered webhook is a no-op.
+model PaymentWebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  eventId     String
+  eventType   String
+  payload     Json
+  signature   String?
+  processedAt DateTime?
+  status      String    @default("RECEIVED") // RECEIVED | PROCESSED | FAILED | IGNORED
+  error       String?
+  attempts    Int       @default(0)
+  createdAt   DateTime  @default(now())
+
+  @@unique([provider, eventId])
+  @@index([status])
+}
+
+enum RegisterSessionStatus {
+  OPEN
+  CLOSED
+  RECONCILED
+}
+
+/// A cashier's / driver's shift against the till. Closing it produces the
+/// variance that finance posts as cash over/short.
+model CashRegisterSession {
+  id           String                @id @default(cuid())
+  branch       Branch                @relation(fields: [branchId], references: [id])
+  branchId     String
+  registerName String                @default("main")
+  openedById   String
+  closedById   String?
+  status       RegisterSessionStatus @default(OPEN)
+  openingFloat Decimal               @default(0) @db.Decimal(18, 4)
+  /// Filled at close: what the system says vs what was physically counted.
+  expectedCash Decimal?              @db.Decimal(18, 4)
+  countedCash  Decimal?              @db.Decimal(18, 4)
+  variance     Decimal?              @db.Decimal(18, 4)
+  notes        String?
+  openedAt     DateTime              @default(now())
+  closedAt     DateTime?
+
+  payments  Payment[]
+  movements CashMovement[]
+
+  @@index([branchId, status])
+}
+
+enum CashMovementType {
+  SALE
+  REFUND
+  PAY_IN
+  PAY_OUT // petty cash spend
+  DROP // moved to safe
+  TIP_OUT
+  ADJUSTMENT
+}
+
+model CashMovement {
+  id            String              @id @default(cuid())
+  session       CashRegisterSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId     String
+  type          CashMovementType
+  amount        Decimal             @db.Decimal(18, 4) // signed: negative for money out
+  reason        String?
+  referenceType String? // "ORDER" | "EXPENSE" | ...
+  referenceId   String?
+  performedById String?
+  createdAt     DateTime            @default(now())
+
+  @@index([sessionId])
+}

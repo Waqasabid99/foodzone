@@ -1,0 +1,828 @@
+// ---------------------------------------------------------------------------
+// Creator program: customers film the food they bought, the team approves it,
+// the video goes live on that product, and sales it drives earn store credit.
+//
+// Lifecycle
+//   1. A user who has at least one COMPLETED order sees the invite on the order
+//      page. Accepting the current CreatorTerms version creates a
+//      CreatorProfile on the SAME user account (no second login).
+//   2. They upload a video against one purchased OrderItem. Duration bounds and
+//      the attempt limit come from CreatorProgramConfig (15-30s, 5 attempts).
+//      One CreatorVideo per order line; re-uploads replace the asset, bump
+//      `attemptCount` and are recorded as CreatorVideoAsset + CreatorVideoReview
+//      history. On the 5th rejection the row locks permanently.
+//   3. Live videos link to exactly one product. Watching only increments view
+//      counters. Attribution is created ONLY when the viewer presses add-to-cart
+//      from the video.
+//   4. Attribution lives on the cart (guest carts included, keyed by sessionId
+//      and claimed at checkout registration), one live row per cart+product,
+//      last video wins. It expires with the cart after
+//      `attributionWindowDays`.
+//   5. Placing the order copies live attributions onto the order. When the
+//      order COMPLETES, the commission engine resolves one rule per attributed
+//      line and writes a CreatorEarning; the credit lands in the creator's
+//      wallet after the hold period.
+//
+// Money here is store credit only: it never leaves as cash. Earnings credit a
+// CreatorWallet, and spending it is a Payment with method STORE_CREDIT tied to
+// the redeeming wallet transaction.
+// ---------------------------------------------------------------------------
+
+enum CreatorStatus {
+  PENDING // signed up, awaiting first approved video / manual vetting
+  ACTIVE
+  SUSPENDED // temporary, see suspendedUntil
+  BANNED
+}
+
+enum CreatorVideoStatus {
+  DRAFT // asset uploaded, not submitted
+  PROCESSING // transcoding / duration check
+  PENDING_REVIEW
+  APPROVED // live on the product page
+  REJECTED // re-uploadable while attempts remain
+  LOCKED // rejection limit reached, no further uploads
+  TAKEN_DOWN // was live, pulled by moderation
+  ARCHIVED // withdrawn by the creator
+}
+
+enum CreatorVideoDecision {
+  APPROVED
+  REJECTED
+  TAKEN_DOWN
+  REINSTATED
+}
+
+enum CreatorVideoRejectionReason {
+  ORDER_NOT_VERIFIED // the order doesn't back this product
+  PRODUCT_MISMATCH // video shows a different item
+  DURATION_OUT_OF_RANGE
+  POOR_VIDEO_QUALITY
+  POOR_AUDIO_QUALITY
+  INAPPROPRIATE_CONTENT
+  THIRD_PARTY_CONTENT // not filmed by the creator / watermarked
+  PERSONAL_INFO_VISIBLE
+  DUPLICATE_SUBMISSION
+  BRANDING_VIOLATION
+  OTHER
+}
+
+enum CreatorVideoSurface {
+  PRODUCT_PAGE
+  VIDEO_FEED
+  SHARE_LINK
+  SEARCH
+  HOME
+  QR_MENU
+}
+
+enum ShareChannel {
+  WHATSAPP
+  INSTAGRAM
+  FACEBOOK
+  X
+  TELEGRAM
+  SNAPCHAT
+  YOUTUBE
+  COPY_LINK
+  NATIVE_SHEET
+  OTHER
+}
+
+enum CreatorAttributionStatus {
+  ACTIVE // sitting on a live cart, inside the window
+  CONVERTED // carried onto a placed order
+  EXPIRED // window elapsed / cart emptied
+  SUPERSEDED // a later video for the same product replaced it
+  REVOKED // manually removed (fraud, takedown)
+}
+
+enum CreatorRewardType {
+  PERCENTAGE
+  FIXED
+}
+
+/// What the percentage/minimum is measured against.
+enum CreatorCommissionBasis {
+  ATTRIBUTED_LINE // qty x price of the attributed product line
+  ORDER_SUBTOTAL
+  ORDER_TOTAL
+}
+
+enum CreatorEarningStatus {
+  PENDING // order complete, inside the refund hold window
+  APPROVED // cleared, waiting on the credit job
+  CREDITED // wallet credited
+  NOT_QUALIFIED // attributed sale that matched no rule -> appreciation only
+  REVERSED // order refunded/cancelled after crediting
+  REJECTED // voided by an admin (fraud)
+}
+
+enum CreatorWalletTxnType {
+  EARNING_CREDIT
+  REDEMPTION // spent on an order
+  REDEMPTION_REVERSAL // that order was cancelled, credit returned
+  REVERSAL // earning clawed back
+  BONUS
+  ADJUSTMENT
+  EXPIRY
+}
+
+enum CreatorAppreciationType {
+  FIRST_VIDEO_APPROVED
+  FIRST_SALE
+  SALE_WITHOUT_COMMISSION // drove a sale that missed the rule threshold
+  VIEW_MILESTONE
+  SHARE_MILESTONE
+  SALES_MILESTONE
+  TOP_CREATOR_OF_WEEK
+}
+
+enum CreatorStrikeReason {
+  MISLEADING_CONTENT
+  INAPPROPRIATE_CONTENT
+  THIRD_PARTY_CONTENT
+  FAKE_ORDER
+  ATTRIBUTION_ABUSE // self-purchase rings, click farming
+  REPEATED_REJECTIONS
+  OTHER
+}
+
+enum CreatorReportReason {
+  INAPPROPRIATE
+  MISLEADING
+  SPAM
+  NOT_THE_PRODUCT
+  COPYRIGHT
+  OTHER
+}
+
+// ---------------------------------------------------------------------------
+// Program configuration and terms
+// ---------------------------------------------------------------------------
+
+/// Single-row, admin-editable program settings. Kept as typed columns rather
+/// than generic Setting JSON because every one of these is enforced in code and
+/// shown in the creator UI.
+model CreatorProgramConfig {
+  id                           String   @id @default("default")
+  isEnabled                    Boolean  @default(true)
+  /// Upload constraints, in seconds and bytes.
+  minVideoSeconds              Int      @default(15)
+  maxVideoSeconds              Int      @default(30)
+  maxVideoSizeBytes            Int      @default(104857600)
+  allowedMimeTypes             String[] @default(["video/mp4", "video/quicktime"])
+  /// Total upload attempts per purchased line before it locks forever.
+  maxUploadAttempts            Int      @default(5)
+  /// How long a video may be submitted after the order completed.
+  submissionWindowDays         Int      @default(14)
+  /// Cart-level attribution lifetime.
+  attributionWindowDays        Int      @default(7)
+  /// Days an earning sits PENDING after order completion, covering the refund
+  /// window, before it is credited.
+  earningHoldDays              Int      @default(7)
+  /// Store credit rules.
+  minRedemptionAmount          Decimal  @default(0) @db.Decimal(18, 4)
+  /// Cap on how much of one order may be paid with credit (percent of total).
+  maxRedemptionPercent         Decimal  @default(100) @db.Decimal(6, 3)
+  creditExpiryDays             Int?
+  /// Guardrails against self-dealing and runaway payouts.
+  allowSelfPurchaseEarning     Boolean  @default(false)
+  maxEarningPerOrder           Decimal? @db.Decimal(18, 4)
+  maxEarningPerCreatorPerMonth Decimal? @db.Decimal(18, 4)
+  /// Strike points that trigger an automatic suspension / ban.
+  suspendAtStrikePoints        Int      @default(3)
+  banAtStrikePoints            Int      @default(5)
+  autoApproveVideos            Boolean  @default(false)
+  updatedById                  String?
+  updatedAt                    DateTime @updatedAt
+}
+
+/// Versioned program terms. A creator's acceptance is pinned to the version
+/// they actually saw; publishing a new version can force re-acceptance.
+model CreatorTerms {
+  id          String   @id @default(cuid())
+  version     String   @unique // "2026-09-v1"
+  title       String
+  content     String
+  documentUrl String?
+  isCurrent   Boolean  @default(false)
+  publishedAt DateTime @default(now())
+  createdById String?
+
+  acceptances CreatorTermsAcceptance[]
+}
+
+model CreatorTermsAcceptance {
+  id         String         @id @default(cuid())
+  creator    CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId  String
+  terms      CreatorTerms   @relation(fields: [termsId], references: [id])
+  termsId    String
+  acceptedAt DateTime       @default(now())
+  ipAddress  String?
+  userAgent  String?
+
+  @@unique([creatorId, termsId])
+}
+
+// ---------------------------------------------------------------------------
+// Creator identity
+// ---------------------------------------------------------------------------
+
+/// The same User, upgraded. Eligibility (at least one completed order) is
+/// checked at signup and the qualifying order is recorded for audit.
+model CreatorProfile {
+  id                    String        @id @default(cuid())
+  user                  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId                String        @unique
+  handle                String        @unique
+  displayName           String
+  bio                   String?
+  avatarUrl             String?
+  status                CreatorStatus @default(ACTIVE)
+  /// The completed order that unlocked the program for this user.
+  qualifyingOrderId     String?
+  /// Denormalised counters for the dashboard; recomputable from the tables.
+  videoCount            Int           @default(0)
+  approvedVideoCount    Int           @default(0)
+  totalViews            Int           @default(0)
+  totalShares           Int           @default(0)
+  totalAttributedOrders Int           @default(0)
+  lifetimeEarned        Decimal       @default(0) @db.Decimal(18, 4)
+  strikePoints          Int           @default(0)
+  suspendedUntil        DateTime?
+  suspensionReason      String?
+  bannedAt              DateTime?
+  joinedAt              DateTime      @default(now())
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  videos            CreatorVideo[]
+  termsAccepted     CreatorTermsAcceptance[]
+  attributions      CreatorAttribution[]
+  orderAttributions CreatorOrderAttribution[]
+  earnings          CreatorEarning[]
+  wallet            CreatorWallet?
+  appreciations     CreatorAppreciation[]
+  strikes           CreatorStrike[]
+  shareLinks        CreatorShareLink[]
+  ruleOverrides     CreatorCommissionRule[]
+
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Videos and moderation
+// ---------------------------------------------------------------------------
+
+/// One video per purchased order line. Re-uploads mutate this row (new asset,
+/// attemptCount + 1); the per-attempt history lives in CreatorVideoAsset and
+/// CreatorVideoReview.
+model CreatorVideo {
+  id          String         @id @default(cuid())
+  creator     CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId   String
+  /// Proof of purchase: the exact line the creator bought.
+  order       Order          @relation(fields: [orderId], references: [id])
+  orderId     String
+  orderItemId String         @unique
+  /// What the video is linked to on the storefront. Clicking add-to-cart puts
+  /// this exact product/variant in the cart.
+  product     Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId   String
+  variantId   String?
+
+  status          CreatorVideoStatus @default(DRAFT)
+  caption         String?
+  /// Current live asset. Older attempts remain in `assets`.
+  videoUrl        String?
+  storageKey      String?
+  thumbnailUrl    String?
+  durationSeconds Int?
+  widthPx         Int?
+  heightPx        Int?
+  sizeBytes       Int?
+  mimeType        String?
+
+  /// Submissions used out of CreatorProgramConfig.maxUploadAttempts.
+  attemptCount        Int                          @default(0)
+  rejectionCount      Int                          @default(0)
+  isLocked            Boolean                      @default(false)
+  lastRejectionReason CreatorVideoRejectionReason?
+  lastRejectionNote   String?
+
+  submittedAt    DateTime?
+  reviewedById   String?
+  reviewedAt     DateTime?
+  publishedAt    DateTime?
+  takenDownAt    DateTime?
+  takedownReason String?
+
+  /// Denormalised engagement, incremented by the event tables below.
+  viewCount            Int     @default(0)
+  uniqueViewerCount    Int     @default(0)
+  completedViewCount   Int     @default(0)
+  likeCount            Int     @default(0)
+  shareCount           Int     @default(0)
+  addToCartCount       Int     @default(0)
+  attributedOrderCount Int     @default(0)
+  earnedTotal          Decimal @default(0) @db.Decimal(18, 4)
+  /// Manual ordering weight for the storefront feed.
+  featuredRank         Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assets            CreatorVideoAsset[]
+  reviews           CreatorVideoReview[]
+  views             CreatorVideoView[]
+  likes             CreatorVideoLike[]
+  shares            CreatorVideoShare[]
+  shareLinks        CreatorShareLink[]
+  reports           CreatorVideoReport[]
+  attributions      CreatorAttribution[]
+  orderAttributions CreatorOrderAttribution[]
+  earnings          CreatorEarning[]
+  strikes           CreatorStrike[]
+  appreciations     CreatorAppreciation[]
+  dailyStats        CreatorVideoDailyStat[]
+
+  @@index([productId, status])
+  @@index([creatorId, status])
+  @@index([status, publishedAt])
+}
+
+/// Every uploaded file, including superseded attempts — kept so a moderator can
+/// see what was rejected and why.
+model CreatorVideoAsset {
+  id              String       @id @default(cuid())
+  video           CreatorVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId         String
+  attemptNumber   Int
+  videoUrl        String
+  storageKey      String       @unique
+  thumbnailUrl    String?
+  durationSeconds Int?
+  sizeBytes       Int?
+  mimeType        String?
+  /// False once a later attempt replaces it.
+  isCurrent       Boolean      @default(true)
+  uploadedAt      DateTime     @default(now())
+
+  @@unique([videoId, attemptNumber])
+}
+
+/// Immutable moderation log — one row per decision.
+model CreatorVideoReview {
+  id              String                       @id @default(cuid())
+  video           CreatorVideo                 @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId         String
+  attemptNumber   Int
+  decision        CreatorVideoDecision
+  reason          CreatorVideoRejectionReason?
+  note            String?
+  /// Checks the reviewer confirmed: order valid, product matches, quality ok.
+  orderVerified   Boolean                      @default(false)
+  productMatched  Boolean                      @default(false)
+  qualityApproved Boolean                      @default(false)
+  reviewedById    String?
+  reviewedAt      DateTime                     @default(now())
+
+  @@index([videoId, attemptNumber])
+  @@index([reviewedAt])
+}
+
+/// Viewer-submitted report on a live video.
+model CreatorVideoReport {
+  id           String              @id @default(cuid())
+  video        CreatorVideo        @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId      String
+  reportedById String?
+  sessionId    String?
+  reason       CreatorReportReason
+  note         String?
+  status       String              @default("OPEN") // OPEN | REVIEWED | DISMISSED | ACTIONED
+  reviewedById String?
+  reviewedAt   DateTime?
+  createdAt    DateTime            @default(now())
+
+  @@index([videoId, status])
+}
+
+/// Moderation strike against a creator. Points accumulate; the thresholds in
+/// CreatorProgramConfig drive automatic suspension and ban.
+model CreatorStrike {
+  id            String              @id @default(cuid())
+  creator       CreatorProfile      @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId     String
+  video         CreatorVideo?       @relation(fields: [videoId], references: [id], onDelete: SetNull)
+  videoId       String?
+  reason        CreatorStrikeReason
+  points        Int                 @default(1)
+  note          String?
+  /// Strikes may age out.
+  expiresAt     DateTime?
+  revokedAt     DateTime?
+  revokedReason String?
+  issuedById    String?
+  createdAt     DateTime            @default(now())
+
+  @@index([creatorId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Engagement
+// ---------------------------------------------------------------------------
+
+/// Raw view events. High volume — roll up into CreatorVideoDailyStat and prune
+/// on a retention schedule.
+model CreatorVideoView {
+  id             String              @id @default(cuid())
+  video          CreatorVideo        @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId        String
+  viewerId       String? // User.id when signed in
+  sessionId      String? // anonymous device/session token
+  surface        CreatorVideoSurface @default(PRODUCT_PAGE)
+  shareLinkId    String?
+  watchedSeconds Int                 @default(0)
+  /// Watched to the end (or past the completion threshold).
+  isComplete     Boolean             @default(false)
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime            @default(now())
+
+  @@index([videoId, createdAt])
+  @@index([sessionId])
+  @@index([viewerId])
+}
+
+model CreatorVideoLike {
+  id        String       @id @default(cuid())
+  video     CreatorVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId   String
+  userId    String?
+  sessionId String?
+  createdAt DateTime     @default(now())
+
+  @@unique([videoId, userId])
+  @@unique([videoId, sessionId])
+  @@index([videoId])
+}
+
+/// A share action taken on a video (native sheet, WhatsApp, Instagram, copy
+/// link). Counts the intent; clicks that come back are tracked on the link.
+model CreatorVideoShare {
+  id          String            @id @default(cuid())
+  video       CreatorVideo      @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId     String
+  shareLink   CreatorShareLink? @relation(fields: [shareLinkId], references: [id], onDelete: SetNull)
+  shareLinkId String?
+  channel     ShareChannel      @default(COPY_LINK)
+  sharedById  String?
+  sessionId   String?
+  createdAt   DateTime          @default(now())
+
+  @@index([videoId, channel])
+}
+
+/// Trackable short link for a video, so off-platform traffic is measurable.
+/// A creator gets their own link; viewers who reshare can get their own too.
+model CreatorShareLink {
+  id            String          @id @default(cuid())
+  code          String          @unique
+  video         CreatorVideo    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId       String
+  creator       CreatorProfile? @relation(fields: [creatorId], references: [id], onDelete: SetNull)
+  creatorId     String?
+  channel       ShareChannel?
+  /// UTM-style tags carried through to analytics.
+  campaign      String?
+  createdById   String?
+  clickCount    Int             @default(0)
+  lastClickedAt DateTime?
+  isActive      Boolean         @default(true)
+  createdAt     DateTime        @default(now())
+
+  shares CreatorVideoShare[]
+  clicks CreatorShareLinkClick[]
+
+  @@index([videoId])
+}
+
+model CreatorShareLinkClick {
+  id          String           @id @default(cuid())
+  shareLink   CreatorShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
+  shareLinkId String
+  sessionId   String?
+  userId      String?
+  referrer    String?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime         @default(now())
+
+  @@index([shareLinkId, createdAt])
+}
+
+/// Pre-aggregated per-day metrics — what the creator dashboard charts read,
+/// so it never scans the raw event tables.
+model CreatorVideoDailyStat {
+  id                String       @id @default(cuid())
+  video             CreatorVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId           String
+  statDate          DateTime     @db.Date
+  views             Int          @default(0)
+  uniqueViewers     Int          @default(0)
+  completedViews    Int          @default(0)
+  likes             Int          @default(0)
+  shares            Int          @default(0)
+  linkClicks        Int          @default(0)
+  addToCarts        Int          @default(0)
+  attributedOrders  Int          @default(0)
+  attributedRevenue Decimal      @default(0) @db.Decimal(18, 4)
+  earnings          Decimal      @default(0) @db.Decimal(18, 4)
+
+  @@unique([videoId, statDate])
+  @@index([statDate])
+}
+
+// ---------------------------------------------------------------------------
+// Attribution
+// ---------------------------------------------------------------------------
+
+/// Live attribution, held on the cart. Created only on add-to-cart from a
+/// video — never on a plain view. One row per (cart, product): a later video for
+/// the same product overwrites it (last touch wins) and the previous touch stays
+/// in CreatorAttributionTouch. Expires with the cart after
+/// CreatorProgramConfig.attributionWindowDays.
+model CreatorAttribution {
+  id               String                   @id @default(cuid())
+  cart             Cart                     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  cartId           String
+  cartItemId       String?
+  video            CreatorVideo             @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId          String
+  creator          CreatorProfile           @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId        String
+  product          Product                  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId        String
+  variantId        String?
+  /// Viewer identity at click time. Guest carts carry only sessionId; userId is
+  /// filled in when the cart is claimed at checkout registration/login.
+  viewerId         String?
+  sessionId        String?
+  surface          CreatorVideoSurface      @default(PRODUCT_PAGE)
+  shareLinkId      String?
+  status           CreatorAttributionStatus @default(ACTIVE)
+  attributedAt     DateTime                 @default(now())
+  expiresAt        DateTime
+  convertedOrderId String?
+  touchCount       Int                      @default(1)
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  touches CreatorAttributionTouch[]
+
+  /// One live attribution per product per cart.
+  @@unique([cartId, productId])
+  @@index([videoId])
+  @@index([creatorId])
+  @@index([expiresAt])
+  @@index([sessionId])
+}
+
+/// Append-only record of every add-to-cart touch, including the ones that were
+/// overwritten. This is the audit trail behind "last video wins".
+model CreatorAttributionTouch {
+  id            String              @id @default(cuid())
+  attribution   CreatorAttribution  @relation(fields: [attributionId], references: [id], onDelete: Cascade)
+  attributionId String
+  videoId       String
+  creatorId     String
+  surface       CreatorVideoSurface @default(PRODUCT_PAGE)
+  shareLinkId   String?
+  occurredAt    DateTime            @default(now())
+
+  @@index([attributionId, occurredAt])
+}
+
+/// Attribution frozen onto a placed order. Copied from the cart at checkout,
+/// because the cart is emptied afterwards. This — not the cart row — is what the
+/// commission engine reads when the order completes.
+model CreatorOrderAttribution {
+  id             String         @id @default(cuid())
+  order          Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId        String
+  orderItemId    String?
+  video          CreatorVideo   @relation(fields: [videoId], references: [id])
+  videoId        String
+  creator        CreatorProfile @relation(fields: [creatorId], references: [id])
+  creatorId      String
+  productId      String
+  variantId      String?
+  /// Snapshot of the line as ordered — the viewer is free to change quantity or
+  /// variant, and the rule is evaluated against what was actually bought.
+  quantity       Int            @default(1)
+  lineAmount     Decimal        @default(0) @db.Decimal(18, 4)
+  /// True when the buyer is the creator themselves; blocked from earning unless
+  /// CreatorProgramConfig.allowSelfPurchaseEarning is on.
+  isSelfPurchase Boolean        @default(false)
+  attributedAt   DateTime
+  createdAt      DateTime       @default(now())
+
+  earning CreatorEarning?
+
+  @@unique([orderId, productId])
+  @@index([creatorId])
+  @@index([videoId])
+}
+
+// ---------------------------------------------------------------------------
+// Commission rules
+// ---------------------------------------------------------------------------
+
+/// Admin-defined payout rules. Several may exist; exactly ONE is applied per
+/// attributed line — the highest `priority` among those whose conditions match,
+/// ties broken by specificity (product > category > global) then most recent.
+/// Rules are never stacked, and an earning snapshots the resolved values so
+/// later edits cannot rewrite history.
+model CreatorCommissionRule {
+  id              String                 @id @default(cuid())
+  name            String
+  description     String?
+  rewardType      CreatorRewardType      @default(PERCENTAGE)
+  /// Percent (0-100) when PERCENTAGE, a currency amount when FIXED.
+  rewardValue     Decimal                @db.Decimal(18, 4)
+  /// What the reward is computed on.
+  basis           CreatorCommissionBasis @default(ATTRIBUTED_LINE)
+  /// Ceiling on a percentage payout.
+  maxRewardAmount Decimal?               @db.Decimal(18, 4)
+
+  /// Qualifying conditions. `minOrderAmount` is the "5% on orders over 2000"
+  /// gate; `conditionBasis` says whether that threshold looks at the order or
+  /// just the attributed line.
+  conditionBasis  CreatorCommissionBasis @default(ORDER_TOTAL)
+  minOrderAmount  Decimal?               @db.Decimal(18, 4)
+  minLineQuantity Int?
+
+  /// Scope. Empty arrays / no targets mean "applies everywhere".
+  branchIds  String[]
+  channels   OrderChannel[]
+  orderTypes OrderType[]
+  /// Set to restrict the rule to one creator (a negotiated rate).
+  creator    CreatorProfile? @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId  String?
+
+  priority          Int       @default(0)
+  startsAt          DateTime?
+  endsAt            DateTime?
+  isActive          Boolean   @default(true)
+  /// Budget guards, evaluated before the earning is written.
+  maxPayoutPerOrder Decimal?  @db.Decimal(18, 4)
+  totalBudget       Decimal?  @db.Decimal(18, 4)
+  budgetSpent       Decimal   @default(0) @db.Decimal(18, 4)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  targets  CreatorCommissionRuleTarget[]
+  earnings CreatorEarning[]
+
+  @@index([isActive, priority])
+}
+
+/// Restricts (or excludes) a rule for specific products or categories.
+/// Specificity for tie-breaking: PRODUCT beats CATEGORY beats no target.
+model CreatorCommissionRuleTarget {
+  id         String                @id @default(cuid())
+  rule       CreatorCommissionRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  ruleId     String
+  targetType PromotionTargetType
+  targetId   String
+  isExcluded Boolean               @default(false)
+
+  @@unique([ruleId, targetType, targetId])
+  @@index([targetType, targetId])
+}
+
+// ---------------------------------------------------------------------------
+// Earnings, wallet and appreciation
+// ---------------------------------------------------------------------------
+
+/// One row per attributed line on a completed order — including the ones that
+/// earned nothing (status NOT_QUALIFIED), so the dashboard can show "this sale
+/// happened but missed the threshold" instead of silence.
+model CreatorEarning {
+  id            String                  @id @default(cuid())
+  creator       CreatorProfile          @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId     String
+  video         CreatorVideo            @relation(fields: [videoId], references: [id])
+  videoId       String
+  order         Order                   @relation(fields: [orderId], references: [id])
+  orderId       String
+  attribution   CreatorOrderAttribution @relation(fields: [attributionId], references: [id], onDelete: Cascade)
+  attributionId String                  @unique
+  rule          CreatorCommissionRule?  @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+  ruleId        String?
+
+  status             CreatorEarningStatus    @default(PENDING)
+  /// Snapshot of the rule as applied — the rule may change or be deleted later.
+  ruleNameSnapshot   String?
+  rewardType         CreatorRewardType?
+  rewardValue        Decimal?                @db.Decimal(18, 4)
+  basis              CreatorCommissionBasis?
+  /// The amount the reward was computed on, and the result.
+  basisAmount        Decimal                 @default(0) @db.Decimal(18, 4)
+  amount             Decimal                 @default(0) @db.Decimal(18, 4)
+  currency           String                  @default("PKR") @db.Char(3)
+  /// Why nothing was paid, when status is NOT_QUALIFIED.
+  disqualifiedReason String?
+
+  orderCompletedAt DateTime?
+  /// End of the refund hold; the credit job picks up rows past this.
+  availableAt      DateTime?
+  creditedAt       DateTime?
+  reversedAt       DateTime?
+  reversalReason   String?
+  reviewedById     String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  transactions CreatorWalletTransaction[]
+
+  @@unique([orderId, videoId])
+  @@index([creatorId, status])
+  @@index([status, availableAt])
+}
+
+/// Store-credit balance. `pendingBalance` mirrors earnings still inside the
+/// hold window; only `balance` is spendable.
+model CreatorWallet {
+  id               String         @id @default(cuid())
+  creator          CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId        String         @unique
+  currency         String         @default("PKR") @db.Char(3)
+  balance          Decimal        @default(0) @db.Decimal(18, 4)
+  pendingBalance   Decimal        @default(0) @db.Decimal(18, 4)
+  lifetimeEarned   Decimal        @default(0) @db.Decimal(18, 4)
+  lifetimeRedeemed Decimal        @default(0) @db.Decimal(18, 4)
+  lifetimeExpired  Decimal        @default(0) @db.Decimal(18, 4)
+  isLocked         Boolean        @default(false)
+  lockReason       String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  transactions CreatorWalletTransaction[]
+}
+
+/// Append-only wallet ledger; `balance` on the wallet is its running total.
+/// Spending credit on an order links here from the STORE_CREDIT Payment row.
+model CreatorWalletTransaction {
+  id             String               @id @default(cuid())
+  wallet         CreatorWallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  walletId       String
+  type           CreatorWalletTxnType
+  /// Signed: positive credits the creator, negative spends or claws back.
+  amount         Decimal              @db.Decimal(18, 4)
+  balanceAfter   Decimal              @db.Decimal(18, 4)
+  earning        CreatorEarning?      @relation(fields: [earningId], references: [id], onDelete: SetNull)
+  earningId      String?
+  /// Set on REDEMPTION: the order the credit was spent on.
+  order          Order?               @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderId        String?
+  paymentId      String?
+  /// Credit lots expire; set when CreatorProgramConfig.creditExpiryDays is on.
+  expiresAt      DateTime?
+  note           String?
+  /// Makes "credit this earning" / "spend this credit" safe to retry.
+  idempotencyKey String?              @unique
+  performedById  String?
+  createdAt      DateTime             @default(now())
+
+  @@index([walletId, createdAt])
+  @@index([earningId])
+  @@index([orderId])
+}
+
+/// Non-monetary recognition feed for the creator dashboard — the "you're
+/// getting noticed" surface, and specifically what a creator sees when their
+/// video drove a sale that missed the commission threshold.
+model CreatorAppreciation {
+  id        String                  @id @default(cuid())
+  creator   CreatorProfile          @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId String
+  video     CreatorVideo?           @relation(fields: [videoId], references: [id], onDelete: SetNull)
+  videoId   String?
+  orderId   String?
+  type      CreatorAppreciationType
+  title     String
+  message   String?
+  /// Milestone payload: { metric: "views", threshold: 1000, actual: 1024 }.
+  metadata  Json?
+  seenAt    DateTime?
+  createdAt DateTime                @default(now())
+
+  @@index([creatorId, createdAt])
+  @@index([creatorId, seenAt])
+}

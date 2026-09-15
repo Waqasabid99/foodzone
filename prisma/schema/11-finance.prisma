@@ -1,0 +1,352 @@
+// ---------------------------------------------------------------------------
+// Finance: double-entry general ledger.
+//
+// Nothing writes to the ledger by hand. Every business event posts a
+// JournalEntry with balanced JournalLines and a `sourceType`/`sourceId` back to
+// what caused it, so any figure in a report can be traced to an order, a GRN, a
+// production run, a payroll period or a payout. Postgres cannot express
+// "debits = credits" as a constraint across rows, so it is enforced in the
+// posting service and re-checked by a periodic audit query.
+//
+// Reversals are entries, never deletes: a posted entry is immutable.
+//
+// Typical postings:
+//   sale         Dr Cash/Card clearing   Cr Sales income, Cr Tax payable
+//   COGS         Dr COGS                 Cr Inventory
+//   purchase     Dr Inventory            Cr Accounts payable
+//   production   Dr WIP/Inventory        Cr Inventory (+ Dr labor/overhead)
+//   wastage      Dr Wastage expense      Cr Inventory
+//   payroll      Dr Salary expense       Cr Salaries payable
+//   payout       Dr Salaries payable     Cr Bank
+// ---------------------------------------------------------------------------
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  INCOME
+  EXPENSE
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum JournalStatus {
+  DRAFT
+  POSTED
+  VOID
+}
+
+enum JournalSource {
+  ORDER
+  PAYMENT
+  REFUND
+  GOODS_RECEIPT
+  SUPPLIER_BILL
+  BILL_PAYMENT
+  PRODUCTION
+  STOCK_ADJUSTMENT
+  WASTAGE
+  PAYROLL
+  DRIVER_PAYOUT
+  EXPENSE
+  CASH_SESSION
+  MANUAL
+  OPENING_BALANCE
+}
+
+enum PeriodStatus {
+  OPEN
+  CLOSED
+  LOCKED
+}
+
+enum BillStatus {
+  DRAFT
+  AWAITING_APPROVAL
+  APPROVED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+/// Chart of accounts, hierarchical. `isSystem` accounts are seeded and are the
+/// ones the posting rules resolve by code.
+model Account {
+  id            String        @id @default(cuid())
+  code          String        @unique // "1100", "4000"
+  name          String
+  type          AccountType
+  /// "Cash", "Bank", "Inventory", "Accounts Payable", "Sales", "COGS" ...
+  subType       String?
+  normalBalance NormalBalance
+  parent        Account?      @relation("AccountTree", fields: [parentId], references: [id])
+  parentId      String?
+  children      Account[]     @relation("AccountTree")
+  /// Null = shared across branches; set = a branch-specific account (a till).
+  branchId      String?
+  currency      String        @default("PKR") @db.Char(3)
+  description   String?
+  isSystem      Boolean       @default(false)
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  lines             JournalLine[]
+  taxRates          TaxRate[]
+  expenses          Expense[]
+  expenseCategories ExpenseCategory[]
+  billPayments      BillPayment[]
+  methodMappings    PaymentMethodAccount[]
+
+  @@index([type])
+  @@index([parentId])
+}
+
+model FiscalYear {
+  id        String    @id @default(cuid())
+  name      String    @unique // "FY 2026-27"
+  startDate DateTime  @db.Date
+  endDate   DateTime  @db.Date
+  isClosed  Boolean   @default(false)
+  closedAt  DateTime?
+
+  periods AccountingPeriod[]
+}
+
+/// Usually calendar months. Posting into a CLOSED period is rejected; LOCKED
+/// additionally blocks adjustments by finance admins.
+model AccountingPeriod {
+  id           String       @id @default(cuid())
+  fiscalYear   FiscalYear   @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade)
+  fiscalYearId String
+  name         String
+  startDate    DateTime     @db.Date
+  endDate      DateTime     @db.Date
+  status       PeriodStatus @default(OPEN)
+  closedById   String?
+  closedAt     DateTime?
+
+  entries JournalEntry[]
+
+  @@unique([fiscalYearId, startDate])
+  @@index([status])
+}
+
+model JournalEntry {
+  id          String            @id @default(cuid())
+  entryNumber String            @unique
+  branch      Branch?           @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  branchId    String?
+  period      AccountingPeriod? @relation(fields: [periodId], references: [id])
+  periodId    String?
+  entryDate   DateTime          @db.Date
+  status      JournalStatus     @default(DRAFT)
+  source      JournalSource     @default(MANUAL)
+  memo        String?
+  currency    String            @default("PKR") @db.Char(3)
+  /// Convenience mirror of the line totals; both must be equal when POSTED.
+  totalDebit  Decimal           @default(0) @db.Decimal(18, 4)
+  totalCredit Decimal           @default(0) @db.Decimal(18, 4)
+
+  /// What caused the entry. The common sources get real foreign keys; the rest
+  /// use sourceType/sourceId.
+  order             Order?           @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderId           String?
+  payment           Payment?         @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  paymentId         String?
+  goodsReceipt      GoodsReceipt?    @relation(fields: [goodsReceiptId], references: [id], onDelete: SetNull)
+  goodsReceiptId    String?
+  productionOrder   ProductionOrder? @relation(fields: [productionOrderId], references: [id], onDelete: SetNull)
+  productionOrderId String?
+  payrollPeriod     PayrollPeriod?   @relation(fields: [payrollPeriodId], references: [id], onDelete: SetNull)
+  payrollPeriodId   String?
+  driverPayout      DriverPayout?    @relation(fields: [driverPayoutId], references: [id], onDelete: SetNull)
+  driverPayoutId    String?
+  supplierBill      SupplierBill?    @relation(fields: [supplierBillId], references: [id], onDelete: SetNull)
+  supplierBillId    String?
+  expense           Expense?         @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+  expenseId         String?
+  sourceId          String?
+
+  /// Corrections are posted as a reversing entry pointing back at the original.
+  reversalOf   JournalEntry? @relation("JournalReversal", fields: [reversalOfId], references: [id])
+  reversalOfId String?       @unique
+  reversedBy   JournalEntry? @relation("JournalReversal")
+
+  postedById  String?
+  postedAt    DateTime?
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  lines JournalLine[]
+
+  @@index([branchId, entryDate])
+  @@index([source, sourceId])
+  @@index([status])
+  @@index([entryDate])
+}
+
+/// Exactly one of debit/credit is non-zero on each line.
+model JournalLine {
+  id           String       @id @default(cuid())
+  entry        JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  entryId      String
+  account      Account      @relation(fields: [accountId], references: [id])
+  accountId    String
+  debit        Decimal      @default(0) @db.Decimal(18, 4)
+  credit       Decimal      @default(0) @db.Decimal(18, 4)
+  description  String?
+  /// Optional analytical dimensions for P&L by branch / department.
+  branchId     String?
+  departmentId String?
+  /// Counterparty, for AP/AR sub-ledger reporting.
+  partyType    String? // "SUPPLIER" | "CUSTOMER" | "EMPLOYEE" | "DRIVER"
+  partyId      String?
+  sortOrder    Int          @default(0)
+
+  @@index([entryId])
+  @@index([accountId])
+  @@index([partyType, partyId])
+}
+
+/// Supplier invoice (accounts payable). Usually created from a GRN.
+model SupplierBill {
+  id                    String        @id @default(cuid())
+  billNumber            String        @unique
+  supplier              Supplier      @relation(fields: [supplierId], references: [id])
+  supplierId            String
+  branch                Branch        @relation(fields: [branchId], references: [id])
+  branchId              String
+  goodsReceipt          GoodsReceipt? @relation(fields: [goodsReceiptId], references: [id], onDelete: SetNull)
+  goodsReceiptId        String?       @unique
+  supplierInvoiceNumber String?
+  status                BillStatus    @default(DRAFT)
+  billDate              DateTime      @db.Date
+  dueDate               DateTime      @db.Date
+  currency              String        @default("PKR") @db.Char(3)
+  subtotal              Decimal       @default(0) @db.Decimal(18, 4)
+  taxTotal              Decimal       @default(0) @db.Decimal(18, 4)
+  grandTotal            Decimal       @default(0) @db.Decimal(18, 4)
+  paidAmount            Decimal       @default(0) @db.Decimal(18, 4)
+  notes                 String?
+  approvedById          String?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  payments       BillPayment[]
+  journalEntries JournalEntry[]
+
+  @@index([supplierId, status])
+  @@index([dueDate])
+}
+
+model BillPayment {
+  id          String       @id @default(cuid())
+  bill        SupplierBill @relation(fields: [billId], references: [id], onDelete: Cascade)
+  billId      String
+  amount      Decimal      @db.Decimal(18, 4)
+  paidAt      DateTime     @default(now())
+  /// Ledger account the money left from (bank/cash).
+  account     Account?     @relation(fields: [accountId], references: [id])
+  accountId   String?
+  method      String? // "BANK_TRANSFER" | "CASH" | "CHEQUE"
+  reference   String?
+  notes       String?
+  createdById String?
+  createdAt   DateTime     @default(now())
+
+  @@index([billId])
+}
+
+model ExpenseCategory {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  /// Expense account these postings hit by default (rent, utilities, fuel).
+  account   Account? @relation(fields: [accountId], references: [id])
+  accountId String?
+  isActive  Boolean  @default(true)
+
+  expenses Expense[]
+}
+
+/// Operating spend that is not a supplier bill: utilities, fuel, repairs.
+model Expense {
+  id            String           @id @default(cuid())
+  expenseNumber String           @unique
+  branch        Branch           @relation(fields: [branchId], references: [id])
+  branchId      String
+  category      ExpenseCategory? @relation(fields: [categoryId], references: [id])
+  categoryId    String?
+  /// Account the money came out of.
+  paidFrom      Account?         @relation(fields: [paidFromId], references: [id])
+  paidFromId    String?
+  payee         String?
+  description   String?
+  amount        Decimal          @db.Decimal(18, 4)
+  taxAmount     Decimal          @default(0) @db.Decimal(18, 4)
+  currency      String           @default("PKR") @db.Char(3)
+  expenseDate   DateTime         @db.Date
+  status        DocumentStatus   @default(DRAFT)
+  receiptUrl    String?
+  createdById   String?
+  approvedById  String?
+  approvedAt    DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  journalEntries JournalEntry[]
+
+  @@index([branchId, expenseDate])
+  @@index([categoryId])
+}
+
+model TaxGroup {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  /// Prices already include tax (common for restaurants) or tax is added on top.
+  isInclusive Boolean @default(false)
+  isActive    Boolean @default(true)
+
+  rates    TaxRate[]
+  products Product[]
+  items    InventoryItem[]
+}
+
+model TaxRate {
+  id         String   @id @default(cuid())
+  group      TaxGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId    String
+  name       String // "CGST", "VAT", "Service tax"
+  rate       Decimal  @db.Decimal(9, 4) // percentage
+  /// Liability account collected tax is credited to.
+  account    Account? @relation(fields: [accountId], references: [id])
+  accountId  String?
+  /// Applies only to this jurisdiction, when you operate across states.
+  region     String?
+  isCompound Boolean  @default(false)
+  sortOrder  Int      @default(0)
+  isActive   Boolean  @default(true)
+
+  orderTaxLines OrderTaxLine[]
+
+  @@index([groupId])
+}
+
+/// How a payment method/provider maps into the ledger: which clearing account
+/// receives the money and which expense account takes the gateway fee.
+model PaymentMethodAccount {
+  id           String        @id @default(cuid())
+  method       PaymentMethod
+  provider     String?
+  branchId     String?
+  account      Account       @relation(fields: [accountId], references: [id])
+  accountId    String
+  feeAccountId String?
+
+  @@unique([method, provider, branchId])
+}

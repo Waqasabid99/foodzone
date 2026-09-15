@@ -1,0 +1,426 @@
+// ---------------------------------------------------------------------------
+// Employees, biometric attendance and payroll.
+//
+// The attendance machine only ever writes AttendancePunch rows — raw, immutable
+// and de-duplicated on (device, deviceLogId) so a re-sync of the device's
+// buffer cannot double-count. A nightly (or on-demand) job folds punches into
+// one AttendanceDay per employee per date, which is the row humans correct and
+// payroll reads. Never edit a punch; add a MANUAL one and re-derive the day.
+// ---------------------------------------------------------------------------
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  TEMPORARY
+  INTERN
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  ON_LEAVE
+  SUSPENDED
+  RESIGNED
+  TERMINATED
+}
+
+enum SalaryType {
+  MONTHLY
+  DAILY
+  HOURLY
+}
+
+enum PunchDirection {
+  IN
+  OUT
+  BREAK_START
+  BREAK_END
+  UNKNOWN
+}
+
+enum PunchMethod {
+  FINGERPRINT
+  FACE
+  CARD
+  PIN
+  MANUAL
+  MOBILE_GEO
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+  LATE
+  ON_LEAVE
+  HOLIDAY
+  WEEKLY_OFF
+  MISSING_PUNCH
+}
+
+enum DeviceStatus {
+  ONLINE
+  OFFLINE
+  ERROR
+  DECOMMISSIONED
+}
+
+enum LeaveRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum PayrollStatus {
+  DRAFT
+  PROCESSING
+  APPROVED
+  PAID
+  CANCELLED
+}
+
+model Department {
+  id             String  @id @default(cuid())
+  name           String  @unique
+  code           String  @unique
+  headEmployeeId String?
+  isActive       Boolean @default(true)
+
+  employees Employee[]
+}
+
+model Employee {
+  id             String         @id @default(cuid())
+  /// Staff sign in with the same User account they hold roles on.
+  user           User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId         String?        @unique
+  employeeCode   String         @unique
+  branch         Branch         @relation(fields: [branchId], references: [id])
+  branchId       String
+  department     Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  departmentId   String?
+  designation    String?
+  employmentType EmploymentType @default(FULL_TIME)
+  status         EmployeeStatus @default(ACTIVE)
+
+  firstName             String
+  lastName              String?
+  personalEmail         String?
+  phone                 String?
+  dateOfBirth           DateTime?
+  address               String?
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  photoUrl              String?
+
+  /// Identifier enrolled on the biometric device. Punches arrive with this,
+  /// not with our cuid.
+  biometricId String? @unique
+
+  salaryType         SalaryType @default(MONTHLY)
+  baseSalary         Decimal    @default(0) @db.Decimal(18, 4)
+  hourlyRate         Decimal?   @db.Decimal(18, 4)
+  overtimeMultiplier Decimal    @default(1.5) @db.Decimal(5, 2)
+  /// Fixed allowances/deductions that repeat every cycle.
+  currency           String     @default("PKR") @db.Char(3)
+  bankAccountName    String?
+  bankAccountNumber  String?
+  bankIfsc           String?
+  taxIdentifier      String?
+
+  joinedAt    DateTime
+  confirmedAt DateTime?
+  exitedAt    DateTime?
+  exitReason  String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  driver           Driver?
+  shiftAssignments ShiftAssignment[]
+  punches          AttendancePunch[]
+  attendanceDays   AttendanceDay[]
+  leaveRequests    LeaveRequest[]
+  leaveBalances    LeaveBalance[]
+  payslips         Payslip[]
+  salaryComponents EmployeeSalaryComponent[]
+
+  @@index([branchId, status])
+  @@index([departmentId])
+}
+
+/// Recurring earning/deduction attached to one employee (HRA, transport
+/// allowance, provident fund, recurring advance repayment).
+model EmployeeSalaryComponent {
+  id            String    @id @default(cuid())
+  employee      Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId    String
+  name          String
+  isEarning     Boolean   @default(true)
+  /// Either a flat amount or a percentage of base salary.
+  amount        Decimal?  @db.Decimal(18, 4)
+  percentOfBase Decimal?  @db.Decimal(6, 3)
+  isTaxable     Boolean   @default(true)
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+
+  @@index([employeeId])
+}
+
+model Shift {
+  id                      String  @id @default(cuid())
+  branch                  Branch  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId                String
+  name                    String
+  /// Minutes from midnight; `endMinute` may exceed 1440 for night shifts.
+  startMinute             Int
+  endMinute               Int
+  breakMinutes            Int     @default(0)
+  /// Lateness tolerance and the minimum minutes that still count as a day.
+  graceMinutes            Int     @default(10)
+  halfDayThresholdMinutes Int     @default(240)
+  fullDayThresholdMinutes Int     @default(480)
+  isActive                Boolean @default(true)
+
+  assignments    ShiftAssignment[]
+  attendanceDays AttendanceDay[]
+
+  @@unique([branchId, name])
+}
+
+/// Roster: which shift an employee works on a given date.
+model ShiftAssignment {
+  id           String   @id @default(cuid())
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId   String
+  shift        Shift    @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shiftId      String
+  workDate     DateTime @db.Date
+  isWeeklyOff  Boolean  @default(false)
+  assignedById String?
+  createdAt    DateTime @default(now())
+
+  @@unique([employeeId, workDate])
+  @@index([shiftId, workDate])
+}
+
+/// A physical attendance terminal.
+model AttendanceDevice {
+  id            String       @id @default(cuid())
+  branch        Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId      String
+  name          String
+  serialNumber  String       @unique
+  vendor        String? // "ZKTeco", "eSSL", ...
+  model         String?
+  ipAddress     String?
+  /// Shared secret the device (or its push middleware) authenticates with.
+  apiKeyHash    String?
+  timezone      String?
+  status        DeviceStatus @default(OFFLINE)
+  lastSyncAt    DateTime?
+  /// Highest device log id already ingested; the puller resumes from here.
+  lastLogCursor String?
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  punches AttendancePunch[]
+
+  @@index([branchId])
+}
+
+/// Raw, append-only punch. Unlinked rows (unknown biometricId) are kept with a
+/// null employee so nothing is silently dropped during enrolment mistakes.
+model AttendancePunch {
+  id          String            @id @default(cuid())
+  device      AttendanceDevice? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  deviceId    String?
+  employee    Employee?         @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  employeeId  String?
+  biometricId String?
+  /// The device's own row id for this punch — the de-duplication key.
+  deviceLogId String?
+  punchedAt   DateTime
+  direction   PunchDirection    @default(UNKNOWN)
+  method      PunchMethod       @default(FINGERPRINT)
+  /// Set for MANUAL entries added by a supervisor.
+  createdById String?
+  note        String?
+  latitude    Decimal?          @db.Decimal(10, 7)
+  longitude   Decimal?          @db.Decimal(10, 7)
+  isProcessed Boolean           @default(false)
+  rawPayload  Json?
+  createdAt   DateTime          @default(now())
+
+  @@unique([deviceId, deviceLogId])
+  @@index([employeeId, punchedAt])
+  @@index([isProcessed])
+}
+
+/// Derived, correctable daily summary. Payroll reads only this.
+model AttendanceDay {
+  id                String           @id @default(cuid())
+  employee          Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId        String
+  branch            Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId          String
+  workDate          DateTime         @db.Date
+  shift             Shift?           @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  shiftId           String?
+  status            AttendanceStatus @default(ABSENT)
+  firstInAt         DateTime?
+  lastOutAt         DateTime?
+  workedMinutes     Int              @default(0)
+  breakMinutes      Int              @default(0)
+  overtimeMinutes   Int              @default(0)
+  lateMinutes       Int              @default(0)
+  earlyLeaveMinutes Int              @default(0)
+  /// Payroll multiplier for the day: 1 = full day, 0.5 = half day, 0 = absent.
+  payableFactor     Decimal          @default(0) @db.Decimal(4, 2)
+  isManualOverride  Boolean          @default(false)
+  overrideReason    String?
+  approvedById      String?
+  approvedAt        DateTime?
+  /// Frozen once the covering payslip is generated.
+  isLocked          Boolean          @default(false)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@unique([employeeId, workDate])
+  @@index([branchId, workDate])
+  @@index([status])
+}
+
+model Holiday {
+  id       String   @id @default(cuid())
+  branch   Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId String? // null = company-wide
+  name     String
+  date     DateTime @db.Date
+  isPaid   Boolean  @default(true)
+
+  @@unique([branchId, date, name])
+}
+
+model LeaveType {
+  id           String  @id @default(cuid())
+  name         String  @unique
+  code         String  @unique
+  isPaid       Boolean @default(true)
+  /// Days granted per year; 0 for unlimited/unaccrued types.
+  annualQuota  Decimal @default(0) @db.Decimal(6, 2)
+  carryForward Boolean @default(false)
+  isActive     Boolean @default(true)
+
+  requests LeaveRequest[]
+  balances LeaveBalance[]
+}
+
+model LeaveBalance {
+  id           String    @id @default(cuid())
+  employee     Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId   String
+  leaveType    LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Cascade)
+  leaveTypeId  String
+  year         Int
+  entitledDays Decimal   @default(0) @db.Decimal(6, 2)
+  usedDays     Decimal   @default(0) @db.Decimal(6, 2)
+  carriedDays  Decimal   @default(0) @db.Decimal(6, 2)
+
+  @@unique([employeeId, leaveTypeId, year])
+}
+
+model LeaveRequest {
+  id           String             @id @default(cuid())
+  employee     Employee           @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId   String
+  leaveType    LeaveType          @relation(fields: [leaveTypeId], references: [id])
+  leaveTypeId  String
+  startDate    DateTime           @db.Date
+  endDate      DateTime           @db.Date
+  /// Supports half-days: 0.5 increments.
+  totalDays    Decimal            @db.Decimal(6, 2)
+  reason       String?
+  status       LeaveRequestStatus @default(PENDING)
+  reviewedById String?
+  reviewedAt   DateTime?
+  reviewNote   String?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([employeeId, startDate])
+  @@index([status])
+}
+
+/// One payroll cycle for one branch (or company-wide when branchId is null).
+model PayrollPeriod {
+  id              String        @id @default(cuid())
+  branchId        String?
+  name            String // "September 2026"
+  startDate       DateTime      @db.Date
+  endDate         DateTime      @db.Date
+  payDate         DateTime?     @db.Date
+  status          PayrollStatus @default(DRAFT)
+  totalGross      Decimal       @default(0) @db.Decimal(18, 4)
+  totalDeductions Decimal       @default(0) @db.Decimal(18, 4)
+  totalNet        Decimal       @default(0) @db.Decimal(18, 4)
+  processedById   String?
+  approvedById    String?
+  approvedAt      DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  payslips       Payslip[]
+  journalEntries JournalEntry[]
+
+  @@unique([branchId, startDate, endDate])
+  @@index([status])
+}
+
+model Payslip {
+  id              String        @id @default(cuid())
+  period          PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  periodId        String
+  employee        Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId      String
+  /// Attendance figures the pay was computed from, frozen at generation.
+  payableDays     Decimal       @default(0) @db.Decimal(6, 2)
+  presentDays     Decimal       @default(0) @db.Decimal(6, 2)
+  leaveDays       Decimal       @default(0) @db.Decimal(6, 2)
+  absentDays      Decimal       @default(0) @db.Decimal(6, 2)
+  workedMinutes   Int           @default(0)
+  overtimeMinutes Int           @default(0)
+
+  grossAmount      Decimal       @default(0) @db.Decimal(18, 4)
+  deductionAmount  Decimal       @default(0) @db.Decimal(18, 4)
+  netAmount        Decimal       @default(0) @db.Decimal(18, 4)
+  status           PayrollStatus @default(DRAFT)
+  paidAt           DateTime?
+  paymentReference String?
+  pdfUrl           String?
+  notes            String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  lines PayslipLine[]
+
+  @@unique([periodId, employeeId])
+  @@index([employeeId])
+}
+
+model PayslipLine {
+  id        String   @id @default(cuid())
+  payslip   Payslip  @relation(fields: [payslipId], references: [id], onDelete: Cascade)
+  payslipId String
+  code      String // "BASIC", "OT", "PF", "ADVANCE"
+  label     String
+  isEarning Boolean  @default(true)
+  quantity  Decimal? @db.Decimal(12, 3) // hours, days
+  rate      Decimal? @db.Decimal(18, 4)
+  amount    Decimal  @db.Decimal(18, 4)
+  /// Ledger account this component posts to.
+  accountId String?
+
+  @@index([payslipId])
+}

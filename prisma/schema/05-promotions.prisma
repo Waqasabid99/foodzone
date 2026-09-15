@@ -1,0 +1,132 @@
+// ---------------------------------------------------------------------------
+// Discounts and coupons.
+//
+// A Promotion holds the rule (what the discount does and when it applies). A
+// Coupon is a code that unlocks one. Automatic promotions have no coupon;
+// campaign codes have many coupons pointing at one promotion.
+// ---------------------------------------------------------------------------
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  FREE_DELIVERY
+  FREE_ITEM
+  BUY_X_GET_Y
+  BUNDLE_PRICE
+}
+
+enum PromotionTargetType {
+  ORDER
+  PRODUCT
+  VARIANT
+  CATEGORY
+}
+
+model Promotion {
+  id                String       @id @default(cuid())
+  name              String
+  description       String?
+  type              DiscountType
+  /// Percent (0-100) or a currency amount depending on `type`.
+  value             Decimal      @default(0) @db.Decimal(18, 4)
+  /// Caps a percentage discount: "20% off, up to 10.00".
+  maxDiscountAmount Decimal?     @db.Decimal(18, 4)
+  minOrderAmount    Decimal?     @db.Decimal(18, 4)
+  minItemCount      Int?
+
+  /// BUY_X_GET_Y knobs.
+  buyQuantity Int?
+  getQuantity Int?
+
+  /// Empty array = applies everywhere / to every channel.
+  branchIds   String[]
+  channels    OrderChannel[]
+  orderTypes  OrderType[]
+  daysOfWeek  Int[]
+  startMinute Int?
+  endMinute   Int?
+  startsAt    DateTime?
+  endsAt      DateTime?
+
+  /// First-order-only campaigns.
+  newCustomersOnly  Boolean  @default(false)
+  /// Whether this may combine with other promotions; ties are broken by
+  /// `priority` (higher wins).
+  isStackable       Boolean  @default(false)
+  priority          Int      @default(0)
+  /// Global cap and per-customer cap on redemptions.
+  usageLimit        Int?
+  usageLimitPerUser Int?
+  usageCount        Int      @default(0)
+  requiresCoupon    Boolean  @default(false)
+  isActive          Boolean  @default(true)
+  createdById       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  targets   PromotionTarget[]
+  coupons   Coupon[]
+  discounts OrderDiscount[]
+
+  @@index([isActive, startsAt, endsAt])
+}
+
+/// Restricts a promotion to (or excludes it from) specific catalog rows.
+model PromotionTarget {
+  id          String              @id @default(cuid())
+  promotion   Promotion           @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  promotionId String
+  targetType  PromotionTargetType
+  targetId    String? // productId / variantId / categoryId; null when ORDER
+  /// True turns the row into an exclusion ("everything except drinks").
+  isExcluded  Boolean             @default(false)
+  /// For BUY_X_GET_Y: whether this target is the "buy" or the "get" side.
+  role        String? // "BUY" | "GET"
+
+  @@index([promotionId])
+  @@index([targetType, targetId])
+}
+
+model Coupon {
+  id                    String    @id @default(cuid())
+  code                  String    @unique
+  promotion             Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  promotionId           String
+  description           String?
+  /// Personal coupons: usable only by this customer.
+  assignedTo            User?     @relation("CouponAssignee", fields: [assignedToId], references: [id], onDelete: Cascade)
+  assignedToId          String?
+  maxRedemptions        Int?
+  maxRedemptionsPerUser Int?      @default(1)
+  redemptionCount       Int       @default(0)
+  startsAt              DateTime?
+  expiresAt             DateTime?
+  isActive              Boolean   @default(true)
+  /// Batch tag so a printed/mailed campaign can be revoked as a unit.
+  campaign              String?
+  createdById           String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  redemptions CouponRedemption[]
+  discounts   OrderDiscount[]
+
+  @@index([promotionId])
+  @@index([campaign])
+}
+
+model CouponRedemption {
+  id        String   @id @default(cuid())
+  coupon    Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  couponId  String
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId    String?
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String
+  amount    Decimal  @db.Decimal(18, 4)
+  createdAt DateTime @default(now())
+
+  /// One redemption per coupon per order, enforced in the database.
+  @@unique([couponId, orderId])
+  @@index([userId])
+}

@@ -1,0 +1,198 @@
+// ---------------------------------------------------------------------------
+// Delivery and drivers.
+//
+// Live tracking: the driver app pushes coordinates continuously, and that
+// stream belongs in Redis / a realtime channel, not in Postgres. What is kept
+// here is (a) the last known position on Driver, so a page load has something
+// to draw before the first socket frame arrives, and (b) an optional sampled
+// breadcrumb trail per delivery for disputes and distance verification — write
+// it every ~30s, not every ping.
+// ---------------------------------------------------------------------------
+
+enum DriverStatus {
+  OFFLINE
+  AVAILABLE
+  ON_DELIVERY
+  ON_BREAK
+  SUSPENDED
+}
+
+enum VehicleType {
+  BICYCLE
+  MOTORCYCLE
+  SCOOTER
+  CAR
+  VAN
+  ON_FOOT
+}
+
+enum DeliveryStatus {
+  PENDING // waiting for a driver
+  ASSIGNED
+  ACCEPTED
+  REJECTED
+  ARRIVED_AT_STORE
+  PICKED_UP
+  ON_THE_WAY
+  ARRIVED
+  DELIVERED
+  FAILED
+  CANCELLED
+}
+
+enum DriverPayoutStatus {
+  DRAFT
+  APPROVED
+  PAID
+  CANCELLED
+}
+
+model Driver {
+  id            String       @id @default(cuid())
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        String       @unique
+  branch        Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  branchId      String?
+  employee      Employee?    @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  employeeId    String?      @unique
+  status        DriverStatus @default(OFFLINE)
+  vehicleType   VehicleType  @default(MOTORCYCLE)
+  vehicleNumber String?
+  licenseNumber String?
+  licenseExpiry DateTime?
+
+  /// Last known position — refreshed from the realtime stream, never the source
+  /// of truth for live tracking.
+  lastLatitude   Decimal?  @db.Decimal(10, 7)
+  lastLongitude  Decimal?  @db.Decimal(10, 7)
+  lastHeading    Decimal?  @db.Decimal(6, 2)
+  lastLocationAt DateTime?
+
+  /// Cash the driver is currently holding from COD orders, cleared at handover.
+  cashInHand        Decimal  @default(0) @db.Decimal(18, 4)
+  maxActiveOrders   Int      @default(3)
+  ratingAverage     Decimal? @db.Decimal(3, 2)
+  ratingCount       Int      @default(0)
+  /// Per-delivery base pay; distance/time bonuses live on the delivery row.
+  payoutPerDelivery Decimal? @db.Decimal(18, 4)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  deliveries Delivery[]
+  payouts    DriverPayout[]
+  reviews    Review[]
+  shifts     DriverShift[]
+
+  @@index([branchId, status])
+}
+
+model Delivery {
+  id       String         @id @default(cuid())
+  order    Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId  String         @unique
+  driver   Driver?        @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  driverId String?
+  status   DeliveryStatus @default(PENDING)
+  sequence Int? // position in a batched multi-drop run
+
+  distanceKm       Decimal?  @db.Decimal(8, 3)
+  estimatedMinutes Int?
+  deliveryFee      Decimal   @default(0) @db.Decimal(18, 4) // charged to the customer
+  driverEarning    Decimal   @default(0) @db.Decimal(18, 4) // paid to the driver
+  tipAmount        Decimal   @default(0) @db.Decimal(18, 4)
+  /// COD collected on this drop; must match the order's cash payment.
+  codAmount        Decimal   @default(0) @db.Decimal(18, 4)
+  codCollectedAt   DateTime?
+
+  /// Handover verification.
+  otpHash       String?
+  proofImageUrl String?
+  recipientName String?
+  signatureUrl  String?
+
+  assignedById  String?
+  assignedAt    DateTime?
+  acceptedAt    DateTime?
+  pickedUpAt    DateTime?
+  deliveredAt   DateTime?
+  failedAt      DateTime?
+  failureReason String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  trackPoints DeliveryTrackPoint[]
+  payoutLines DriverPayoutLine[]
+
+  @@index([driverId, status])
+  @@index([status])
+}
+
+/// Sampled breadcrumbs, written at a low rate. Prune on a retention schedule.
+model DeliveryTrackPoint {
+  id         String   @id @default(cuid())
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  deliveryId String
+  latitude   Decimal  @db.Decimal(10, 7)
+  longitude  Decimal  @db.Decimal(10, 7)
+  accuracy   Decimal? @db.Decimal(8, 2)
+  speedKph   Decimal? @db.Decimal(6, 2)
+  recordedAt DateTime @default(now())
+
+  @@index([deliveryId, recordedAt])
+}
+
+/// When a driver was on the road. Feeds both dispatch and payroll for drivers
+/// who are paid hourly rather than per drop.
+model DriverShift {
+  id                String    @id @default(cuid())
+  driver            Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  driverId          String
+  branchId          String?
+  startedAt         DateTime  @default(now())
+  endedAt           DateTime?
+  startCashInHand   Decimal   @default(0) @db.Decimal(18, 4)
+  endCashHandedOver Decimal?  @db.Decimal(18, 4)
+  deliveriesCount   Int       @default(0)
+
+  @@index([driverId, startedAt])
+}
+
+model DriverPayout {
+  id               String             @id @default(cuid())
+  driver           Driver             @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  driverId         String
+  periodStart      DateTime
+  periodEnd        DateTime
+  deliveriesCount  Int                @default(0)
+  earningsAmount   Decimal            @default(0) @db.Decimal(18, 4)
+  tipsAmount       Decimal            @default(0) @db.Decimal(18, 4)
+  /// Bonuses/penalties, and COD still owed back to the company.
+  adjustmentAmount Decimal            @default(0) @db.Decimal(18, 4)
+  codDeduction     Decimal            @default(0) @db.Decimal(18, 4)
+  netAmount        Decimal            @default(0) @db.Decimal(18, 4)
+  status           DriverPayoutStatus @default(DRAFT)
+  approvedById     String?
+  paidAt           DateTime?
+  paymentReference String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  lines          DriverPayoutLine[]
+  journalEntries JournalEntry[]
+
+  @@unique([driverId, periodStart, periodEnd])
+  @@index([status])
+}
+
+model DriverPayoutLine {
+  id         String       @id @default(cuid())
+  payout     DriverPayout @relation(fields: [payoutId], references: [id], onDelete: Cascade)
+  payoutId   String
+  delivery   Delivery?    @relation(fields: [deliveryId], references: [id], onDelete: SetNull)
+  deliveryId String?
+  label      String
+  amount     Decimal      @db.Decimal(18, 4)
+
+  @@index([payoutId])
+}
