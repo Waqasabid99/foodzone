@@ -5,6 +5,7 @@ import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { addDays, daysBetween, startOfDay } from "@/server/attendance/shift";
+import { branchFilter } from "@/server/hr/access";
 
 /**
  * Leave and holidays.
@@ -439,11 +440,13 @@ export async function cancelLeave(id, { reason = null, actor }) {
   return cancelled;
 }
 
-export async function listLeaveRequests({ employeeId, branchId, status, leaveTypeId, from, to, limit = 20, cursor } = {}) {
+export async function listLeaveRequests({ employeeId, branchId, status, leaveTypeId, from, to, scope = null, limit = 20, cursor } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.leaveRequest.findMany({
     where: {
       ...(employeeId ? { employeeId } : {}),
       ...(branchId ? { employee: { branchId } } : {}),
+      ...(filter ? { AND: [{ employee: { branchId: filter } }] } : {}),
       ...(status ? { status } : {}),
       ...(leaveTypeId ? { leaveTypeId } : {}),
       ...(from || to
@@ -460,15 +463,19 @@ export async function listLeaveRequests({ employeeId, branchId, status, leaveTyp
 
 // --- holidays ---------------------------------------------------------------
 
-export async function listHolidays({ branchId, year } = {}) {
+export async function listHolidays({ branchId, year, scope = null } = {}) {
   const window = year
     ? { gte: new Date(Date.UTC(year, 0, 1)), lte: new Date(Date.UTC(year, 11, 31)) }
     : undefined;
+  const filter = branchFilter(scope);
 
   return prisma.holiday.findMany({
     where: {
       // A company-wide holiday has a null branch and applies to every branch.
       ...(branchId ? { OR: [{ branchId }, { branchId: null }] } : {}),
+      // A branch's own closure is that branch's business; the company-wide
+      // calendar belongs to everybody and is always visible.
+      ...(filter ? { AND: [{ OR: [{ branchId: filter }, { branchId: null }] }] } : {}),
       ...(window ? { date: window } : {}),
     },
     select: { id: true, branchId: true, name: true, date: true, isPaid: true },

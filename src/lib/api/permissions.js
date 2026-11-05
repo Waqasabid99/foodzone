@@ -60,6 +60,8 @@ export async function loadPrincipal({ userId, sessionId = null, issuedAt = null 
       phoneVerifiedAt: true,
       isSuperAdmin: true,
       tokensValidFrom: true,
+      mustChangePassword: true,
+      homePage: true,
       roleAssignments: {
         where: notExpired,
         select: {
@@ -155,6 +157,10 @@ function buildPrincipal(user, sessionId) {
     phoneVerified: Boolean(user.phoneVerifiedAt),
     isSuperAdmin: user.isSuperAdmin,
     tokensValidFrom: user.tokensValidFrom,
+    // Holds the account to choosing its own password: see `apiHandler`.
+    mustChangePassword: user.mustChangePassword,
+    /** Which workspace page they open on; null means "decide from my job". */
+    homePage: user.homePage ?? null,
     roles,
     /// Branches this user holds any role at. Null in the list means every branch.
     branchIds: [...new Set(user.roleAssignments.map((a) => a.branchId))],
@@ -246,4 +252,57 @@ export function invalidatePrincipal(userId) {
 
 export function invalidateAllPrincipals() {
   cache.clear();
+}
+
+/**
+ * Which branches a permission is held at, as a filter rather than a boolean.
+ *
+ * `can()` answers "may this person do X at branch B?" — the right question for
+ * a single record. A list needs the other half: *which* branches may they see
+ * at all? Without it a manager scoped to one outlet asks for "all branches",
+ * passes the permission check (they do hold `branches.read`, somewhere), and is
+ * handed the whole company.
+ *
+ * Returns `{ all: true, except }` for a company-wide grant and
+ * `{ all: false, ids }` for a scoped one. `ids: []` is a real answer — the
+ * permission is held nowhere — and must filter everything out rather than
+ * nothing, so the shape is a filter and never an absent one.
+ */
+export function branchScope(principal, permissionKey) {
+  if (!principal) return { all: false, ids: [] };
+  if (principal.isSuperAdmin) return { all: true, except: [] };
+
+  const denied = principal.deny.get(permissionKey) ?? new Set();
+  // A global DENY beats every grant, so there is nothing left to scope.
+  if (denied.has(null)) return { all: false, ids: [] };
+
+  const allowed = principal.allow.get(permissionKey);
+  if (!allowed) return { all: false, ids: [] };
+
+  // A global grant still respects a DENY pinned to one branch, which is how a
+  // company-wide role is carved back for a single outlet.
+  if (allowed.has(null)) return { all: true, except: [...denied].filter(Boolean) };
+
+  return { all: false, ids: [...allowed].filter((id) => id && !denied.has(id)) };
+}
+
+/**
+ * Held everywhere, with no branch carved out.
+ *
+ * For records that belong to the whole company rather than to one outlet — a
+ * kitchen station is one, because products are global and each routes to a
+ * single station. A grant pinned to one branch cannot sensibly cover a change
+ * every other branch feels, and `can()` without a branch context would accept
+ * it ("any branch-scoped grant counts"), so these checks ask this instead.
+ */
+export function holdsCompanyWide(principal, permissionKey) {
+  const scope = branchScope(principal, permissionKey);
+  return scope.all && scope.except.length === 0;
+}
+
+export function assertCompanyWide(principal, permissionKey) {
+  if (holdsCompanyWide(principal, permissionKey)) return;
+  throw ApiError.forbidden("Only a company-wide role can change this, because every branch uses it", {
+    required: [permissionKey],
+  });
 }

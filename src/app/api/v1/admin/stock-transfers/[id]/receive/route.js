@@ -2,6 +2,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { receiveTransferSchema } from "@/server/validation/inventory.schemas";
 import { receiveTransfer } from "@/server/services/stock-transfer.service";
+import { assertTransferEnd } from "@/server/inventory/access";
 
 /**
  * Stock arrives.
@@ -19,6 +20,9 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "stock_transfer.receive", entityType: "StockTransfer" },
   },
-  async ({ params, body, auth }) =>
-    ok(await receiveTransfer(params.id, { lines: body?.lines ?? [], actor: auth })),
+  async ({ params, body, auth }) => {
+    // Only the receiving side can say what arrived.
+    await assertTransferEnd(auth, params.id, "to", "stock_transfers.receive");
+    return ok(await receiveTransfer(params.id, { lines: body?.lines ?? [], actor: auth }));
+  },
 );

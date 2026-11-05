@@ -95,6 +95,8 @@ export const SYSTEM_ROLES = [
       "recipes.*",
       "production_orders.*",
       "reports.*",
+      "content_pages.*",
+      "hero_slides.*",
       "settings.read",
       "notifications.*",
       "media.*",
@@ -137,6 +139,8 @@ export const SYSTEM_ROLES = [
       "reviews.moderate",
       "promotions.read",
       "coupons.read",
+      "payment_providers.read",
+      "payment_providers.manage",
       "payments.read",
       "payments.capture",
       "payments.mark_collected",
@@ -289,6 +293,7 @@ export const SYSTEM_ROLES = [
       "orders.update",
       "orders.edit_items",
       "orders.update_status",
+      "orders.request_bill",
       "kds.read",
       "kds.update_item_status",
       "menu_items.read",
@@ -297,9 +302,7 @@ export const SYSTEM_ROLES = [
       "qr_codes.read",
       "customers.read",
       "invoices.read",
-      "invoices.create",
       "payments.read",
-      "payments.mark_collected",
       "notifications.read",
     ],
   },
@@ -498,6 +501,12 @@ export const SYSTEM_ROLES = [
       "users.create",
       "users.update",
       "users.suspend",
+      // HR already creates, suspends and assigns roles for staff. Getting a
+      // locked-out cook back in — a temporary password, or signing a lost
+      // phone out — is the same job, and routing it through an owner only
+      // means waiting.
+      "users.reset_password",
+      "users.manage_sessions",
       "roles.read",
       "roles.assign",
       "branches.read",
@@ -565,6 +574,8 @@ export const SYSTEM_ROLES = [
       "creator_videos.*",
       "creator_earnings.read",
       "reviews.*",
+      "content_pages.*",
+      "hero_slides.*",
       "orders.read",
       "products.read",
       "customers.read",
@@ -668,6 +679,11 @@ export const SYSTEM_ROLES = [
       "self.manage_own_videos",
       "self.view_creator_dashboard",
       "self.redeem_credit",
+      // Uploading the video file itself goes through the media endpoints, so
+      // without this a creator can create the record and submit it but never
+      // attach anything — the one step the whole programme depends on.
+      // Deliberately upload only: removing media is a staff action.
+      "media.upload",
     ],
   },
 ];

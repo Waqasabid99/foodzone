@@ -1,4 +1,5 @@
 import MenuItemCard from "@/components/menu/MenuItemCard";
+import { toMenuCard } from "@/lib/menu-card";
 
 /**
  * "Pairs perfectly with" — other products from the same category.
@@ -21,31 +22,7 @@ export default function RelatedProducts({ items, categoryName, currency, branchI
 
       <div className="mt-5 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
         {items.map((item) => (
-          <MenuItemCard
-            key={item.id}
-            item={{
-              id: item.id,
-              name: item.name,
-              slug: item.slug,
-              shortDescription: item.shortDescription,
-              imageUrl: item.imageUrl,
-              dietary: item.dietary ?? [],
-              spiceLevel: item.spiceLevel,
-              isRecommended: Boolean(item.isFeatured),
-              priceFrom: item.priceFrom,
-              compareAtPrice: null,
-              available: true,
-              variants: (item.variants ?? []).map((variant) => ({
-                variantId: variant.id,
-                name: variant.name,
-                price: Number(variant.price),
-                compareAtPrice: null,
-                available: true,
-              })),
-            }}
-            currency={currency}
-            branchId={branchId}
-          />
+          <MenuItemCard key={item.id} item={toMenuCard(item)} currency={currency} branchId={branchId} />
         ))}
       </div>
     </section>

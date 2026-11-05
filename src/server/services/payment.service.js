@@ -1,12 +1,17 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
 import { getProvider } from "@/server/payments/providers";
+import { enabledProviders, resolveProviderConfig } from "@/server/services/payment-provider.service";
+import { chooseProvider } from "@/server/payments/choose";
+import { isProduction } from "@/lib/env";
 import { amountDue, derivePaymentState } from "@/server/payments/state";
 import { money } from "@/server/pricing/engine";
 import { enqueue } from "@/server/jobs/outbox";
+import { openSession } from "@/server/services/register.service";
 
 /**
  * Payments.
@@ -84,7 +89,20 @@ export async function syncOrderPaymentState(tx, orderId) {
   });
 
   if (state !== order.paymentState) {
-    await tx.order.update({ where: { id: orderId }, data: { paymentState: state } });
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        paymentState: state,
+        /*
+         * A settled bill is no longer a table waiting to pay. Cleared here
+         * rather than by the till screen, because the money can arrive from
+         * anywhere — a card terminal's callback, the customer paying on their
+         * own phone — and a table left on the "waiting to pay" list after it
+         * has paid sends a member of staff to interrupt somebody's dessert.
+         */
+        ...(state === "PAID" ? { billRequestedAt: null, billRequestedById: null } : {}),
+      },
+    });
   }
 
   return state;
@@ -123,6 +141,8 @@ export async function createPayment({
   amount = null,
   idempotencyKey = null,
   returnUrl = null,
+  /** Where a hosted gateway sends a customer who backs out. */
+  cancelUrl = null,
   actor = null,
   registerSessionId = null,
 }) {
@@ -160,7 +180,21 @@ export async function createPayment({
     });
   }
 
-  const providerName = provider ?? (MANUAL_METHODS.includes(method) ? "cash" : "mock");
+  /*
+   * Which gateway takes this. An explicit choice wins; otherwise a manual
+   * method goes to cash and an online one goes to whichever gateway this
+   * branch has switched on.
+   *
+   * The enabled list is only looked up when it is actually needed, so a
+   * counter cash sale costs no extra query.
+   */
+  const providerName = chooseProvider({
+    requested: provider,
+    method,
+    enabled: provider || MANUAL_METHODS.includes(method) ? [] : await enabledProviders({ branchId: order.branchId }),
+    // The fake gateway's own rule for when it may be used at all, asked once.
+    allowMock: !isProduction() || Boolean(process.env.MOCK_PAYMENT_SECRET),
+  });
   const adapter = getProvider(providerName);
 
   if (adapter.methods?.length && !adapter.methods.includes(method)) {
@@ -191,7 +225,13 @@ export async function createPayment({
 
   let intent;
   try {
-    intent = await adapter.createIntent({ payment, order, returnUrl });
+    /*
+     * The restaurant's own gateway account, resolved at the moment of the call
+     * and held nowhere. Cash resolves to an empty config and needs no row, so
+     * a counter sale still works at a branch that has configured nothing.
+     */
+    const { config, mode } = await resolveProviderConfig({ branchId: order.branchId, provider: providerName });
+    intent = await adapter.createIntent({ payment, order, returnUrl, cancelUrl, config, mode });
   } catch (error) {
     await prisma.payment.update({
       where: { id: payment.id },
@@ -223,14 +263,29 @@ export async function createPayment({
 }
 
 /**
- * Captures an authorised (or pending manual) payment.
+ * Captures an authorised gateway payment.
  *
  * Idempotent: capturing an already-captured payment returns it unchanged rather
  * than charging again.
+ *
+ * Cash-like money is refused here and sent to `markCollected` instead. The two
+ * endpoints look interchangeable — same permission set on the Cashier role, one
+ * route apart — and they are not: only `markCollected` attaches the money to a
+ * register session. Captured this way, an order read PAID with the notes in the
+ * drawer and no movement written, so the till closed short by the sale and the
+ * cashier wore it. `viaDrawer` is how `markCollected` says it has a drawer in
+ * hand; nothing else passes it.
  */
-export async function capturePayment({ paymentId, amount = null, actor = null }) {
+export async function capturePayment({ paymentId, amount = null, actor = null, viaDrawer = false }) {
   const payment = await prisma.payment.findUnique({ where: { id: paymentId }, select: SELECT });
   if (!payment) throw ApiError.notFound("Payment not found");
+
+  if (!viaDrawer && MANUAL_METHODS.includes(payment.method)) {
+    throw ApiError.conflict("Cash-like payments are marked collected, not captured, so they land in a drawer", {
+      method: payment.method,
+      collectWith: `POST /api/v1/admin/payments/${paymentId}/collect`,
+    });
+  }
 
   if (payment.status === "CAPTURED") return { payment, changed: false };
 
@@ -241,7 +296,19 @@ export async function capturePayment({ paymentId, amount = null, actor = null })
   }
 
   const adapter = getProvider(payment.provider);
-  const result = await adapter.capture({ payment, amount: amount == null ? payment.amount : money(amount) });
+  const { config, mode } = await resolveProviderConfig({
+    branchId: payment.branchId,
+    provider: payment.provider,
+    // A gateway switched off since the charge was made must still be able to
+    // finish settling money it already took.
+    requireEnabled: false,
+  });
+  const result = await adapter.capture({
+    payment,
+    amount: amount == null ? payment.amount : money(amount),
+    config,
+    mode,
+  });
 
   const captured = money(result.capturedAmount ?? payment.amount);
 
@@ -277,7 +344,47 @@ export async function capturePayment({ paymentId, amount = null, actor = null })
  * ends in the same place: this one attaches the money to a **register session**,
  * so it can be counted at close. Cash that is captured without landing in a
  * drawer is cash nobody will notice is missing.
+ *
+ * And if no drawer is open, one is opened here rather than letting the money
+ * fall outside every count. That is what a till does in every system that
+ * handles cash seriously: the session is bookkeeping, not a ceremony, and a
+ * cashier who forgot to start a shift has still taken the money. It opens in
+ * their own name with a float of zero, which is the honest figure — nobody
+ * counted one — and leaves a note saying so, so the opening count can be
+ * corrected with a pay-in rather than silently assumed.
  */
+/**
+ * Opens a drawer for somebody who is about to take cash without one.
+ *
+ * Named after the cashier rather than taking the branch's default name: the
+ * default may already be open in somebody else's hands, and two people
+ * accountable for one drawer is the same as nobody being accountable for it.
+ * A name collision is therefore impossible by construction, but a second
+ * payment racing the first would still conflict, so a conflict is resolved by
+ * reading back the session the other request just opened.
+ */
+async function openDrawerFor({ branchId, actor }) {
+  const registerName = String(actor.name ?? actor.email ?? "Till").slice(0, 40);
+
+  try {
+    const session = await openSession({
+      branchId,
+      registerName,
+      openingFloat: 0,
+      actor,
+      notes: "Opened automatically when cash was taken with no drawer running. The float is zero because nobody counted one — record a pay-in if there was change in the till.",
+    });
+    return session.id;
+  } catch {
+    const existing = await prisma.cashRegisterSession.findFirst({
+      where: { branchId, registerName, status: "OPEN" },
+      select: { id: true },
+      orderBy: { openedAt: "desc" },
+    });
+    return existing?.id ?? null;
+  }
+}
+
 export async function markCollected({ paymentId, registerSessionId = null, actor = null }) {
   const payment = await prisma.payment.findUnique({ where: { id: paymentId }, select: SELECT });
   if (!payment) throw ApiError.notFound("Payment not found");
@@ -307,11 +414,15 @@ export async function markCollected({ paymentId, registerSessionId = null, actor
       select: { id: true },
       orderBy: { openedAt: "desc" },
     });
-    sessionId = session?.id ?? null;
+    sessionId = session?.id ?? (actor ? await openDrawerFor({ branchId: payment.branchId, actor }) : null);
   }
 
-  const already = payment.status === "CAPTURED";
-  const result = await capturePayment({ paymentId, actor });
+  // Already captured *and already in a drawer* is a double tap: nothing to do.
+  // Already captured with no drawer is money sitting outside every count —
+  // which is what the old capture route produced — so it is adopted here
+  // rather than left for a hand-written adjustment to paper over.
+  const already = payment.status === "CAPTURED" && payment.registerSessionId != null;
+  const result = await capturePayment({ paymentId, actor, viaDrawer: true });
 
   if (sessionId && !already) {
     await prisma.$transaction([
@@ -351,7 +462,12 @@ export async function voidPayment({ paymentId, reason = null }) {
   }
 
   const adapter = getProvider(payment.provider);
-  const result = await adapter.void({ payment });
+  const { config, mode } = await resolveProviderConfig({
+    branchId: payment.branchId,
+    provider: payment.provider,
+    requireEnabled: false,
+  });
+  const result = await adapter.void({ payment, config, mode });
 
   const updated = await withTransaction(async (tx) => {
     const row = await tx.payment.update({
@@ -393,9 +509,15 @@ export async function failPayment({ paymentId, code = null, message = null, tx =
 
 // --- reads ------------------------------------------------------------------
 
-export async function listPayments({ branchId, orderId, status, method, provider, limit = 20, cursor } = {}) {
+export async function listPayments({ branchId, orderId, status, method, provider, scope = null, limit = 20, cursor } = {}) {
+  // `scope` is the caller's branches; `branchId` is the one they asked for.
+  // Both are applied. Omitting the filter must narrow to what they may see,
+  // not widen to the company — a payment row carries what a customer paid and
+  // how, at every outlet.
+  const filter = branchFilter(scope);
   const rows = await prisma.payment.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(orderId ? { orderId } : {}),
       ...(status ? { status } : {}),

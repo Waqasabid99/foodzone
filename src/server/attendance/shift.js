@@ -17,6 +17,14 @@ import { ApiError } from "@/lib/api";
  * All arithmetic is done in the branch's own day. A restaurant closing at 2am
  * thinks of that as the end of Friday, not the start of Saturday, and payroll
  * has to agree with the people being paid.
+ *
+ * That is why every function that turns a shift into real instants takes a
+ * `timezone`. A `workDate` is a plain calendar date (`@db.Date`, keyed at UTC
+ * midnight), and "10:00 on the 26th" is only an instant once you know where.
+ * Reading those minutes against UTC midnight puts a Karachi branch's window
+ * five hours out, which drops the morning's punch-ins outside it entirely and
+ * reads the punch-out as an arrival — every day wrong, in the table payroll
+ * pays from. The default is "UTC" to match `Branch.timezone`'s own default.
  */
 
 export const MINUTES_PER_DAY = 1440;
@@ -62,6 +70,44 @@ export function startOfDay(date) {
   return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
 }
 
+/** How far a zone is ahead of UTC at a given instant, in minutes. */
+function offsetMinutesAt(timezone, at) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(at);
+
+  const value = (type) => Number(parts.find((part) => part.type === type)?.value);
+  // "24" appears at midnight in some locales' 24-hour formatting.
+  const asIfUtc = Date.UTC(value("year"), value("month") - 1, value("day"), value("hour") % 24, value("minute"), value("second"));
+
+  // Sub-second precision is not part of the answer and would make the
+  // round-trip below jitter.
+  return (asIfUtc - Math.floor(at.getTime() / 1000) * 1000) / 60_000;
+}
+
+/**
+ * The instant a calendar date begins in a given zone.
+ *
+ * Measured twice because the offset is itself a function of the instant: on a
+ * DST boundary the offset at UTC midnight is not the offset at local midnight,
+ * and a single pass lands an hour out. The second pass asks the zone again
+ * from inside the day it just found.
+ */
+export function zonedStartOfDay(workDate, timezone = "UTC") {
+  const day = startOfDay(workDate);
+  if (!timezone || timezone === "UTC") return day;
+
+  const guess = new Date(day.getTime() - offsetMinutesAt(timezone, day) * 60_000);
+  return new Date(day.getTime() - offsetMinutesAt(timezone, guess) * 60_000);
+}
+
 export function addDays(date, days) {
   const value = startOfDay(date);
   value.setUTCDate(value.getUTCDate() + days);
@@ -85,8 +131,8 @@ export function daysBetween(from, to) {
  * that groups punches by calendar date alone will put it on the wrong day and
  * pay the wrong person for it.
  */
-export function shiftWindow({ shift, workDate }) {
-  const base = startOfDay(workDate);
+export function shiftWindow({ shift, workDate, timezone = "UTC" }) {
+  const base = zonedStartOfDay(workDate, timezone);
 
   return {
     start: addMinutes(base, shift.startMinute),
@@ -105,11 +151,25 @@ export function shiftWindow({ shift, workDate }) {
  */
 export const PUNCH_MARGIN_MINUTES = 240;
 
-export function punchBelongsToShift({ punchedAt, shift, workDate, marginMinutes = PUNCH_MARGIN_MINUTES }) {
-  const { start, end } = shiftWindow({ shift, workDate });
+export function punchBelongsToShift({ punchedAt, shift, workDate, timezone = "UTC", marginMinutes = PUNCH_MARGIN_MINUTES }) {
+  const { start, end } = shiftWindow({ shift, workDate, timezone });
   const at = new Date(punchedAt);
 
   return at >= addMinutes(start, -marginMinutes) && at <= addMinutes(end, marginMinutes);
+}
+
+/** The calendar date an instant falls on, as the branch sees it. */
+export function zonedDateOf(at, timezone = "UTC") {
+  if (!timezone || timezone === "UTC") return startOfDay(at);
+
+  const text = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(at));
+
+  return new Date(`${text}T00:00:00.000Z`);
 }
 
 /**
@@ -119,10 +179,15 @@ export function punchBelongsToShift({ punchedAt, shift, workDate, marginMinutes 
  * end of a night shift than the start of a day one, and resolving it forwards
  * silently splits every night worker's shift across two days — halving one and
  * inventing the other.
+ *
+ * The candidates come from the *branch's* calendar date, not the instant's UTC
+ * one. East of Greenwich those are different dates for most of the evening, so
+ * reading them off UTC offers the roster two days that have already gone.
  */
-export function workDateForPunch({ punchedAt, assignments }) {
+export function workDateForPunch({ punchedAt, assignments, timezone = "UTC" }) {
   const at = new Date(punchedAt);
-  const candidates = [addDays(at, -1), startOfDay(at)];
+  const local = zonedDateOf(at, timezone);
+  const candidates = [addDays(local, -1), local];
 
   for (const workDate of candidates) {
     const assignment = assignments.find(
@@ -130,21 +195,21 @@ export function workDateForPunch({ punchedAt, assignments }) {
     );
     if (!assignment) continue;
 
-    if (punchBelongsToShift({ punchedAt: at, shift: assignment.shift, workDate })) {
+    if (punchBelongsToShift({ punchedAt: at, shift: assignment.shift, workDate, timezone })) {
       return { workDate, shift: assignment.shift, assignment };
     }
   }
 
   // No roster covers it. The punch is still real, so it lands on its own
   // calendar date with no shift and the day is derived without expectations.
-  return { workDate: startOfDay(at), shift: null, assignment: null };
+  return { workDate: local, shift: null, assignment: null };
 }
 
 /** Minutes late, measured against the grace period rather than the start. */
-export function lateMinutes({ firstInAt, shift, workDate }) {
+export function lateMinutes({ firstInAt, shift, workDate, timezone = "UTC" }) {
   if (!firstInAt || !shift) return 0;
 
-  const { graceEnd, start } = shiftWindow({ shift, workDate });
+  const { graceEnd, start } = shiftWindow({ shift, workDate, timezone });
   if (new Date(firstInAt) <= graceEnd) return 0;
 
   // Measured from the actual start, not the end of grace: grace forgives
@@ -153,10 +218,10 @@ export function lateMinutes({ firstInAt, shift, workDate }) {
 }
 
 /** Minutes left early, measured against the shift end. */
-export function earlyLeaveMinutes({ lastOutAt, shift, workDate }) {
+export function earlyLeaveMinutes({ lastOutAt, shift, workDate, timezone = "UTC" }) {
   if (!lastOutAt || !shift) return 0;
 
-  const { end } = shiftWindow({ shift, workDate });
+  const { end } = shiftWindow({ shift, workDate, timezone });
   const out = new Date(lastOutAt);
   if (out >= end) return 0;
 

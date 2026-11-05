@@ -1,10 +1,10 @@
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, created, ok, RateLimits } from "@/lib/api";
 import { createShiftSchema, listShiftsSchema } from "@/server/validation/hr.schemas";
 import { createShift, listShifts } from "@/server/services/shift.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "shifts.read", query: listShiftsSchema, branch: "query" },
-  async ({ query }) => ok(await listShifts(query)),
+  async ({ query, auth }) => ok(await listShifts({ ...query, scope: branchScope(auth, "shifts.read") })),
 );
 
 /**

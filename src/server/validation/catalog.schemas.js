@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { fitsScale } from "@/lib/money-math";
 import { cuidSchema } from "@/server/validation/schemas";
+import { patchSchema } from "@/server/validation/patch";
 
 /**
  * Catalog request schemas — categories, products, variants, modifiers, combos,
@@ -21,7 +23,7 @@ export const moneySchema = z
   .finite()
   .min(0, "Price cannot be negative")
   .max(99_999_999, "Price is out of range")
-  .refine((value) => Number.isInteger(value * 10_000), "Price supports at most 4 decimal places");
+  .refine((value) => fitsScale(value, 4), "Price supports at most 4 decimal places");
 
 /** A price delta may be negative: "no cheese, -50". */
 export const deltaSchema = z
@@ -29,11 +31,14 @@ export const deltaSchema = z
   .finite()
   .min(-99_999_999)
   .max(99_999_999)
-  .refine((value) => Number.isInteger(value * 10_000), "Price supports at most 4 decimal places");
+  .refine((value) => fitsScale(value, 4), "Price supports at most 4 decimal places");
 
 const shortText = z.string().trim().min(1).max(120);
 const longText = z.string().trim().max(2000);
-const sortOrder = z.number().int().min(0).max(100_000).default(0);
+// No `.default()`: every use is `.optional()`, and in Zod 4 a default survives
+// that — an omitted position would arrive as 0 and defeat each service's
+// "append at the end" fallback, stacking new rows on top of each other.
+const sortOrder = z.number().int().min(0).max(100_000);
 
 export const dietaryTagSchema = z.enum(["VEG", "NON_VEG", "VEGAN", "EGG", "HALAL", "JAIN", "GLUTEN_FREE"]);
 export const productTypeSchema = z.enum(["SIMPLE", "VARIANT", "COMBO"]);
@@ -48,16 +53,16 @@ const minuteOfDay = z.number().int().min(0).max(2879);
 export const createCategorySchema = z.object({
   name: shortText,
   slug: z.string().trim().min(1).max(140).optional(),
-  description: longText.optional(),
-  imageUrl: z.url().max(2000).optional(),
+  // Nullable so an edit can clear them: `optional()` alone accepts neither
+  // `null` nor `""`, which left a description or image impossible to remove.
+  description: longText.nullish(),
+  imageUrl: z.url().max(2000).nullish(),
   parentId: cuidSchema.nullish(),
   sortOrder: sortOrder.optional(),
   isActive: z.boolean().optional(),
 });
 
-export const updateCategorySchema = createCategorySchema
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateCategorySchema = patchSchema(createCategorySchema);
 
 export const categoryQuerySchema = z.object({
   search: z.string().trim().min(1).max(100).optional(),
@@ -83,32 +88,31 @@ export const createStationSchema = z.object({
     .max(20)
     .regex(/^[A-Za-z0-9_-]+$/, "Use letters, digits, hyphens and underscores only")
     .transform((value) => value.toUpperCase()),
-  printerId: z.string().trim().max(120).optional(),
+  // Nullable so an edit can unassign the printer.
+  printerId: z.string().trim().max(120).nullish(),
   sortOrder: sortOrder.optional(),
   isActive: z.boolean().optional(),
 });
 
-export const updateStationSchema = createStationSchema
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateStationSchema = patchSchema(createStationSchema);
 
 // --- variants ---------------------------------------------------------------
 
 export const variantInputSchema = z.object({
   name: z.string().trim().min(1).max(80).default("Regular"),
   sku: z.string().trim().min(1).max(60).optional(),
-  barcode: z.string().trim().min(1).max(60).optional(),
+  // Nullable so an edit can clear them — a "was" price left behind after a
+  // promotion ends keeps showing a discount that no longer exists.
+  barcode: z.string().trim().min(1).max(60).nullish(),
   price: moneySchema,
-  compareAtPrice: moneySchema.optional(),
-  servingSize: z.string().trim().max(60).optional(),
+  compareAtPrice: moneySchema.nullish(),
+  servingSize: z.string().trim().max(60).nullish(),
   isDefault: z.boolean().optional(),
   isActive: z.boolean().optional(),
   sortOrder: sortOrder.optional(),
 });
 
-export const updateVariantSchema = variantInputSchema
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateVariantSchema = patchSchema(variantInputSchema);
 
 // --- products ---------------------------------------------------------------
 
@@ -122,11 +126,17 @@ export const createProductSchema = z
   .object({
     name: shortText,
     slug: z.string().trim().min(1).max(160).optional(),
-    description: longText.optional(),
-    shortDescription: z.string().trim().max(300).optional(),
+    description: longText.nullish(),
+    shortDescription: z.string().trim().max(300).nullish(),
     type: productTypeSchema.default("SIMPLE"),
     categoryId: cuidSchema,
-    imageUrl: z.url().max(2000).optional(),
+    /**
+     * Which outlet sells this. Omit it, or send null, and the item is on the
+     * whole chain's catalogue — which is why writing one takes a company-wide
+     * grant. A single-branch restaurant never sends this at all.
+     */
+    branchId: cuidSchema.nullish(),
+    imageUrl: z.url().max(2000).nullish(),
     images: z.array(productImageSchema).max(12).optional(),
     dietary: z.array(dietaryTagSchema).max(7).optional(),
     spiceLevel: z.number().int().min(0).max(5).nullish(),
@@ -149,13 +159,15 @@ export const createProductSchema = z
     path: ["price"],
   });
 
-export const updateProductSchema = z
-  .object({
+export const updateProductSchema = patchSchema(
+  z.object({
     name: shortText.optional(),
     slug: z.string().trim().min(1).max(160).optional(),
     description: longText.nullish(),
     shortDescription: z.string().trim().max(300).nullish(),
     categoryId: cuidSchema.optional(),
+    /** Moving a product between outlets, or onto the chain's catalogue. */
+    branchId: cuidSchema.nullish(),
     imageUrl: z.url().max(2000).nullish(),
     dietary: z.array(dietaryTagSchema).max(7).optional(),
     spiceLevel: z.number().int().min(0).max(5).nullish(),
@@ -166,8 +178,8 @@ export const updateProductSchema = z
     stationId: cuidSchema.nullish(),
     isFeatured: z.boolean().optional(),
     sortOrder: sortOrder.optional(),
-  })
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+  }),
+);
 
 /** Publishing is its own permission, so it is its own endpoint and schema. */
 export const publishProductSchema = z.object({ isActive: z.boolean() });
@@ -177,11 +189,15 @@ export const setImagesSchema = z.object({ images: z.array(productImageSchema).ma
 export const adminProductQuerySchema = z.object({
   search: z.string().trim().min(1).max(100).optional(),
   categoryId: cuidSchema.optional(),
+  /** Narrows to one outlet. The caller's own scope still applies on top. */
+  branchId: cuidSchema.optional(),
   stationId: cuidSchema.optional(),
   type: productTypeSchema.optional(),
   isActive: z.stringbool().optional(),
   isFeatured: z.stringbool().optional(),
   includeDeleted: z.stringbool().default(false),
+  /** Only the deleted ones — the "bin" a restore screen lists. */
+  onlyDeleted: z.stringbool().default(false),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   cursor: z.string().min(1).optional(),
 });
@@ -197,9 +213,7 @@ export const modifierOptionSchema = z.object({
   sortOrder: sortOrder.optional(),
 });
 
-export const updateModifierOptionSchema = modifierOptionSchema
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateModifierOptionSchema = patchSchema(modifierOptionSchema);
 
 export const createModifierGroupSchema = z.object({
   name: shortText,
@@ -212,10 +226,7 @@ export const createModifierGroupSchema = z.object({
   options: z.array(modifierOptionSchema).max(100).optional(),
 });
 
-export const updateModifierGroupSchema = createModifierGroupSchema
-  .omit({ options: true })
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateModifierGroupSchema = patchSchema(createModifierGroupSchema.omit({ options: true }));
 
 /** Attaching a group to a product, with optional per-product rule overrides. */
 export const attachModifierGroupSchema = z.object({
@@ -226,10 +237,7 @@ export const attachModifierGroupSchema = z.object({
   sortOrder: sortOrder.optional(),
 });
 
-export const updateAttachedGroupSchema = attachModifierGroupSchema
-  .omit({ groupId: true })
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateAttachedGroupSchema = patchSchema(attachModifierGroupSchema.omit({ groupId: true }));
 
 // --- combos -----------------------------------------------------------------
 
@@ -250,15 +258,9 @@ export const createComboGroupSchema = z.object({
   options: z.array(comboOptionSchema).max(100).optional(),
 });
 
-export const updateComboGroupSchema = createComboGroupSchema
-  .omit({ options: true })
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateComboGroupSchema = patchSchema(createComboGroupSchema.omit({ options: true }));
 
-export const updateComboOptionSchema = comboOptionSchema
-  .omit({ productId: true })
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateComboOptionSchema = patchSchema(comboOptionSchema.omit({ productId: true }));
 
 // --- menus ------------------------------------------------------------------
 
@@ -268,7 +270,7 @@ export const createMenuSchema = z
     name: shortText,
     slug: z.string().trim().min(1).max(140).optional(),
     type: menuTypeSchema.default("DINE_IN"),
-    description: longText.optional(),
+    description: longText.nullish(),
     activeFrom: z.coerce.date().nullish(),
     activeTo: z.coerce.date().nullish(),
     startMinute: minuteOfDay.nullish(),
@@ -353,15 +355,13 @@ export const menuQuerySchema = z.object({
 
 export const createSectionSchema = z.object({
   name: shortText,
-  description: longText.optional(),
-  imageUrl: z.url().max(2000).optional(),
+  description: longText.nullish(),
+  imageUrl: z.url().max(2000).nullish(),
   sortOrder: sortOrder.optional(),
   isActive: z.boolean().optional(),
 });
 
-export const updateSectionSchema = createSectionSchema
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateSectionSchema = patchSchema(createSectionSchema);
 
 /**
  * Adding a product to a menu.
@@ -379,14 +379,32 @@ export const addMenuItemSchema = z.object({
   sortOrder: sortOrder.optional(),
 });
 
-export const updateMenuItemSchema = z
-  .object({
+export const updateMenuItemSchema = patchSchema(
+  z.object({
     sectionId: cuidSchema.nullish(),
     priceOverride: moneySchema.nullish(),
     isRecommended: z.boolean().optional(),
     sortOrder: sortOrder.optional(),
-  })
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+  }),
+);
+
+/** Several products at once, every active size of each. */
+export const addMenuProductsSchema = z.object({
+  productIds: z.array(cuidSchema).min(1, "Pick at least one product").max(200, "Add at most 200 products at a time"),
+  sectionId: cuidSchema.nullish(),
+});
+
+/** The menu's complete product order, first to last. */
+export const reorderMenuProductsSchema = z.object({
+  productIds: z.array(cuidSchema).min(1).max(5000),
+});
+
+export const updateMenuProductSchema = patchSchema(
+  z.object({
+    sectionId: cuidSchema.nullish(),
+    isRecommended: z.boolean().optional(),
+  }),
+);
 
 /**
  * The 86 switch. `until` is optional: omitted means "until someone turns it
@@ -409,6 +427,8 @@ export const menuItemQuerySchema = z.object({
 
 export const publicProductQuerySchema = z.object({
   category: z.string().trim().min(1).max(140).optional(),
+  /** The outlet the shopper is browsing, when they have chosen one. */
+  branchId: cuidSchema.optional(),
   search: z.string().trim().min(1).max(100).optional(),
   dietary: dietaryTagSchema.optional(),
   featured: z.stringbool().optional(),
@@ -418,6 +438,12 @@ export const publicProductQuerySchema = z.object({
 
 export const publicMenuQuerySchema = z.object({
   type: menuTypeSchema.optional(),
+  /**
+   * How the customer is ordering. Resolves the menu exactly as the cart prices
+   * it — delivery and pickup fall back to dine-in — which is what a client
+   * showing prices before checkout should ask for. Ignored with `type` or `menu`.
+   */
+  orderType: z.enum(["DELIVERY", "PICKUP", "DINE_IN"]).optional(),
   /** Pick a specific menu instead of letting the branch's schedule decide. */
   menu: z.string().trim().min(1).max(140).optional(),
   /** Preview a menu as it will look at another time — "what shows at 9pm?". */
@@ -433,3 +459,4 @@ export const optionParamSchema = z.object({ id: cuidSchema, optionId: cuidSchema
 export const groupParamSchema = z.object({ id: cuidSchema, groupId: cuidSchema });
 export const sectionParamSchema = z.object({ id: cuidSchema, sectionId: cuidSchema });
 export const itemParamSchema = z.object({ id: cuidSchema, itemId: cuidSchema });
+export const menuProductParamSchema = z.object({ id: cuidSchema, productId: cuidSchema });

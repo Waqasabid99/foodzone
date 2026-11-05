@@ -1,9 +1,9 @@
 import { cookies } from "next/headers";
 import { accessTokenTtlSeconds, refreshTokenTtlSeconds } from "@/lib/api/tokens";
 import { isProduction } from "@/lib/env";
+import { ACCESS_COOKIE, REFRESH_COOKIE } from "@/lib/api/cookie-names";
 
-export const ACCESS_COOKIE = "fz_access";
-export const REFRESH_COOKIE = "fz_refresh";
+export { ACCESS_COOKIE, REFRESH_COOKIE } from "@/lib/api/cookie-names";
 
 /**
  * The website and the mobile app authenticate through the same endpoints; only

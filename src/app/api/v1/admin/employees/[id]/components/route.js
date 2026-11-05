@@ -2,6 +2,7 @@ import { apiHandler, created, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { salaryComponentSchema } from "@/server/validation/hr.schemas";
 import { addSalaryComponent } from "@/server/services/employee.service";
+import { assertRecordAccess } from "@/server/hr/access";
 
 /**
  * A recurring earning or deduction.
@@ -17,5 +18,8 @@ export const POST = apiHandler(
     body: salaryComponentSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => created(await addSalaryComponent(params.id, body, auth)),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "employee", params.id, "employees.manage_salary");
+    return created(await addSalaryComponent(params.id, body, auth));
+  },
 );

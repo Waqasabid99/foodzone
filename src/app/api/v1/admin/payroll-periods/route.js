@@ -1,10 +1,10 @@
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, created, ok, RateLimits } from "@/lib/api";
 import { createPayrollPeriodSchema, listPayrollSchema } from "@/server/validation/hr.schemas";
 import { createPayrollPeriod, listPayrollPeriods } from "@/server/services/payroll.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "payroll.read", query: listPayrollSchema, branch: "query" },
-  async ({ query }) => ok(await listPayrollPeriods(query)),
+  async ({ query, auth }) => ok(await listPayrollPeriods({ ...query, scope: branchScope(auth, "payroll.read") })),
 );
 
 /** Overlapping periods are refused — they would pay the same day twice. */

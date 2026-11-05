@@ -2,6 +2,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { correctAttendanceSchema } from "@/server/validation/hr.schemas";
 import { correctAttendanceDay } from "@/server/services/attendance.service";
+import { assertRecordAccess } from "@/server/hr/access";
 
 /**
  * A supervisor saying the derivation got it wrong.
@@ -17,5 +18,8 @@ export const PATCH = apiHandler(
     body: correctAttendanceSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => ok(await correctAttendanceDay(params.id, body, auth)),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "attendanceDay", params.id, "attendance.edit");
+    return ok(await correctAttendanceDay(params.id, body, auth));
+  },
 );

@@ -1,7 +1,8 @@
-import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { apiHandler, ApiError, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess, productionCostVisible } from "@/server/inventory/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { completeProductionSchema } from "@/server/validation/production.schemas";
-import { completeProduction } from "@/server/services/production-order.service";
+import { completeProduction, withoutRunCosts } from "@/server/services/production-order.service";
 
 /**
  * Books the output into stock at what the run actually cost.
@@ -19,5 +20,16 @@ export const POST = apiHandler(
     body: completeProductionSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => ok(await completeProduction(params.id, body, auth)),
+  async ({ params, body, auth }) => {
+    const branchId = await assertRecordAccess(auth, "production", params.id, "production_orders.complete");
+    const visible = productionCostVisible(auth, branchId);
+    // Labour, overhead and by-product costs are money. Someone who may not see
+    // a run's cost may not set it either; left out, the recipe's own figures
+    // are used.
+    if (!visible && (body.laborCost != null || body.overheadCost != null || body.byProducts?.some((line) => line.unitCost != null))) {
+      throw ApiError.forbidden("You cannot set a run's costs", { required: ["recipes.view_cost"] });
+    }
+    const run = await completeProduction(params.id, body, auth);
+    return ok(visible ? run : withoutRunCosts(run));
+  },
 );

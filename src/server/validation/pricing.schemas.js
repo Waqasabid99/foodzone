@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fitsScale } from "@/lib/money-math";
 import { cuidSchema } from "@/server/validation/schemas";
 import { moneySchema } from "@/server/validation/catalog.schemas";
 
@@ -25,7 +26,7 @@ const percentSchema = z
   .finite()
   .min(0, "A rate cannot be negative")
   .max(100, "A rate cannot exceed 100%")
-  .refine((value) => Number.isInteger(value * 10_000), "A rate supports at most 4 decimal places");
+  .refine((value) => fitsScale(value, 4), "A rate supports at most 4 decimal places");
 
 // --- tax --------------------------------------------------------------------
 

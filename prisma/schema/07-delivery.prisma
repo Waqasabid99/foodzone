@@ -105,11 +105,8 @@ model Delivery {
   codAmount        Decimal   @default(0) @db.Decimal(18, 4)
   codCollectedAt   DateTime?
 
-  /// Handover verification.
-  otpHash       String?
-  proofImageUrl String?
+  /// Who took the order at the door, if the driver said.
   recipientName String?
-  signatureUrl  String?
 
   assignedById  String?
   assignedAt    DateTime?

@@ -121,15 +121,25 @@ export const listEmployeesSchema = z.object({
   cursor: z.string().max(200).optional(),
 });
 
-export const salaryComponentSchema = z.object({
-  name: shortText,
-  isEarning: z.boolean().optional(),
-  amount: positiveAmountSchema.nullish(),
-  percentOfBase: z.number().finite().min(0).max(100).nullish(),
-  isTaxable: z.boolean().optional(),
-  effectiveFrom: z.coerce.date().optional(),
-  effectiveTo: z.coerce.date().nullish(),
-});
+export const salaryComponentSchema = z
+  .object({
+    name: shortText,
+    isEarning: z.boolean().optional(),
+    amount: positiveAmountSchema.nullish(),
+    percentOfBase: z.number().finite().min(0).max(100).nullish(),
+    isTaxable: z.boolean().optional(),
+    /** Where a deduction is credited. Null falls to employee deductions payable. */
+    accountId: cuidSchema.nullish(),
+    effectiveFrom: z.coerce.date().optional(),
+    effectiveTo: z.coerce.date().nullish(),
+  })
+  // Refused rather than ignored on an earning: gross pay is expensed as one
+  // figure, so an account set there would be read by nothing — and a field that
+  // silently does nothing is worse than one that is not offered.
+  .refine((data) => !(data.accountId && data.isEarning !== false), {
+    message: "Only a deduction posts to its own account",
+    path: ["accountId"],
+  });
 
 export const endComponentSchema = z.object({ effectiveTo: z.coerce.date().optional() });
 

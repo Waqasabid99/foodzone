@@ -1,6 +1,7 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { approvePayout } from "@/server/services/driver-payout.service";
+import { assertRecordAccess } from "@/server/delivery/access";
 
 export const POST = apiHandler(
   {
@@ -9,5 +10,8 @@ export const POST = apiHandler(
     params: idParamSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, auth }) => ok(await approvePayout({ payoutId: params.id, actor: auth })),
+  async ({ params, auth }) => {
+    await assertRecordAccess(auth, "driverPayout", params.id, "driver_payouts.approve");
+    return ok(await approvePayout({ payoutId: params.id, actor: auth }));
+  },
 );

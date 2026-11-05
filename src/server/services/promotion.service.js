@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { promotionScopeWhere } from "@/server/marketing/access";
 import { ApiError } from "@/lib/api";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { zonedNow } from "@/server/services/branch.service";
@@ -139,9 +140,14 @@ async function assertTargetsExist(targets = []) {
   }
 }
 
-export async function listPromotions({ limit = 20, cursor, isActive, type, branchId, search } = {}) {
+export async function listPromotions({ limit = 20, cursor, isActive, type, branchId, search, scope = null } = {}) {
+  // `scope` is the caller's branches; `branchId` is the one they asked for.
+  // Both apply. A chain-wide offer matches either way, which is why this is
+  // not a plain equality on a column.
+  const reach = await promotionScopeWhere(scope);
   const rows = await prisma.promotion.findMany({
     where: {
+      ...(Object.keys(reach).length ? { AND: [reach] } : {}),
       ...(isActive !== undefined ? { isActive } : {}),
       ...(type ? { type } : {}),
       // An empty `branchIds` means chain-wide, so it has to match too.

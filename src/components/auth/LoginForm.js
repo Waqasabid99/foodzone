@@ -7,7 +7,7 @@ import { toast } from "react-toastify";
 import { ArrowRight, Mail } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { toFormErrors } from "@/lib/form-errors";
-import { safeRedirect } from "@/lib/redirects";
+import { signInDestination } from "@/lib/redirects";
 import { setSessionUser } from "@/hooks/useSession";
 import Field from "@/components/ui/Field";
 import PasswordField from "@/components/ui/PasswordField";
@@ -44,10 +44,10 @@ export default function LoginForm({ next = "/" }) {
 
       toast.success(`Welcome back, ${session.user.name}.`);
 
-      // An unverified account holds a real session on purpose, but it cannot
-      // check out — so it is sent to finish verifying rather than to a menu
-      // that will stop it at the last step.
-      const destination = session.user.emailVerified ? safeRedirect(next) : "/verify-email";
+      // Customers who have not verified go and verify; staff go to work. The
+      // rule lives in one place because the login page, the register page and
+      // the workspace layout all have to agree on who is staff.
+      const destination = signInDestination(session.user, next);
 
       router.push(destination);
       // The layout above this page was server-rendered for a guest and is kept

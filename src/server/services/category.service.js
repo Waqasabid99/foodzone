@@ -14,7 +14,7 @@ import { generateUniqueSlug } from "@/server/utils/slug";
  */
 
 /** Deep enough for "Food > Pizza > By the slice", shallow enough to navigate. */
-const MAX_DEPTH = 4;
+export const MAX_DEPTH = 4;
 
 const SELECT = {
   id: true,
@@ -184,13 +184,25 @@ export async function updateCategory(id, data) {
 export async function deleteCategory(id) {
   const category = await prisma.category.findUnique({
     where: { id },
-    select: { id: true, _count: { select: { products: true, children: true } } },
+    select: {
+      id: true,
+      _count: { select: { products: true, children: true } },
+    },
   });
   if (!category) throw ApiError.notFound("Category not found");
 
   if (category._count.products > 0) {
+    // Deleted products still hold the foreign key, so they block this too — but
+    // they are invisible in the product list, and "still holds 3 products" over
+    // a category that looks empty sends someone hunting for things that are not
+    // there. Name which kind is in the way.
+    const live = await prisma.product.count({ where: { categoryId: id, deletedAt: null } });
+    const deleted = category._count.products - live;
+
     throw ApiError.conflict(
-      `This category still holds ${category._count.products} product(s). Move them first, or deactivate the category instead.`,
+      live > 0
+        ? `This category still holds ${live} product${live === 1 ? "" : "s"}. Move them to another category first, or deactivate this one instead.`
+        : `${deleted} deleted product${deleted === 1 ? " still belongs" : "s still belong"} to this category and keep it from being removed. Deactivate it instead.`,
     );
   }
   if (category._count.children > 0) {

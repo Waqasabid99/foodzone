@@ -289,3 +289,69 @@ export function priceOrder({ lines, type = "DELIVERY", settings = {}, discounts 
     })),
   };
 }
+
+/**
+ * The order's totals once a later round is added to it.
+ *
+ * A second round at a table is **not** a re-price of the whole order. The
+ * lines already on it are snapshots of what was sold, at the prices that were
+ * true then, under the offers that were live then — re-resolving them against
+ * today's menu would rewrite history, and re-running the promotion engine
+ * would award the same coupon twice. So the addition is priced on its own at
+ * today's menu, and only the figures that genuinely depend on the new subtotal
+ * are recomputed here:
+ *
+ *   * the **service charge**, because it is a percentage of what is being
+ *     charged, and a table that orders a second bottle owes service on it;
+ *   * the **total** and its rounding, which follow from everything else.
+ *
+ * The flat fees and the discounts already granted are carried across
+ * untouched. `itemDiscountTotal` is the discount that came off the goods — the
+ * caller must not pass a delivery waiver here, which is why adding to a
+ * delivery order is refused upstream rather than guessed at.
+ *
+ * Pure, like the rest of this file: numbers in, numbers out.
+ */
+export function totalsAfterAdding({ order, addition, type = "DINE_IN", settings = {} }) {
+  const pricesIncludeTax = settings["ordering.prices_include_tax"] ?? true;
+
+  const subtotal = D(order.subtotal).plus(D(addition.subtotal));
+  const taxTotal = D(order.taxTotal).plus(D(addition.taxTotal));
+  const itemDiscountTotal = D(order.itemDiscountTotal ?? order.discountTotal);
+  const discountedSubtotal = subtotal.minus(itemDiscountTotal);
+
+  const serviceApplies = (settings["ordering.service_charge_applies_to"] ?? ["DINE_IN"]).includes(type);
+  const serviceCharge = serviceApplies
+    ? discountedSubtotal.times(D(settings["ordering.service_charge_percent"] ?? 0)).dividedBy(100)
+    : D(order.serviceCharge);
+
+  const deliveryFee = D(order.deliveryFee);
+  const packagingFee = D(order.packagingFee);
+  const tipAmount = D(order.tipAmount);
+  const taxToAdd = pricesIncludeTax ? ZERO : taxTotal;
+
+  const beforeRounding = subtotal
+    .minus(D(order.discountTotal))
+    .plus(taxToAdd)
+    .plus(deliveryFee)
+    .plus(packagingFee)
+    .plus(serviceCharge)
+    .plus(tipAmount);
+
+  const { total: grandTotal, roundOff } = applyRounding(
+    beforeRounding,
+    settings["ordering.rounding_increment"] ?? 0,
+  );
+
+  return {
+    subtotal: money(subtotal),
+    taxTotal: money(taxTotal),
+    discountTotal: money(order.discountTotal),
+    deliveryFee: money(deliveryFee),
+    packagingFee: money(packagingFee),
+    serviceCharge: money(serviceCharge),
+    tipAmount: money(tipAmount),
+    roundOff,
+    grandTotal,
+  };
+}

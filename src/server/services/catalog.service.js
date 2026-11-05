@@ -74,10 +74,31 @@ export async function publicCategories({ tree = false } = {}) {
   return tree ? buildTree(items) : items;
 }
 
-export async function publicProducts({ category, search, dietary, featured, limit = 20, cursor } = {}) {
+/**
+ * Which products a shopper is shown.
+ *
+ * A product with no branch is the chain's; one pinned to an outlet belongs
+ * only there. Three cases, and the third exists to avoid a trap:
+ *
+ *   * a branch chosen — that outlet's items plus the chain's;
+ *   * several branches and none chosen — the chain's only, because an item
+ *     one outlet sells cannot be bought until you say which outlet;
+ *   * a single-restaurant installation — everything, whether or not the
+ *     operator happened to pin products to their one branch. Without this
+ *     last case a single-branch shop that set a branch on its products would
+ *     show an empty menu to every visitor.
+ */
+async function visibleBranchWhere(branchId) {
+  if (branchId) return { OR: [{ branchId: null }, { branchId }] };
+  const branches = await prisma.branch.count({ where: { isActive: true } });
+  return branches <= 1 ? {} : { branchId: null };
+}
+
+export async function publicProducts({ category, search, dietary, featured, branchId, limit = 20, cursor } = {}) {
   const rows = await prisma.product.findMany({
     where: {
       ...VISIBLE,
+      ...(await visibleBranchWhere(branchId)),
       ...(category ? { category: { isActive: true, OR: [{ slug: category }, { id: category }] } } : {}),
       ...(featured !== undefined ? { isFeatured: featured } : {}),
       ...(dietary ? { dietary: { has: dietary } } : {}),
@@ -154,7 +175,44 @@ export async function publicProduct(slug) {
               quantity: true,
               priceDelta: true,
               isDefault: true,
-              product: { select: { id: true, name: true, slug: true, imageUrl: true } },
+              /*
+               * The chosen item's own options come with it, so a meal deal can
+               * ask for the burger without onions. Same shape as the product's
+               * own groups above, because the same form renders both and the
+               * cart resolves both with one function.
+               */
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                  imageUrl: true,
+                  modifierGroups: {
+                    orderBy: { sortOrder: "asc" },
+                    select: {
+                      isRequired: true,
+                      minSelect: true,
+                      maxSelect: true,
+                      group: {
+                        select: {
+                          id: true,
+                          name: true,
+                          selectionType: true,
+                          minSelect: true,
+                          maxSelect: true,
+                          allowQuantity: true,
+                          isActive: true,
+                          options: {
+                            where: { isActive: true },
+                            select: { id: true, name: true, priceDelta: true, isDefault: true, sortOrder: true },
+                            orderBy: { sortOrder: "asc" },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
               variant: { select: { id: true, name: true, price: true } },
             },
           },

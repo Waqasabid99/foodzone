@@ -1,6 +1,6 @@
-import { apiHandler, can, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, ApiError, can, created, ok, RateLimits } from "@/lib/api";
 import { createRecipeSchema, listRecipesSchema } from "@/server/validation/production.schemas";
-import { createRecipe, listRecipes } from "@/server/services/recipe.service";
+import { createRecipe, listRecipes, withoutCosts } from "@/server/services/recipe.service";
 
 /**
  * Costs are withheld unless the caller holds `recipes.view_cost`.
@@ -13,6 +13,14 @@ export const GET = apiHandler(
     ok(await listRecipes({ ...query, includeCost: can(auth, "recipes.view_cost") })),
 );
 
+/**
+ * Recipes belong to the whole company — one burger, made the same way at
+ * every outlet — but a branch Head Chef may write them, not only a
+ * company-wide role. That is a decision, not an oversight: the chefs are who
+ * the recipes come from. So these routes check the permission with no branch
+ * (any grant of it counts), unlike items and units, which need a company-wide
+ * grant. Every change is versioned and audited with its author.
+ */
 export const POST = apiHandler(
   {
     auth: true,
@@ -20,5 +28,11 @@ export const POST = apiHandler(
     body: createRecipeSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ body, auth }) => created(await createRecipe(body, auth)),
+  async ({ body, auth }) => {
+    if (!can(auth, "recipes.view_cost") && (body.laborCost != null || body.overheadCost != null)) {
+      throw ApiError.forbidden("You cannot set a recipe's costs", { required: ["recipes.view_cost"] });
+    }
+    const recipe = await createRecipe(body, auth);
+    return created(can(auth, "recipes.view_cost") ? recipe : withoutCosts(recipe));
+  },
 );

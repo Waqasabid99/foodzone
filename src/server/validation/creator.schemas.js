@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { cuidSchema } from "@/server/validation/schemas";
+import { orderChannelSchema, orderTypeSchema } from "@/server/validation/ordering.schemas";
 import { nonNegativeAmountSchema, positiveAmountSchema } from "@/server/validation/finance.schemas";
+import { fitsScale } from "@/lib/money-math";
 
 /**
  * Creator program request schemas.
@@ -39,7 +41,7 @@ export const rejectionReasonSchema = z.enum([
   "BRANDING_VIOLATION",
   "OTHER",
 ]);
-export const surfaceSchema = z.enum(["PRODUCT_PAGE", "VIDEO_FEED", "SHARE_LINK", "SEARCH", "HOME", "QR_MENU"]);
+export const surfaceSchema = z.enum(["PRODUCT_PAGE", "VIDEO_FEED", "CREATOR_PROFILE", "SHARE_LINK", "SEARCH", "HOME", "QR_MENU"]);
 export const shareChannelSchema = z.enum([
   "WHATSAPP",
   "INSTAGRAM",
@@ -61,7 +63,6 @@ export const strikeReasonSchema = z.enum([
   "REPEATED_REJECTIONS",
   "OTHER",
 ]);
-export const reportReasonSchema = z.enum(["INAPPROPRIATE", "MISLEADING", "SPAM", "NOT_THE_PRODUCT", "COPYRIGHT", "OTHER"]);
 
 // --- program configuration ---------------------------------------------------
 
@@ -191,20 +192,6 @@ export const listVideosSchema = z.object({
 
 export const featureVideoSchema = z.object({ rank: z.number().int().min(0).max(9999).nullish() });
 
-export const reportVideoSchema = z.object({
-  reason: reportReasonSchema,
-  note: z.string().trim().max(1000).nullish(),
-  sessionId: sessionId.optional(),
-});
-
-export const resolveReportSchema = z.object({ status: z.enum(["REVIEWED", "DISMISSED", "ACTIONED"]) });
-
-export const listReportsSchema = z.object({
-  status: z.enum(["OPEN", "REVIEWED", "DISMISSED", "ACTIONED"]).optional(),
-  videoId: cuidSchema.optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional(),
-  cursor: z.string().max(200).optional(),
-});
 
 // --- engagement ------------------------------------------------------------------
 
@@ -225,6 +212,9 @@ export const shareSchema = z.object({
 });
 
 export const feedQuerySchema = z.object({
+  /// Which outlet's feed. Optional only because a single-restaurant
+  /// installation has nothing to choose between; a chain is asked.
+  branchId: cuidSchema.optional(),
   categoryId: cuidSchema.optional(),
   creatorHandle: z.string().trim().max(40).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
@@ -234,6 +224,9 @@ export const feedQuerySchema = z.object({
 export const statsQuerySchema = z.object({
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
+  /// Narrows the money to one outlet. The caller's own scope is applied on
+  /// top of it regardless, so this can only ever subtract.
+  branchId: cuidSchema.optional(),
 });
 
 // --- commission rules --------------------------------------------------------------
@@ -255,8 +248,14 @@ export const createRuleSchema = z.object({
   minOrderAmount: nonNegativeAmountSchema.nullish(),
   minLineQuantity: z.number().int().min(1).max(999).nullish(),
   branchIds: z.array(cuidSchema).max(50).optional(),
-  channels: z.array(z.enum(["WEB", "APP", "POS", "PHONE", "QR_TABLE", "KIOSK", "THIRD_PARTY"])).max(10).optional(),
-  orderTypes: z.array(z.enum(["DELIVERY", "PICKUP", "DINE_IN", "TAKEAWAY"])).max(6).optional(),
+  // Both of these are real Postgres enum columns, so the lists have to be the
+  // database's, not a plausible-looking copy. They previously were not: a rule
+  // restricted to the mobile app could not be saved at all (`MOBILE_APP` was
+  // missing), while four values that exist nowhere (`APP`, `QR_TABLE`,
+  // `KIOSK`, `THIRD_PARTY`) and a fifth order type (`TAKEAWAY`) passed
+  // validation and then failed against the column.
+  channels: z.array(orderChannelSchema).max(10).optional(),
+  orderTypes: z.array(orderTypeSchema).max(6).optional(),
   creatorId: cuidSchema.nullish(),
   priority: z.number().int().min(-1000).max(1000).optional(),
   startsAt: z.coerce.date().nullish(),
@@ -286,8 +285,8 @@ export const simulateSchema = z.object({
   orderTotal: nonNegativeAmountSchema.optional(),
   quantity: z.number().int().min(1).max(999).optional(),
   branchId: cuidSchema.optional(),
-  channel: z.enum(["WEB", "APP", "POS", "PHONE", "QR_TABLE", "KIOSK", "THIRD_PARTY"]).optional(),
-  orderType: z.enum(["DELIVERY", "PICKUP", "DINE_IN", "TAKEAWAY"]).optional(),
+  channel: orderChannelSchema.optional(),
+  orderType: orderTypeSchema.optional(),
   creatorId: cuidSchema.optional(),
 });
 
@@ -298,6 +297,7 @@ export const listEarningsSchema = z.object({
   orderId: cuidSchema.optional(),
   videoId: cuidSchema.optional(),
   status: z.enum(["PENDING", "APPROVED", "CREDITED", "NOT_QUALIFIED", "REVERSED", "REJECTED"]).optional(),
+  branchId: cuidSchema.optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
@@ -321,7 +321,32 @@ export const statementQuerySchema = z.object({
   cursor: z.string().max(200).optional(),
 });
 
-export const redeemQuoteSchema = z.object({ orderTotal: nonNegativeAmountSchema });
+/**
+ * How much credit an order of this size could take.
+ *
+ * `orderTotal` arrives as a **query** parameter, so it is a string, and the
+ * shared `nonNegativeAmountSchema` is a body schema built on `z.number()`.
+ * Using it here rejected every call the endpoint could ever receive, which
+ * meant store credit could not be quoted at checkout at all. Coerced here
+ * rather than loosening the shared schema, which is right for bodies.
+ */
+/**
+ * How much credit an order of this size could take.
+ *
+ * `orderTotal` arrives as a **query** parameter, so it is a string, and the
+ * shared `nonNegativeAmountSchema` is a body schema built on `z.number()`.
+ * Using it here rejected every call the endpoint could ever receive, which
+ * meant store credit could not be quoted at checkout at all. Coerced here
+ * rather than loosening the shared schema, which is right for bodies.
+ */
+export const redeemQuoteSchema = z.object({
+  orderTotal: z.coerce
+    .number()
+    .finite()
+    .min(0)
+    .max(999_999_999_999)
+    .refine((value) => fitsScale(value, 4), "Supports at most 4 decimal places"),
+});
 
 export const markSeenSchema = z.object({ ids: z.array(cuidSchema).max(200).optional() });
 

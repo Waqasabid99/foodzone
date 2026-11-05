@@ -1,4 +1,5 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { approveRefund } from "@/server/services/refund.service";
 
@@ -15,6 +16,8 @@ export const POST = apiHandler(
     params: idParamSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, auth, ipAddress, userAgent }) =>
-    ok(await approveRefund({ refundId: params.id, actor: auth, context: { ipAddress, userAgent } })),
+  async ({ params, auth, ipAddress, userAgent }) => {
+    await assertRecordAccess(auth, "refund", params.id, "refunds.approve");
+    return ok(await approveRefund({ refundId: params.id, actor: auth, context: { ipAddress, userAgent } }));
+  },
 );

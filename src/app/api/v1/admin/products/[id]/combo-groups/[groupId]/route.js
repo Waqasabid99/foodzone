@@ -1,6 +1,7 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { groupParamSchema, updateComboGroupSchema } from "@/server/validation/catalog.schemas";
 import { deleteComboGroup, updateComboGroup } from "@/server/services/combo.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 export const PATCH = apiHandler(
   {
@@ -10,6 +11,7 @@ export const PATCH = apiHandler(
     body: updateComboGroupSchema,
     rateLimit: RateLimits.write,
     audit: { action: "combo_group.update", entityType: "ComboGroup", entityId: ({ params }) => params.groupId },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ params, body }) =>
     ok(await updateComboGroup({ comboProductId: params.id, groupId: params.groupId, data: body })),
@@ -22,6 +24,7 @@ export const DELETE = apiHandler(
     params: groupParamSchema,
     rateLimit: RateLimits.write,
     audit: { action: "combo_group.delete", entityType: "ComboGroup", entityId: ({ params }) => params.groupId },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ params }) => ok(await deleteComboGroup({ comboProductId: params.id, groupId: params.groupId })),
 );

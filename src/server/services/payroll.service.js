@@ -7,10 +7,12 @@ import { recordAudit } from "@/server/utils/audit";
 import { logger } from "@/lib/logger";
 import { money } from "@/server/accounting/balance";
 import { enqueue } from "@/server/jobs/outbox";
+import { branchFilter } from "@/server/hr/access";
 import { buildPayslip } from "@/server/attendance/payroll";
 import { summariseDays } from "@/server/attendance/derive";
 import { daysBetween, startOfDay } from "@/server/attendance/shift";
 import { activeComponents } from "@/server/services/employee.service";
+import { getSettings } from "@/server/services/setting.service";
 
 /**
  * Payroll.
@@ -56,7 +58,10 @@ const PAYSLIP_SELECT = {
     select: { id: true, employeeCode: true, firstName: true, lastName: true, salaryType: true, currency: true },
   },
   lines: {
-    select: { id: true, code: true, label: true, isEarning: true, quantity: true, rate: true, amount: true },
+    select: {
+      id: true, code: true, label: true, isEarning: true, quantity: true, rate: true, amount: true,
+      account: { select: { id: true, code: true, name: true } },
+    },
     orderBy: { id: "asc" },
   },
 };
@@ -274,6 +279,7 @@ export async function generatePayroll(id, { employeeIds = null, actor }) {
               quantity: line.quantity != null ? D(line.quantity) : null,
               rate: line.rate != null ? D(line.rate) : null,
               amount: line.amount,
+              accountId: line.accountId ?? null,
             })),
           },
         },
@@ -346,6 +352,21 @@ export async function approvePayroll(id, actor) {
     throw ApiError.conflict("There are no payslips in this period", { hint: "Generate them first" });
   }
 
+  // Two people on the payroll. Checked on identity rather than permissions,
+  // because the seeded HR manager holds `payroll.*` and a super admin holds
+  // everything — so a permission test would let exactly the people this is
+  // about approve their own run.
+  const settings = await getSettings({ branchId: period.branchId });
+  const needsSecondPerson = settings["payroll.require_separate_approver"] ?? true;
+  const selfApproving = Boolean(period.processedById) && period.processedById === actor.userId;
+
+  if (needsSecondPerson && selfApproving) {
+    throw ApiError.forbidden("Payroll has to be approved by somebody other than the person who ran it", {
+      processedById: period.processedById,
+      setting: "payroll.require_separate_approver",
+    });
+  }
+
   const approved = await withTransaction(async (tx) => {
     // Freeze the attendance the payslips were built from.
     const locked = await tx.attendanceDay.updateMany({
@@ -377,7 +398,15 @@ export async function approvePayroll(id, actor) {
     action: "payroll.approve",
     entityType: "PayrollPeriod",
     entityId: id,
-    changes: { name: period.name, payslips, totalNet: Number(period.totalNet) },
+    changes: {
+      name: period.name,
+      payslips,
+      totalNet: Number(period.totalNet),
+      // Only ever true where a branch has turned the second person off. It is
+      // on the audit entry so the exception is visible without having to know
+      // the setting's history.
+      ...(selfApproving ? { selfApproved: true } : {}),
+    },
   });
 
   return shapePeriod(approved);
@@ -478,9 +507,15 @@ export async function cancelPayroll(id, { reason = null, actor }) {
   return shapePeriod(cancelled);
 }
 
-export async function listPayrollPeriods({ branchId, status, limit = 20, cursor } = {}) {
+export async function listPayrollPeriods({ branchId, status, scope = null, limit = 20, cursor } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.payrollPeriod.findMany({
-    where: { ...(branchId ? { branchId } : {}), ...(status ? { status } : {}) },
+    where: {
+      ...(branchId ? { branchId } : {}),
+      // A company-wide run has no branch; only somebody unrestricted sees it.
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
+      ...(status ? { status } : {}),
+    },
     select: PERIOD_SELECT,
     orderBy: { startDate: "desc" },
     ...cursorArgs(cursor, limit),
@@ -490,11 +525,14 @@ export async function listPayrollPeriods({ branchId, status, limit = 20, cursor 
   return { ...page, items: page.items.map(shapePeriod) };
 }
 
-export async function listPayslips({ periodId, employeeId, status, limit = 50, cursor } = {}) {
+export async function listPayslips({ periodId, employeeId, status, scope = null, limit = 50, cursor } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.payslip.findMany({
     where: {
       ...(periodId ? { periodId } : {}),
       ...(employeeId ? { employeeId } : {}),
+      // A payslip is somebody's pay: scoped by the branch they work at.
+      ...(filter ? { AND: [{ employee: { branchId: filter } }] } : {}),
       ...(status ? { status } : {}),
     },
     select: PAYSLIP_SELECT,

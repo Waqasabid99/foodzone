@@ -68,9 +68,13 @@ export function passwordResetEmail({ name, code, ttlMinutes }) {
   };
 }
 
-export function staffInviteEmail({ name, code, inviterName, roleNames, ttlHours }) {
+export function staffInviteEmail({ name, email, code, inviterName, roleNames, ttlHours }) {
   const { APP_NAME, APP_URL } = env();
   const roles = roleNames?.length ? roleNames.join(", ") : "team member";
+  // The address goes in the link so the form arrives filled in. It is the one
+  // field the recipient cannot guess wrong but can easily mistype, and it is
+  // already in their inbox — this reveals nothing they do not have.
+  const href = email ? `${APP_URL}/invite?email=${encodeURIComponent(email)}` : `${APP_URL}/invite`;
 
   return {
     subject: `You have been invited to ${APP_NAME}`,
@@ -78,7 +82,7 @@ export function staffInviteEmail({ name, code, inviterName, roleNames, ttlHours 
       title: `Join ${APP_NAME}`,
       intro: `${inviterName || "An administrator"} invited you to ${APP_NAME} as ${roles}. Use this code to set your password and activate your account.`,
       code,
-      outro: `Accept at ${APP_URL}/invite — the code expires in ${ttlHours} hours.`,
+      outro: `Accept at ${href} — the code expires in ${ttlHours} hours.`,
       footer: "If you were not expecting this invitation, ignore this email.",
     }),
   };
@@ -92,6 +96,25 @@ export function passwordChangedEmail({ name, at }) {
       title: "Your password was changed",
       intro: `Hi ${name || "there"}, your password was changed on ${at}. Every other device has been signed out.`,
       footer: "If this was not you, reset your password immediately and contact support.",
+    }),
+  };
+}
+
+/**
+ * Tells someone an administrator issued them a temporary password.
+ *
+ * The password itself is deliberately not in here: it is handed over in
+ * person, and an email that carries it turns a mailbox into a way into the
+ * account. This is the alarm — if they did not ask for it, someone should hear.
+ */
+export function temporaryPasswordEmail({ name, at, byName }) {
+  const { APP_NAME } = env();
+  return {
+    subject: `A temporary ${APP_NAME} password was set for you`,
+    ...layout({
+      title: "A temporary password was set",
+      intro: `Hi ${name || "there"}, ${byName ? `${byName} ` : "an administrator "}set a temporary password on your account on ${at}, and every device has been signed out. You will be asked to choose your own password the next time you sign in.`,
+      footer: "If you did not ask for this, tell your manager straight away — someone else can sign in as you until you change it.",
     }),
   };
 }

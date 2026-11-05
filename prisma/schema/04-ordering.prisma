@@ -105,6 +105,11 @@ model Order {
   /// Populated for guest / phone / QR orders with no account.
   guestName   String?
   guestPhone  String?
+  /// Last ten digits of `guestPhone`, written on create. Guest orders are
+  /// grouped into one customer by phone number, and the numbers are typed
+  /// differently every time; this is the comparable form, and it is indexed so
+  /// that grouping does not scan the order table.
+  guestPhoneKey String?
   guestEmail  String?
 
   channel      OrderChannel @default(WEB)
@@ -141,6 +146,23 @@ model Order {
   kitchenNote   String?
   cancelReason  String?
   cancelledById String?
+
+  /// The kitchen has taken this ticket off its board and wants somebody to
+  /// decide what happens to it — a walk-out, a duplicate, an order nobody can
+  /// make. Deliberately NOT a status: the sale is still live and still owed,
+  /// and whether it is cancelled or refunded is a till decision, not a
+  /// kitchen one. Clearing these three puts the ticket straight back up.
+  setAsideAt     DateTime?
+  setAsideById   String?
+  setAsideReason String?
+
+  /// The table has asked to settle, and whoever takes the money has not yet.
+  /// Also not a status: the order carries on exactly as it was, the kitchen is
+  /// unaffected, and the only thing that has changed is that a person is now
+  /// sitting there waiting. Cleared when the bill is paid, or by hand if the
+  /// waiter asked by mistake.
+  billRequestedAt   DateTime?
+  billRequestedById String?
   /// Where the order came in from, for aggregator/POS reconciliation.
   externalRef   String?
   placedById    String? // staff member for POS/phone orders
@@ -172,7 +194,12 @@ model Order {
   creatorWalletTransactions CreatorWalletTransaction[]
 
   @@index([branchId, status])
+  /// The kitchen board asks which live orders are not set aside, every poll.
+  @@index([branchId, setAsideAt])
+  /// The till asks which tables are waiting to pay, every poll.
+  @@index([branchId, billRequestedAt])
   @@index([userId, placedAt])
+  @@index([guestPhoneKey])
   @@index([placedAt])
   @@index([paymentState])
   @@index([tableId])
@@ -206,6 +233,16 @@ model OrderItem {
   parent         OrderItem?      @relation("ComboLine", fields: [parentItemId], references: [id])
   parentItemId   String?
   children       OrderItem[]     @relation("ComboLine")
+  /// Which round of the meal this line belongs to. Everything placed with the
+  /// order is course 1; a second round added at the table is course 2, and so
+  /// on. The kitchen board treats each course as its own ticket with its own
+  /// clock, because a table ordering dessert must not turn an hour-old ticket
+  /// red again — and the cook needs to see "two coffees, just now", not an
+  /// order they finished long ago reopening.
+  course         Int             @default(1)
+  /// When this course was sent to the kitchen. Null on course 1, which fires
+  /// with the order and clocks from `Order.placedAt`.
+  firedAt        DateTime?
   preparedAt     DateTime?
   cancelledAt    DateTime?
   cancelReason   String?
@@ -213,6 +250,7 @@ model OrderItem {
   modifiers OrderItemModifier[]
 
   @@index([orderId])
+  @@index([orderId, course])
   @@index([productId])
   @@index([stationId, status])
 }

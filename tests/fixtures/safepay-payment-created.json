@@ -1,0 +1,8 @@
+{
+  "note": "A real Safepay sandbox callback, captured 2026-11-03, with the merchant's client_id, the payer address and the endpoint host replaced, then re-signed with the throwaway secret below. Kept because Safepay's published payload does not match what they actually send: the real envelope nests everything under `data`, types use a colon (payment:created), state is PAID rather than TRACKER_ENDED, and money arrives as strings in major units.",
+  "secret": "fixture-webhook-secret-not-real",
+  "signatureHeader": "x-sfpy-signature",
+  "signature": "b7cb999918a0752915b6c3e27a2f8bc880e2e43d1c230c79d630a90285dfbbc8d4fa1313629ac9b04037b91a880ac10ac8161b9bad82af79954dbf3979dd273d",
+  "contentType": "application/json; charset=utf-8",
+  "bodyText": "{\"data\":{\"token\":\"DBKVUO58D4IS73A9VQJG\",\"client_id\":\"sec_00000000-0000-4000-8000-000000000000\",\"type\":\"payment:created\",\"endpoint\":\"https://example.test/api/v1/webhooks/payments/safepay/br_fixture\",\"notification\":{\"tracker\":\"tracker_dbkvunt8d4is73d3b84g\",\"reference\":\"333\",\"intent\":\"PAYFAST\",\"fee\":\"4.92\",\"net\":\"145.08\",\"user\":\"payer@example.com\",\"state\":\"PAID\",\"amount\":\"150\",\"currency\":\"PKR\",\"metadata\":{\"order_id\":\"XG102312\",\"source\":\"shopify\"}},\"delivery_attempts\":1,\"resource\":\"notification\",\"next_attempt_at\":\"2026-11-03T15:36:00Z\",\"created_at\":\"2026-11-03T15:36:00Z\"}}\n"
+}

@@ -4,8 +4,10 @@ import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
 import { logger } from "@/lib/logger";
 import { getProvider } from "@/server/payments/providers";
+import { resolveProviderConfig } from "@/server/services/payment-provider.service";
 import { syncOrderPaymentState } from "@/server/services/payment.service";
 import { money } from "@/server/pricing/engine";
+import { enqueue } from "@/server/jobs/outbox";
 
 /**
  * Gateway webhooks.
@@ -46,10 +48,36 @@ const SELECT = {
  * does not round-trip key order or number formatting, so a signature checked
  * against re-encoded JSON is a check that passes when it should fail.
  */
-export async function handleWebhook({ providerName, rawBody, headers }) {
+export async function handleWebhook({ providerName, branchId = null, rawBody, headers }) {
   const provider = getProvider(providerName);
 
-  if (!provider.verifySignature({ rawBody, headers })) {
+  /*
+   * The signing secret belongs to the restaurant, not to this deployment, so
+   * it has to be resolved before the signature can be checked — and the branch
+   * can only come from the URL, because the body is not trustworthy (or even
+   * parsed) until the check has passed.
+   *
+   * `requireEnabled: false` on purpose: a gateway switched off a minute ago
+   * will still deliver callbacks for payments it already took, and refusing to
+   * verify those would strand real money in an unknown state.
+   */
+  let config = {};
+  if (branchId) {
+    try {
+      ({ config } = await resolveProviderConfig({ provider: providerName, branchId, requireEnabled: false }));
+    } catch (error) {
+      // An unconfigured branch cannot have produced a genuine callback, so this
+      // is indistinguishable from a forgery and is treated as one.
+      logger.warn("payment webhook for a branch with no credentials", {
+        provider: providerName,
+        branchId,
+        error: error.message,
+      });
+      throw ApiError.unauthorized("Invalid webhook signature");
+    }
+  }
+
+  if (!provider.verifySignature({ rawBody, headers, config })) {
     // 401 and nothing stored. Persisting unverified callbacks would let anyone
     // fill the table, and a replay of one would then apply it.
     throw ApiError.unauthorized("Invalid webhook signature");
@@ -89,13 +117,32 @@ export async function handleWebhook({ providerName, rawBody, headers }) {
       eventId: event.eventId,
       eventType: event.type ?? "unknown",
       payload,
-      signature: headers?.["x-mock-signature"] ?? headers?.get?.("x-mock-signature") ?? null,
+      branchId,
+      // Whichever header this gateway signs with. It was hardcoded to the mock
+      // provider's, so every real gateway stored a null signature on a row
+      // whose whole purpose is to evidence that a callback was genuine.
+      signature: signatureFrom(provider, headers),
       status: "RECEIVED",
     },
     select: SELECT,
   });
 
   return processStored(stored.id, event, provider.name);
+}
+
+/**
+ * The signature header for whichever gateway sent this.
+ *
+ * A provider declares its own header name; the fallback list covers the ones
+ * already in use. Stored as evidence, never re-verified on replay.
+ */
+function signatureFrom(provider, headers) {
+  const names = [provider.signatureHeader, "x-sfpy-signature", "x-mock-signature"].filter(Boolean);
+  for (const name of names) {
+    const value = headers?.[name] ?? headers?.get?.(name);
+    if (value) return String(value);
+  }
+  return null;
 }
 
 /** Applies a stored event, recording the outcome either way. */
@@ -235,6 +282,15 @@ async function applyCapture(payment, event) {
       },
     });
     await syncOrderPaymentState(tx, payment.orderId);
+
+    // The same announcement a capture made at the till raises. `postPaymentReceipt`
+    // listens for nothing else, so without it a gateway settlement leaves the
+    // sale in accounts receivable while the money is in the bank.
+    await enqueue({
+      eventType: "payment.captured",
+      payload: { paymentId: payment.id, orderId: payment.orderId },
+      db: tx,
+    });
   });
 
   return {
@@ -298,7 +354,7 @@ export async function getWebhookEvent(id) {
 export async function replayWebhookEvent(id) {
   const stored = await prisma.paymentWebhookEvent.findUnique({
     where: { id },
-    select: { id: true, provider: true, payload: true },
+    select: { id: true, provider: true, payload: true, branchId: true },
   });
   if (!stored) throw ApiError.notFound("Webhook event not found");
 

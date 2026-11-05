@@ -7,6 +7,7 @@ import { startOfDay } from "@/server/attendance/shift";
 import { attemptsRemaining } from "@/server/creator/strikes";
 import { programConfig } from "@/server/services/creator.service";
 import { walletFor } from "@/server/services/creator-wallet.service";
+import { earningScopeWhere } from "@/server/creator/access";
 
 /**
  * What a creator sees when they open the app.
@@ -52,7 +53,7 @@ export async function creatorDashboard({ userId }) {
   const config = await programConfig();
   const wallet = await walletFor(creator.id);
 
-  const [byStatus, videos, pendingEarnings, recentEarnings, unseenAppreciation, openReports] = await Promise.all([
+  const [byStatus, videos, pendingEarnings, recentEarnings, unseenAppreciation] = await Promise.all([
     prisma.creatorVideo.groupBy({
       by: ["status"],
       where: { creatorId: creator.id },
@@ -104,7 +105,6 @@ export async function creatorDashboard({ userId }) {
       take: 10,
     }),
     prisma.creatorAppreciation.count({ where: { creatorId: creator.id, seenAt: null } }),
-    prisma.creatorVideoReport.count({ where: { video: { creatorId: creator.id }, status: "OPEN" } }),
   ]);
 
   const statusCounts = Object.fromEntries(byStatus.map((row) => [row.status, row._count._all]));
@@ -141,7 +141,6 @@ export async function creatorDashboard({ userId }) {
       recent: recentEarnings,
     },
     unseenAppreciation,
-    openReports,
   };
 }
 
@@ -339,7 +338,26 @@ export async function checkMilestones({ videoId }) {
 }
 
 /** The admin's view of the program as a whole. */
-export async function programOverview({ from, to } = {}) {
+/**
+ * The programme at a glance.
+ *
+ * Mixed deliberately. Creator and video counts are chain-wide facts — a video
+ * is published to every outlet's product page and a creator belongs to no
+ * branch — so they are not cut by scope. The money is: an earning is a cost
+ * against one branch's order, and `outstandingCredit` is the company's
+ * liability, which a branch-scoped reader has no business being handed. A
+ * scoped caller gets their own branches' money and a null where a chain-wide
+ * figure would be, rather than a smaller number that reads like the whole.
+ *
+ * `includeMoney` is separate from scope and answers a different question.
+ * This endpoint is reached with `creators.read`, which a content moderator
+ * holds and an accountant's `creator_earnings.read` is not implied by. Nulls
+ * rather than zeros again: a moderator who may not see the payout should be
+ * told there is nothing to show them, not shown a zero.
+ */
+export async function programOverview({ from, to, branchId = null, scope = null, includeMoney = true } = {}) {
+  const branchWhere = earningScopeWhere(scope, branchId);
+  const scoped = Object.keys(branchWhere).length > 0;
   const window = from || to
     ? { createdAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
     : {};
@@ -348,22 +366,44 @@ export async function programOverview({ from, to } = {}) {
     prisma.creatorProfile.groupBy({ by: ["status"], _count: { _all: true } }),
     prisma.creatorVideo.groupBy({ by: ["status"], _count: { _all: true } }),
     prisma.creatorVideo.count({ where: { status: "PENDING_REVIEW" } }),
-    prisma.creatorOrderAttribution.aggregate({ where: window, _count: { _all: true }, _sum: { lineAmount: true } }),
-    prisma.creatorEarning.groupBy({ by: ["status"], where: window, _count: { _all: true }, _sum: { amount: true } }),
-    prisma.creatorWallet.aggregate({ _sum: { balance: true, pendingBalance: true } }),
+    includeMoney
+      ? prisma.creatorOrderAttribution.aggregate({
+          where: { ...branchWhere, ...window },
+          _count: { _all: true },
+          _sum: { lineAmount: true },
+        })
+      : null,
+    includeMoney
+      ? prisma.creatorEarning.groupBy({
+          by: ["status"],
+          where: { ...branchWhere, ...window },
+          _count: { _all: true },
+          _sum: { amount: true },
+        })
+      : null,
+    // A wallet balance is one creator's spendable credit across the whole
+    // chain; there is no honest way to cut it by branch, so a scoped reader
+    // is told so rather than shown a figure that means something else.
+    includeMoney && !scoped
+      ? prisma.creatorWallet.aggregate({ _sum: { balance: true, pendingBalance: true } })
+      : null,
   ]);
 
   return {
     creators: Object.fromEntries(creators.map((row) => [row.status, row._count._all])),
     videos: Object.fromEntries(videos.map((row) => [row.status, row._count._all])),
     pendingReview,
-    attributedOrders: attributions._count._all,
-    attributedRevenue: money(attributions._sum.lineAmount ?? 0),
-    earnings: Object.fromEntries(
-      earnings.map((row) => [row.status, { count: row._count._all, amount: money(row._sum.amount ?? 0) }]),
-    ),
+    attributedOrders: attributions ? attributions._count._all : null,
+    attributedRevenue: attributions ? money(attributions._sum.lineAmount ?? 0) : null,
+    earnings: earnings
+      ? Object.fromEntries(
+          earnings.map((row) => [row.status, { count: row._count._all, amount: money(row._sum.amount ?? 0) }]),
+        )
+      : null,
     // The program's outstanding liability: credit issued and not yet spent.
-    outstandingCredit: money(wallets._sum.balance ?? 0),
-    heldCredit: money(wallets._sum.pendingBalance ?? 0),
+    // Null, not zero, for a scoped reader — zero would be a lie.
+    outstandingCredit: wallets ? money(wallets._sum.balance ?? 0) : null,
+    heldCredit: wallets ? money(wallets._sum.pendingBalance ?? 0) : null,
+    isBranchScoped: scoped,
   };
 }

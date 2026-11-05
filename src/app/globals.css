@@ -39,6 +39,9 @@
   --inverse-on-surface: #f3f0ef;
   --background: #fcf9f8;
   --on-background: #1b1c1c;
+  /* Behind a modal. `bg-scrim/60` was being written with no token to resolve,
+     so every dialog opened over undimmed, still-readable page. */
+  --scrim: #000000;
 
   /* Outlines */
   --outline: #8e7164;
@@ -96,6 +99,24 @@
    * contrast. Verified by `npm run check:contrast`. */
   --ring: #a04100;
 
+  /* Data visualisation — the hue a chart's marks are drawn in.
+   *
+   * A token of its own rather than `primary`, because the two answer different
+   * questions. `primary` is chosen for brand and for text contrast; a chart
+   * mark is a non-text shape that has to clear 3:1 against the chart surface,
+   * hold enough chroma not to read as grey, and sit inside a lightness band
+   * that keeps it legible next to its own axis labels. Here the light step
+   * happens to equal `primary` — the dark one deliberately does not: dark
+   * `primary` (#ffb693) is a pale peach that falls below the chroma floor and
+   * washes out as a fill.
+   *
+   * One hue, not a categorical set: everything the dashboard plots is a
+   * magnitude, and magnitude is carried by the length of the mark. Colour is
+   * reserved for the cases where it means something — see the status tokens.
+   * Both steps validated against their own surface (lightness band, chroma
+   * floor, 3:1 contrast). */
+  --chart-data: #a04100;
+
   /* Elevation — warm-tinted, never neutral black */
   --shadow-level-1: 0 4px 20px rgb(58 26 8 / 0.08);
   --shadow-level-2: 0 8px 30px rgb(58 26 8 / 0.12);
@@ -131,6 +152,7 @@
   --inverse-on-surface: #303030;
   --background: #131211;
   --on-background: #e5e2e1;
+  --scrim: #000000;
 
   --outline: #a88b7d;
   --outline-variant: #5a4136;
@@ -170,6 +192,10 @@
   /* The dark theme's primary, for the same reason. */
   --ring: #ffb693;
 
+  /* Stepped for the dark surface rather than inherited: the dark `primary` is
+   * a pale peach that reads grey once it is a filled area. */
+  --chart-data: #d9762e;
+
   /* Shadows carry less weight on dark grounds; lean on tonal layering instead. */
   --shadow-level-1: 0 4px 20px rgb(0 0 0 / 0.35);
   --shadow-level-2: 0 8px 30px rgb(0 0 0 / 0.45);
@@ -201,7 +227,9 @@
   --color-inverse-on-surface: var(--inverse-on-surface);
   --color-background: var(--background);
   --color-on-background: var(--on-background);
+  --color-scrim: var(--scrim);
 
+  --color-chart-data: var(--chart-data);
   --color-outline: var(--outline);
   --color-outline-variant: var(--outline-variant);
 
@@ -330,5 +358,35 @@
 
   button {
     cursor: pointer;
+  }
+}
+/* ------------------------------------------------------------------
+ * Printing
+ *
+ * A receipt is the one thing in the workspace that is meant to leave the
+ * screen on paper, so the chrome around it opts out rather than each printable
+ * page having to know what the shell is made of. The roll is narrow and the
+ * ink is one colour, so everything prints black on white at full width.
+ * ---------------------------------------------------------------- */
+
+@media print {
+  [data-print="hide"] {
+    display: none !important;
+  }
+
+  [data-print="page"] {
+    padding: 0 !important;
+  }
+
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  /* Links print as text: a URL in brackets after every word is noise on a
+     receipt somebody is about to put in a till drawer. */
+  a {
+    text-decoration: none !important;
+    color: inherit !important;
   }
 }

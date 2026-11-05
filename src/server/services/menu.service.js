@@ -161,10 +161,21 @@ export async function assertMenuAccess(principal, menuId, permissionKey) {
   return branchId;
 }
 
-export async function listMenus({ branchId, type, isActive, limit = 20, cursor } = {}) {
+/**
+ * `scope` is the `branchScope` of whoever is asking. Without it a manager
+ * scoped to one outlet who omits `branchId` holds `menus.read` "somewhere" and
+ * is handed every branch's menus.
+ */
+function scopeWhere(scope) {
+  if (!scope) return {};
+  if (scope.all) return scope.except?.length ? { branchId: { notIn: scope.except } } : {};
+  return { branchId: { in: scope.ids } };
+}
+
+export async function listMenus({ branchId, type, isActive, limit = 20, cursor, scope = null } = {}) {
   const rows = await prisma.menu.findMany({
     where: {
-      ...(branchId ? { branchId } : {}),
+      AND: [scopeWhere(scope), branchId ? { branchId } : {}],
       ...(type ? { type } : {}),
       ...(isActive !== undefined ? { isActive } : {}),
     },
@@ -223,14 +234,35 @@ export async function createMenu(data) {
   return withTransaction(async (tx) => {
     if (data.isDefault) await clearOtherDefaults({ tx, branchId: data.branchId, type: data.type });
 
-    return tx.menu.create({ data: { ...data, slug }, select: MENU_SELECT });
+    /*
+     * On by default — but only when there is nothing to displace.
+     *
+     * A menu created switched off is the right answer for a shop that is
+     * already trading: a new, empty menu going live can win the pick against
+     * the one customers are ordering from, and replace it with nothing. It is
+     * the wrong answer for the first menu a branch ever has, which is the
+     * setup case: the menu is created, the storefront reports "no menu running
+     * right now", and the only clue is a notice on the public site.
+     *
+     * So the rule is about displacement, not novelty: if no other menu of this
+     * type is live at this branch, there is nothing to break and it goes live.
+     * An explicit `isActive` always wins — the form sends one.
+     */
+    const displaces = await tx.menu.count({
+      where: { branchId: data.branchId, type: data.type, isActive: true },
+    });
+
+    return tx.menu.create({
+      data: { ...data, isActive: data.isActive ?? displaces === 0, slug },
+      select: MENU_SELECT,
+    });
   });
 }
 
 export async function updateMenu(id, data) {
   const menu = await prisma.menu.findUnique({
     where: { id },
-    select: { id: true, branchId: true, type: true, startMinute: true, endMinute: true },
+    select: { id: true, branchId: true, type: true, isDefault: true, startMinute: true, endMinute: true },
   });
   if (!menu) throw ApiError.notFound("Menu not found");
 
@@ -254,7 +286,10 @@ export async function updateMenu(id, data) {
     : undefined;
 
   return withTransaction(async (tx) => {
-    if (data.isDefault) {
+    // A default menu moved to another channel stays the default there, so the
+    // channel it lands in must give up its own — otherwise it has two.
+    const staysDefault = data.isDefault ?? menu.isDefault;
+    if (staysDefault && (data.isDefault || (data.type && data.type !== menu.type))) {
       await clearOtherDefaults({ tx, branchId: menu.branchId, type: data.type ?? menu.type, exceptId: id });
     }
 
@@ -513,6 +548,24 @@ export async function listMenuItems({ menuId, sectionId, isAvailable, search, li
 }
 
 /**
+ * Every row of a menu, for the screen that edits it.
+ *
+ * Unpaginated because the editor arranges the whole menu at once — moving a
+ * product means knowing where everything else is. The cap is far above any
+ * real menu (one row per size) and exists so a runaway import cannot take the
+ * page down with it; `truncated` says when it was hit.
+ */
+export async function listAllMenuItems(menuId, { max = 5000 } = {}) {
+  const rows = await prisma.menuItem.findMany({
+    where: { menuId },
+    select: ITEM_WITH_PRODUCT,
+    orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+    take: max + 1,
+  });
+  return { items: rows.slice(0, max), truncated: rows.length > max };
+}
+
+/**
  * Adds a product to a menu.
  *
  * With no `variantId` every active variant is added, one row each — so "add the
@@ -618,6 +671,163 @@ export async function removeMenuItem({ menuId, itemId }) {
   return { deleted: true, id: itemId };
 }
 
+// --- whole products on a menu -------------------------------------------------
+
+/**
+ * A menu stores one row per size, but people arrange a menu by product: "put
+ * the burger under Mains", "recommend the pizza". Doing that row by row from a
+ * client is several requests that can half-succeed, so these operate on every
+ * row of the product at once.
+ */
+async function productRows(menuId, productId) {
+  const rows = await prisma.menuItem.findMany({ where: { menuId, productId }, select: { id: true } });
+  if (!rows.length) throw ApiError.notFound("That product is not on this menu");
+  return rows;
+}
+
+async function assertSectionOnMenu(menuId, sectionId) {
+  if (!sectionId) return;
+  const section = await prisma.menuSection.findFirst({ where: { id: sectionId, menuId }, select: { id: true } });
+  if (!section) {
+    throw ApiError.validation("That section does not belong to this menu", { sectionId: ["No such section"] });
+  }
+}
+
+async function nextSortOrder(menuId) {
+  const last = await prisma.menuItem.aggregate({ where: { menuId }, _max: { sortOrder: true } });
+  return (last._max.sortOrder ?? -1) + 1;
+}
+
+/**
+ * Adds several products at once, every active size of each.
+ *
+ * Building a menu one product at a time is what makes a new branch take an
+ * afternoon. Products already fully on the menu, and ones with no active size,
+ * are reported back as skipped rather than failing the whole request — the
+ * rest of the selection is still what was asked for.
+ */
+export async function addMenuProducts(menuId, { productIds, sectionId = null }) {
+  const menu = await prisma.menu.findUnique({ where: { id: menuId }, select: { id: true } });
+  if (!menu) throw ApiError.notFound("Menu not found");
+  await assertSectionOnMenu(menuId, sectionId);
+
+  const unique = [...new Set(productIds)];
+  const products = await prisma.product.findMany({
+    where: { id: { in: unique }, deletedAt: null },
+    select: {
+      id: true,
+      name: true,
+      variants: { where: { isActive: true }, select: { id: true }, orderBy: [{ sortOrder: "asc" }, { price: "asc" }] },
+    },
+  });
+  const byId = new Map(products.map((product) => [product.id, product]));
+
+  const existing = await prisma.menuItem.findMany({
+    where: { menuId, productId: { in: unique } },
+    select: { variantId: true },
+  });
+  const onMenu = new Set(existing.map((row) => row.variantId));
+
+  const skipped = [];
+  const rows = [];
+  let sortOrder = await nextSortOrder(menuId);
+
+  // Kept in the order they were picked, which is the order they appear in.
+  for (const productId of unique) {
+    const product = byId.get(productId);
+    if (!product) {
+      skipped.push({ productId, name: null, reason: "NOT_FOUND" });
+      continue;
+    }
+    if (!product.variants.length) {
+      skipped.push({ productId, name: product.name, reason: "NO_ACTIVE_SIZE" });
+      continue;
+    }
+    const missing = product.variants.filter((variant) => !onMenu.has(variant.id));
+    if (!missing.length) {
+      skipped.push({ productId, name: product.name, reason: "ALREADY_ON_MENU" });
+      continue;
+    }
+    for (const variant of missing) {
+      rows.push({ menuId, productId, variantId: variant.id, sectionId, sortOrder });
+    }
+    sortOrder += 1;
+  }
+
+  const result = rows.length ? await prisma.menuItem.createMany({ data: rows, skipDuplicates: true }) : { count: 0 };
+  const addedProducts = new Set(rows.map((row) => row.productId)).size;
+
+  return { addedProducts, addedItems: result.count, skipped };
+}
+
+export async function updateMenuProduct({ menuId, productId, data }) {
+  await productRows(menuId, productId);
+  await assertSectionOnMenu(menuId, data.sectionId);
+
+  const changes = {};
+  if (data.isRecommended !== undefined) changes.isRecommended = data.isRecommended;
+  if (data.sectionId !== undefined) {
+    changes.sectionId = data.sectionId;
+    // Moving to another section lands it at the end there, which is where
+    // someone watching the list expects to find it.
+    changes.sortOrder = await nextSortOrder(menuId);
+  }
+
+  const result = await prisma.menuItem.updateMany({ where: { menuId, productId }, data: changes });
+  return { updated: result.count };
+}
+
+export async function removeMenuProduct({ menuId, productId }) {
+  await productRows(menuId, productId);
+  const result = await prisma.menuItem.deleteMany({ where: { menuId, productId } });
+  return { deleted: result.count, productId };
+}
+
+/**
+ * Puts products in the given order. The list must be the menu's complete set:
+ * a partial order leaves the omitted products colliding with the new
+ * positions, and the resulting order would depend on row ids.
+ */
+export async function reorderMenuProducts({ menuId, productIds }) {
+  const rows = await prisma.menuItem.findMany({ where: { menuId }, select: { productId: true }, distinct: ["productId"] });
+  const onMenu = new Set(rows.map((row) => row.productId));
+  const given = new Set(productIds);
+
+  if (given.size !== productIds.length || given.size !== onMenu.size || [...given].some((id) => !onMenu.has(id))) {
+    throw ApiError.conflict("The menu changed while you were arranging it. Reload and try again.");
+  }
+
+  await prisma.$transaction(
+    productIds.map((productId, position) =>
+      prisma.menuItem.updateMany({ where: { menuId, productId }, data: { sortOrder: position } }),
+    ),
+  );
+  return { updated: productIds.length };
+}
+
+/** Sold out for every size at once — how a kitchen actually runs out of something. */
+export async function setMenuProductAvailability({ menuId, productId, isAvailable, until = null }) {
+  await productRows(menuId, productId);
+  assertAvailabilityInput({ isAvailable, until });
+
+  const result = await prisma.menuItem.updateMany({
+    where: { menuId, productId },
+    data: { isAvailable, unavailableUntil: isAvailable ? null : until },
+  });
+  return { updated: result.count };
+}
+
+function assertAvailabilityInput({ isAvailable, until }) {
+  if (isAvailable && until) {
+    throw ApiError.validation("An availability deadline only applies when marking an item unavailable", {
+      until: ["Omit `until` when marking an item available"],
+    });
+  }
+  if (until && until <= new Date()) {
+    throw ApiError.validation("That deadline is already in the past", { until: ["Choose a future time"] });
+  }
+}
+
 /**
  * The 86 switch — the single most-used endpoint in a live service.
  *
@@ -629,14 +839,7 @@ export async function setMenuItemAvailability({ menuId, itemId, isAvailable, unt
   const item = await prisma.menuItem.findFirst({ where: { id: itemId, menuId }, select: { id: true } });
   if (!item) throw ApiError.notFound("Menu item not found");
 
-  if (isAvailable && until) {
-    throw ApiError.validation("An availability deadline only applies when marking an item unavailable", {
-      until: ["Omit `until` when marking an item available"],
-    });
-  }
-  if (until && until <= new Date()) {
-    throw ApiError.validation("That deadline is already in the past", { until: ["Choose a future time"] });
-  }
+  assertAvailabilityInput({ isAvailable, until });
 
   const updated = await prisma.menuItem.update({
     where: { id: itemId },
@@ -664,6 +867,31 @@ export async function clearExpiredAvailability(now = new Date()) {
 }
 
 // --- the storefront read model ----------------------------------------------
+
+/** The menu channel an order type is served from. */
+export const ORDER_TYPE_MENU = { DELIVERY: "DELIVERY", PICKUP: "TAKEAWAY", DINE_IN: "DINE_IN" };
+
+/**
+ * The menu a customer ordering this way sees — and is charged from.
+ *
+ * The single answer for every reader. The menu page, the product page and the
+ * cart each resolved this separately once, and they disagreed: the pages
+ * picked from every channel at once while checkout picked by order type, so a
+ * branch with its own delivery prices showed one price and charged another.
+ *
+ * Delivery and pickup fall back to the dine-in menu when their own channel has
+ * nothing showing: most restaurants publish one menu, and refusing to sell for
+ * want of a second would be worse than selling at dine-in prices.
+ */
+export async function getOrderMenu({ branchIdOrCode, orderType, at = new Date(), includeUnavailable = false }) {
+  const type = ORDER_TYPE_MENU[orderType] ?? "DINE_IN";
+  const resolved = await getBranchMenu({ branchIdOrCode, type, at, includeUnavailable });
+  if (resolved.menu || type === "DINE_IN") return resolved;
+
+  const fallback = await getBranchMenu({ branchIdOrCode, type: "DINE_IN", at, includeUnavailable });
+  // With nothing to fall back to, the reason worth reporting is the channel's own.
+  return fallback.menu ? fallback : resolved;
+}
 
 /**
  * The menu a customer sees: one query per menu, assembled into sections.

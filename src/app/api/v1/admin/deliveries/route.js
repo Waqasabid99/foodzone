@@ -1,10 +1,12 @@
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { createDeliverySchema, listDeliveriesSchema } from "@/server/validation/delivery.schemas";
 import { createDelivery, listDeliveries } from "@/server/services/delivery.service";
+import { branchScope } from "@/lib/api/permissions";
+import { assertOrderAccess } from "@/server/ordering/access";
 
 export const GET = apiHandler(
   { auth: true, permissions: "deliveries.read", query: listDeliveriesSchema, branch: "query" },
-  async ({ query }) => ok(await listDeliveries(query)),
+  async ({ query, auth }) => ok(await listDeliveries({ ...query, scope: branchScope(auth, "deliveries.read") })),
 );
 
 /**
@@ -19,5 +21,11 @@ export const POST = apiHandler(
     body: createDeliverySchema,
     rateLimit: RateLimits.write,
   },
-  async ({ body, auth }) => created(await createDelivery({ orderId: body.orderId, actor: auth })),
+  async ({ body, auth }) => {
+    // Whose order it is decides whose delivery this becomes. Without the
+    // check, the difference between 404 and 409 tells a dispatcher at one
+    // outlet whether an order id at another is real.
+    await assertOrderAccess(auth, body.orderId, "deliveries.assign");
+    return created(await createDelivery({ orderId: body.orderId, actor: auth }));
+  },
 );

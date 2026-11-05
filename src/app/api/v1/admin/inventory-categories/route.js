@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, assertCompanyWide, created, ok, RateLimits } from "@/lib/api";
 import { inventoryCategorySchema } from "@/server/validation/inventory.schemas";
 import { createInventoryCategory, listInventoryCategories } from "@/server/services/uom.service";
 
@@ -17,5 +17,8 @@ export const POST = apiHandler(
     body: inventoryCategorySchema,
     rateLimit: RateLimits.write,
   },
-  async ({ body }) => created(await createInventoryCategory(body)),
+  async ({ body, auth }) => {
+    assertCompanyWide(auth, "inventory_categories.manage");
+    return created(await createInventoryCategory(body));
+  },
 );

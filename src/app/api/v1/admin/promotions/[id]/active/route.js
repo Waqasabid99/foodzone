@@ -1,4 +1,5 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { assertPromotionAccess, assertPromotionReach } from "@/server/marketing/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { setPromotionActiveSchema } from "@/server/validation/pricing.schemas";
 import { setPromotionActive } from "@/server/services/promotion.service";
@@ -19,5 +20,9 @@ export const PATCH = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "promotion.activate", entityType: "Promotion" },
   },
-  async ({ params, body }) => ok(await setPromotionActive(params.id, body.isActive)),
+  async ({ params, body, auth }) => {
+    const current = await assertPromotionAccess(auth, params.id, "promotions.activate");
+    assertPromotionReach(auth, current.branchIds, "promotions.activate");
+    return ok(await setPromotionActive(params.id, body.isActive));
+  },
 );

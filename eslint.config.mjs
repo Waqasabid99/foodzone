@@ -7,6 +7,10 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    // Builds sent elsewhere via NEXT_DIST_DIR — an e2e build kept out of the
+    // dev server's way is still build output, and linting it reports 40-odd
+    // problems in minified vendor code.
+    ".next-*/**",
     "out/**",
     "build/**",
     "next-env.d.ts",

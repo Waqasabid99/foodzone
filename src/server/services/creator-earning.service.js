@@ -10,6 +10,8 @@ import { money } from "@/server/accounting/balance";
 import { DisqualifiedReason, applyProgramCaps, disqualifiedMessage, resolveCommission } from "@/server/creator/rules";
 import { programConfig } from "@/server/services/creator.service";
 import { creditEarning, reverseEarningCredit } from "@/server/services/creator-wallet.service";
+import { earningScopeWhere } from "@/server/creator/access";
+import { FULFILLED_STATUSES } from "@/lib/order-status";
 
 /**
  * The earnings engine.
@@ -58,7 +60,7 @@ const SELECT = {
   createdAt: true,
   creator: { select: { id: true, handle: true, displayName: true } },
   video: { select: { id: true, caption: true, thumbnailUrl: true, productId: true } },
-  order: { select: { id: true, orderNumber: true, grandTotal: true, completedAt: true } },
+  order: { select: { id: true, orderNumber: true, grandTotal: true, completedAt: true, branchId: true } },
   rule: { select: { id: true, name: true } },
 };
 
@@ -139,7 +141,7 @@ export async function processOrderEarnings({ orderId }) {
   });
   if (!order) return { skipped: true, reason: "ORDER_NOT_FOUND" };
 
-  if (!["COMPLETED", "DELIVERED"].includes(order.status)) {
+  if (!FULFILLED_STATUSES.includes(order.status)) {
     return { skipped: true, reason: `NOT_COMPLETE:${order.status}` };
   }
 
@@ -449,9 +451,10 @@ export async function rejectEarning(earningId, { reason, actor }) {
   return rejected;
 }
 
-export async function listEarnings({ creatorId, orderId, videoId, status, from, to, limit = 20, cursor } = {}) {
+export async function listEarnings({ creatorId, orderId, videoId, status, branchId, from, to, scope = null, limit = 20, cursor } = {}) {
   const rows = await prisma.creatorEarning.findMany({
     where: {
+      ...earningScopeWhere(scope, branchId),
       ...(creatorId ? { creatorId } : {}),
       ...(orderId ? { orderId } : {}),
       ...(videoId ? { videoId } : {}),
@@ -468,21 +471,32 @@ export async function listEarnings({ creatorId, orderId, videoId, status, from, 
   return toPage(rows, limit);
 }
 
-export async function getEarning(id) {
-  const earning = await prisma.creatorEarning.findUnique({ where: { id }, select: SELECT });
+export async function getEarning(id, { scope = null } = {}) {
+  const earning = await prisma.creatorEarning.findUnique({
+    where: { id, ...earningScopeWhere(scope) },
+    select: SELECT,
+  });
   if (!earning) throw ApiError.notFound("Earning not found");
   return earning;
 }
 
-/** Program-level totals, for the admin dashboard. */
-export async function earningsSummary({ from, to } = {}) {
+/**
+ * Program-level totals, for the admin dashboard.
+ *
+ * Takes the caller's scope for the same reason the finance statements do: a
+ * total is a leak too. Handing a branch-scoped reader the company-wide figure
+ * tells them the whole programme's payout even though every row behind it is
+ * hidden from them.
+ */
+export async function earningsSummary({ from, to, branchId = null, scope = null } = {}) {
+  const branchWhere = earningScopeWhere(scope, branchId);
   const window = from || to
     ? { createdAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
     : {};
 
   const grouped = await prisma.creatorEarning.groupBy({
     by: ["status"],
-    where: window,
+    where: { ...branchWhere, ...window },
     _sum: { amount: true },
     _count: { _all: true },
   });
@@ -492,7 +506,10 @@ export async function earningsSummary({ from, to } = {}) {
   );
 
   const attributedRevenue = await prisma.creatorOrderAttribution.aggregate({
-    where: from || to ? { createdAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {},
+    where: {
+      ...branchWhere,
+      ...(from || to ? { createdAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}),
+    },
     _sum: { lineAmount: true },
     _count: { _all: true },
   });

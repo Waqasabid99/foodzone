@@ -12,6 +12,7 @@ import { explodeRecipe, mergeLines } from "@/server/production/explode";
 import { allocateOutputCosts, variance, yieldVariance } from "@/server/production/costing";
 import { assertProductionTransition } from "@/server/production/state";
 import { standardCostForRun } from "@/server/services/recipe-cost.service";
+import { branchFilter } from "@/server/inventory/access";
 
 /**
  * Production runs — the prep kitchen.
@@ -139,10 +140,50 @@ async function allocateProductionNumber(tx, { branch }) {
   });
 }
 
-async function loadRun(id) {
-  const run = await prisma.productionOrder.findUnique({ where: { id }, select: SELECT });
+async function loadRun(id, db = prisma) {
+  const run = await db.productionOrder.findUnique({ where: { id }, select: SELECT });
   if (!run) throw ApiError.notFound("Production order not found");
   return run;
+}
+
+/**
+ * Moves a run from one of `from` to `to`, or refuses.
+ *
+ * The status is claimed inside the transaction, before any stock moves: two
+ * people pressing Start together would otherwise both read "planned" and
+ * issue the material twice. The row lock makes the second wait, find the run
+ * already moved, and stop here with nothing posted.
+ */
+async function claimRun(tx, id, { from, to = null, data = {} }) {
+  const claimed = await tx.productionOrder.updateMany({
+    where: { id, status: { in: from } },
+    data: { ...(to ? { status: to } : {}), ...data, updatedAt: new Date() },
+  });
+  if (claimed.count > 0) return;
+
+  const current = await tx.productionOrder.findUnique({ where: { id }, select: { status: true } });
+  if (!current) throw ApiError.notFound("Production order not found");
+  if (to) assertProductionTransition(current.status, to);
+  throw ApiError.conflict(`This run is ${current.status.toLowerCase().replace(/_/g, " ")} now, so that cannot be done`, {
+    status: current.status,
+  });
+}
+
+/** The ids, once each, that a list of issue lines names — and each must be a live item. */
+async function assertIssuable(lines) {
+  const ids = lines.map((line) => line.itemId);
+  if (new Set(ids).size !== ids.length) {
+    throw ApiError.validation("An item is on the list twice", { items: ["Put each item on one line"] });
+  }
+  const items = await prisma.inventoryItem.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, name: true, isActive: true },
+  });
+  if (items.length !== ids.length) throw ApiError.validation("One or more items do not exist", { items: ["Check the items"] });
+  const inactive = items.find((item) => !item.isActive);
+  if (inactive) {
+    throw ApiError.validation(`${inactive.name} is switched off`, { items: [`Switch ${inactive.name} back on first`] });
+  }
 }
 
 /**
@@ -267,18 +308,22 @@ export async function updateProductionOrder(id, data, actor = null) {
     ? await standardCostForRun({ recipeId: run.recipeId, quantity: data.plannedQuantity })
     : null;
 
-  return prisma.productionOrder.update({
-    where: { id },
-    data: {
-      ...(data.plannedQuantity != null ? { plannedQuantity: q(data.plannedQuantity) } : {}),
-      ...(standard ? { standardCost: standard.totalCost } : {}),
-      ...(data.scheduledFor !== undefined ? { scheduledFor: data.scheduledFor } : {}),
-      ...(data.supervisorId !== undefined ? { supervisorId: data.supervisorId } : {}),
-      ...(data.batchNumber !== undefined ? { batchNumber: data.batchNumber } : {}),
-      ...(data.expiryDate !== undefined ? { expiryDate: data.expiryDate } : {}),
-      ...(data.notes !== undefined ? { notes: data.notes } : {}),
-    },
-    select: SELECT,
+  // Guarded on the status, so a run started a moment ago is not re-planned
+  // underneath the material already issued to it.
+  return withTransaction(async (tx) => {
+    await claimRun(tx, id, {
+      from: ["PLANNED"],
+      data: {
+        ...(data.plannedQuantity != null ? { plannedQuantity: q(data.plannedQuantity) } : {}),
+        ...(standard ? { standardCost: standard.totalCost } : {}),
+        ...(data.scheduledFor !== undefined ? { scheduledFor: data.scheduledFor } : {}),
+        ...(data.supervisorId !== undefined ? { supervisorId: data.supervisorId } : {}),
+        ...(data.batchNumber !== undefined ? { batchNumber: data.batchNumber } : {}),
+        ...(data.expiryDate !== undefined ? { expiryDate: data.expiryDate } : {}),
+        ...(data.notes !== undefined ? { notes: data.notes } : {}),
+      },
+    });
+    return loadRun(id, tx);
   });
 }
 
@@ -308,23 +353,35 @@ async function issueMaterials(tx, { run, lines, actor, occurredAt }) {
     const lineCost = D(line.quantity).times(unitCost);
     materialCost = materialCost.plus(lineCost);
 
-    const consumption = await tx.productionConsumption.create({
-      data: {
-        productionOrderId: run.id,
-        itemId: line.itemId,
-        // Recorded when the whole draw came from one batch, so a cancellation
-        // can put it back where it came from.
-        batchId: result.batchAllocations.length === 1 ? result.batchAllocations[0].batchId : null,
-        plannedQuantity: line.plannedQuantity != null ? q(line.plannedQuantity) : null,
-        quantity: q(line.quantity),
-        unitCost: uc(unitCost),
-        totalCost: tc(lineCost),
-        consumedAt: occurredAt,
-      },
-      select: { id: true, itemId: true, quantity: true, unitCost: true, totalCost: true },
-    });
+    // One consumption per batch drawn, so a cancellation can put each part
+    // back on the batch it came from. A single row with no batch would return
+    // the stock to the shelf but not to any batch, where FIFO cannot see it.
+    const parts = result.batchAllocations.length
+      ? result.batchAllocations.map((allocation) => ({
+          batchId: allocation.batchId,
+          quantity: D(allocation.quantity),
+          unitCost: D(allocation.unitCost),
+        }))
+      : [{ batchId: null, quantity: D(line.quantity), unitCost }];
 
-    issued.push(consumption);
+    for (const [index, part] of parts.entries()) {
+      const consumption = await tx.productionConsumption.create({
+        data: {
+          productionOrderId: run.id,
+          itemId: line.itemId,
+          batchId: part.batchId,
+          // The plan belongs to the item, so it is written once.
+          plannedQuantity: index === 0 && line.plannedQuantity != null ? q(line.plannedQuantity) : null,
+          quantity: q(part.quantity),
+          unitCost: uc(part.unitCost),
+          totalCost: tc(part.quantity.times(part.unitCost)),
+          consumedAt: occurredAt,
+        },
+        select: { id: true, itemId: true, quantity: true, unitCost: true, totalCost: true },
+      });
+
+      issued.push(consumption);
+    }
   }
 
   return { materialCost: tc(materialCost), issued };
@@ -341,6 +398,7 @@ async function issueMaterials(tx, { run, lines, actor, occurredAt }) {
 export async function startProduction(id, { items = null, actor }) {
   const run = await loadRun(id);
   assertProductionTransition(run.status, "IN_PROGRESS");
+  if (items?.length) await assertIssuable(items);
 
   const planned = await planConsumption({ recipeId: run.recipeId, quantity: run.plannedQuantity });
   const plannedById = new Map(planned.map((line) => [line.itemId, line]));
@@ -366,16 +424,13 @@ export async function startProduction(id, { items = null, actor }) {
   const standard = await standardCostForRun({ recipeId: run.recipeId, quantity: run.plannedQuantity });
 
   const started = await withTransaction(async (tx) => {
+    await claimRun(tx, id, { from: ["PLANNED"], to: "IN_PROGRESS", data: { startedAt } });
+
     const { materialCost } = await issueMaterials(tx, { run, lines, actor, occurredAt: startedAt });
 
     return tx.productionOrder.update({
       where: { id },
-      data: {
-        status: "IN_PROGRESS",
-        startedAt,
-        materialCost,
-        standardCost: standard.totalCost,
-      },
+      data: { materialCost, standardCost: standard.totalCost },
       select: SELECT,
     });
   });
@@ -413,10 +468,16 @@ export async function recordConsumption(id, { items, actor }) {
   if (!items?.length) {
     throw ApiError.validation("Say what was issued", { items: ["Add at least one line"] });
   }
+  await assertIssuable(items);
 
   const occurredAt = new Date();
 
   return withTransaction(async (tx) => {
+    // Holds the run while the material goes out, so it cannot be completed or
+    // cancelled halfway — a completion would miss this cost, a cancellation
+    // would not return this stock.
+    await claimRun(tx, id, { from: ["IN_PROGRESS"] });
+
     const { materialCost } = await issueMaterials(tx, {
       run,
       lines: items.map((line) => ({ itemId: line.itemId, quantity: D(line.quantity) })),
@@ -461,55 +522,83 @@ export async function completeProduction(id, data, actor) {
     });
   }
 
-  // Labour and overhead come from the recipe, scaled to what was actually made,
-  // unless the caller knows better. A run that made half a batch did not use a
-  // full batch's labour.
-  const scale = D(recipe.yieldQuantity).greaterThan(0)
-    ? produced.plus(wasted).dividedBy(D(recipe.yieldQuantity))
-    : D(1);
-
-  const laborCost = data.laborCost != null ? tc(data.laborCost) : tc(D(recipe.laborCost).times(scale));
-  const overheadCost = data.overheadCost != null ? tc(data.overheadCost) : tc(D(recipe.overheadCost).times(scale));
-  const totalCost = tc(D(run.materialCost).plus(D(laborCost)).plus(D(overheadCost)));
-
-  // Everything the run made, good and wasted, carries an equal share.
-  const madeQuantity = produced.plus(wasted);
-  const rate = madeQuantity.greaterThan(0) ? D(totalCost).dividedBy(madeQuantity) : ZERO;
-
   // By-products are credited at their own standard cost; the primary output
   // absorbs the rest.
   const byProducts = data.byProducts ?? [];
+  const byProductIds = byProducts.map((line) => line.itemId);
+  if (new Set(byProductIds).size !== byProductIds.length) {
+    throw ApiError.validation("A by-product is listed twice", { byProducts: ["Put each item on one line"] });
+  }
+  if (byProductIds.includes(outputItem.id)) {
+    throw ApiError.validation(`${outputItem.name} is what this run makes, not a by-product`, {
+      byProducts: ["Count it in the produced quantity instead"],
+    });
+  }
   const byProductItems = byProducts.length
     ? await prisma.inventoryItem.findMany({
-        where: { id: { in: byProducts.map((line) => line.itemId) } },
-        select: { id: true, name: true, averageCost: true, uomId: true, trackBatches: true },
+        where: { id: { in: byProductIds } },
+        select: { id: true, name: true, averageCost: true, uomId: true, trackBatches: true, isPerishable: true, shelfLifeDays: true, isActive: true },
       })
     : [];
   const byProductById = new Map(byProductItems.map((item) => [item.id, item]));
 
   for (const line of byProducts) {
-    if (!byProductById.has(line.itemId)) {
-      throw ApiError.validation("By-product item not found", { byProducts: [`No such item: ${line.itemId}`] });
+    const item = byProductById.get(line.itemId);
+    if (!item) throw ApiError.validation("By-product item not found", { byProducts: [`No such item: ${line.itemId}`] });
+    if (!item.isActive) throw ApiError.validation(`${item.name} is switched off`, { byProducts: [`Switch ${item.name} back on first`] });
+  }
+
+  const batchNumber = data.batchNumber?.trim() || run.batchNumber || run.productionNumber;
+  if (outputItem.trackBatches) {
+    const taken = await prisma.stockBatch.findUnique({
+      where: { itemId_locationId_batchNumber: { itemId: outputItem.id, locationId: run.locationId, batchNumber } },
+      select: { id: true },
+    });
+    if (taken) {
+      throw ApiError.conflict(`${outputItem.name} already has a batch ${batchNumber} here`, {
+        batchNumber: [`Give this run's batch its own number`],
+      });
     }
   }
 
-  const allocation = allocateOutputCosts({
-    totalCost,
-    outputs: [
-      { itemId: outputItem.id, quantity: madeQuantity, isPrimary: true },
-      ...byProducts.map((line) => ({
-        itemId: line.itemId,
-        quantity: D(line.quantity),
-        isPrimary: false,
-        standardUnitCost: line.unitCost ?? byProductById.get(line.itemId)?.averageCost ?? 0,
-      })),
-    ],
-  });
-
-  const primary = allocation.find((output) => output.isPrimary);
   const completedAt = new Date();
 
   const completed = await withTransaction(async (tx) => {
+    // Claimed first, then the cost read: material issued a moment before this
+    // is part of the run, and a cost read before the claim would leave it out.
+    await claimRun(tx, id, { from: ["IN_PROGRESS"], to: "COMPLETED", data: { completedAt } });
+    const { materialCost } = await tx.productionOrder.findUnique({ where: { id }, select: { materialCost: true } });
+
+    // Labour and overhead come from the recipe, scaled to what was actually
+    // made, unless the caller knows better. A run that made half a batch did
+    // not use a full batch's labour.
+    const scale = D(recipe.yieldQuantity).greaterThan(0)
+      ? produced.plus(wasted).dividedBy(D(recipe.yieldQuantity))
+      : D(1);
+
+    const laborCost = data.laborCost != null ? tc(data.laborCost) : tc(D(recipe.laborCost).times(scale));
+    const overheadCost = data.overheadCost != null ? tc(data.overheadCost) : tc(D(recipe.overheadCost).times(scale));
+    const totalCost = tc(D(materialCost).plus(D(laborCost)).plus(D(overheadCost)));
+
+    // Everything the run made, good and wasted, carries an equal share.
+    const madeQuantity = produced.plus(wasted);
+    const rate = madeQuantity.greaterThan(0) ? D(totalCost).dividedBy(madeQuantity) : ZERO;
+
+    const allocation = allocateOutputCosts({
+      totalCost,
+      outputs: [
+        { itemId: outputItem.id, quantity: madeQuantity, isPrimary: true },
+        ...byProducts.map((line) => ({
+          itemId: line.itemId,
+          quantity: D(line.quantity),
+          isPrimary: false,
+          standardUnitCost: line.unitCost ?? byProductById.get(line.itemId)?.averageCost ?? 0,
+        })),
+      ],
+    });
+
+    const primary = allocation.find((output) => output.isPrimary);
+
     // Recipe yield unit into the item's stocking unit — a recipe yielding
     // "litres" of an item stocked in millilitres must book 1000, not 1.
     const producedInStock = convertQuantity({
@@ -529,7 +618,6 @@ export async function completeProduction(id, data, actor) {
     let batchId = null;
 
     if (outputItem.trackBatches) {
-      const batchNumber = data.batchNumber ?? run.batchNumber ?? run.productionNumber;
       const expiryDate =
         data.expiryDate ??
         run.expiryDate ??
@@ -537,15 +625,11 @@ export async function completeProduction(id, data, actor) {
           ? new Date(completedAt.getTime() + outputItem.shelfLifeDays * 86_400_000)
           : null);
 
-      const batch = await tx.stockBatch.upsert({
-        where: {
-          itemId_locationId_batchNumber: {
-            itemId: outputItem.id,
-            locationId: run.locationId,
-            batchNumber,
-          },
-        },
-        create: {
+      // Its own batch, never merged into one of the same number: a batch has
+      // one cost and one date, and folding this run into last week's would
+      // give today's food last week's expiry.
+      const batch = await tx.stockBatch.create({
+        data: {
           itemId: outputItem.id,
           locationId: run.locationId,
           batchNumber,
@@ -557,10 +641,6 @@ export async function completeProduction(id, data, actor) {
           expiryDate,
           receivedAt: completedAt,
           productionOrderId: run.id,
-        },
-        update: {
-          initialQuantity: { increment: q(producedInStock.plus(wastedInStock)) },
-          remainingQuantity: { increment: q(producedInStock.plus(wastedInStock)) },
         },
         select: { id: true },
       });
@@ -602,6 +682,38 @@ export async function completeProduction(id, data, actor) {
     for (const output of allocation.filter((row) => !row.isPrimary)) {
       const item = byProductById.get(output.itemId);
 
+      // A batch-tracked by-product needs a batch like any other stock, or FIFO
+      // never sees it.
+      let byProductBatchId = null;
+      if (item.trackBatches) {
+        const byProductBatch = await tx.stockBatch.upsert({
+          where: {
+            itemId_locationId_batchNumber: { itemId: item.id, locationId: run.locationId, batchNumber: run.productionNumber },
+          },
+          create: {
+            itemId: item.id,
+            locationId: run.locationId,
+            batchNumber: run.productionNumber,
+            initialQuantity: q(output.quantity),
+            remainingQuantity: q(output.quantity),
+            unitCost: output.unitCost,
+            status: "ACTIVE",
+            manufacturedAt: completedAt,
+            expiryDate:
+              item.isPerishable && item.shelfLifeDays
+                ? new Date(completedAt.getTime() + item.shelfLifeDays * 86_400_000)
+                : null,
+            receivedAt: completedAt,
+            productionOrderId: run.id,
+          },
+          // The run number is this run's own, so a clash can only be this
+          // same completion retried; nothing to add twice.
+          update: {},
+          select: { id: true },
+        });
+        byProductBatchId = byProductBatch.id;
+      }
+
       await postMovement(tx, {
         itemId: output.itemId,
         locationId: run.locationId,
@@ -609,6 +721,7 @@ export async function completeProduction(id, data, actor) {
         quantity: output.quantity,
         uomId: item.uomId,
         unitCost: output.unitCost,
+        batchId: byProductBatchId,
         referenceType: "PRODUCTION_ORDER",
         referenceId: run.id,
         notes: `By-product of ${run.productionNumber}`,
@@ -620,6 +733,7 @@ export async function completeProduction(id, data, actor) {
         data: {
           productionOrderId: run.id,
           itemId: output.itemId,
+          batchId: byProductBatchId,
           quantity: q(output.quantity),
           unitCost: output.unitCost,
           totalCost: output.totalCost,
@@ -671,14 +785,13 @@ export async function completeProduction(id, data, actor) {
     return tx.productionOrder.update({
       where: { id },
       data: {
-        status: "COMPLETED",
-        completedAt,
         producedQuantity: q(produced),
         wastedQuantity: q(wasted),
         laborCost,
         overheadCost,
         totalCost,
         unitCost: uc(rate),
+        ...(outputItem.trackBatches ? { batchNumber } : {}),
         ...(data.notes !== undefined ? { notes: data.notes } : {}),
       },
       select: SELECT,
@@ -697,7 +810,7 @@ export async function completeProduction(id, data, actor) {
       productionNumber: run.productionNumber,
       producedQuantity: Number(produced),
       wastedQuantity: Number(wasted),
-      totalCost: Number(totalCost),
+      totalCost: Number(completed.totalCost),
       standardCost: Number(run.standardCost ?? 0),
       variance: Number(result.costVariance.variance),
     },
@@ -720,9 +833,20 @@ export async function cancelProduction(id, { reason = null, actor }) {
   assertProductionTransition(run.status, "CANCELLED");
 
   const occurredAt = new Date();
+  let reversed = 0;
 
   const cancelled = await withTransaction(async (tx) => {
-    for (const consumption of run.consumptions) {
+    await claimRun(tx, id, { from: ["PLANNED", "IN_PROGRESS"], to: "CANCELLED" });
+
+    // Read after the claim: material issued while this request was on its way
+    // is on the bench too, and has to come back with the rest.
+    const consumptions = await tx.productionConsumption.findMany({
+      where: { productionOrderId: id },
+      select: { id: true, itemId: true, batchId: true, quantity: true, unitCost: true },
+    });
+    reversed = consumptions.length;
+
+    for (const consumption of consumptions) {
       await postMovement(tx, {
         itemId: consumption.itemId,
         locationId: run.locationId,
@@ -742,7 +866,6 @@ export async function cancelProduction(id, { reason = null, actor }) {
     return tx.productionOrder.update({
       where: { id },
       data: {
-        status: "CANCELLED",
         materialCost: 0,
         totalCost: 0,
         notes: reason ?? run.notes,
@@ -757,7 +880,7 @@ export async function cancelProduction(id, { reason = null, actor }) {
     action: "production_order.cancel",
     entityType: "ProductionOrder",
     entityId: id,
-    changes: { productionNumber: run.productionNumber, reason, reversed: run.consumptions.length },
+    changes: { productionNumber: run.productionNumber, reason, reversed },
   });
 
   return cancelled;
@@ -786,9 +909,13 @@ export async function getProductionOrder(id) {
   const planned = await planConsumption({ recipeId: run.recipeId, quantity: run.plannedQuantity });
   const consumedByItem = new Map();
   for (const row of run.consumptions) {
-    const existing = consumedByItem.get(row.itemId);
-    if (existing) existing.quantity = existing.quantity.plus(D(row.quantity));
-    else consumedByItem.set(row.itemId, { quantity: D(row.quantity), unitCost: D(row.unitCost) });
+    const existing = consumedByItem.get(row.itemId) ?? { quantity: ZERO, totalCost: ZERO };
+    existing.quantity = existing.quantity.plus(D(row.quantity));
+    existing.totalCost = existing.totalCost.plus(D(row.totalCost));
+    // Weighted over every draw: one item may come off several batches, or be
+    // topped up later at a different cost.
+    existing.unitCost = existing.quantity.greaterThan(0) ? existing.totalCost.dividedBy(existing.quantity) : ZERO;
+    consumedByItem.set(row.itemId, existing);
   }
 
   const materials = planned.map((line) => {
@@ -822,7 +949,53 @@ export async function getProductionOrder(id) {
     });
   }
 
+  // What is on the shelf at the run's location now, so a planned run shows
+  // what it will be short of before anyone presses Start.
+  const levels = materials.length
+    ? await prisma.stockLevel.findMany({
+        where: { locationId: run.locationId, itemId: { in: materials.map((line) => line.itemId) } },
+        select: { itemId: true, quantity: true },
+      })
+    : [];
+  const onHandById = new Map(levels.map((level) => [level.itemId, level.quantity]));
+  for (const line of materials) line.onHand = q(onHandById.get(line.itemId) ?? 0);
+
   return { ...summariseRun(run), materials };
+}
+
+const RUN_COST_FIELDS = ["materialCost", "laborCost", "overheadCost", "totalCost", "unitCost", "standardCost", "costVariance", "standard"];
+
+/**
+ * A run with its money taken out, for someone who may run the kitchen but not
+ * read its costs. Quantities, batches and dates stay: they are the work.
+ */
+export function withoutRunCosts(run) {
+  if (!run) return run;
+  const stripped = { ...run };
+  for (const field of RUN_COST_FIELDS) delete stripped[field];
+  if (stripped.recipe) {
+    const { laborCost, overheadCost, ...recipe } = stripped.recipe;
+    stripped.recipe = recipe;
+  }
+  const lines = (rows) => rows?.map(({ unitCost, totalCost, ...row }) => row);
+  if (stripped.consumptions) stripped.consumptions = lines(stripped.consumptions);
+  if (stripped.outputs) stripped.outputs = lines(stripped.outputs);
+  if (stripped.materials) stripped.materials = lines(stripped.materials);
+  return stripped;
+}
+
+/** How many runs are in each state, for the tabs. */
+export async function productionCounts({ scope = null, branchId = null } = {}) {
+  const filter = branchFilter(scope);
+  const rows = await prisma.productionOrder.groupBy({
+    by: ["status"],
+    where: {
+      ...(branchId ? { branchId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
+    },
+    _count: { _all: true },
+  });
+  return Object.fromEntries(rows.map((row) => [row.status, row._count._all]));
 }
 
 export async function listProductionOrders({
@@ -832,12 +1005,15 @@ export async function listProductionOrders({
   status,
   from,
   to,
+  scope = null,
   limit = 20,
   cursor,
 } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.productionOrder.findMany({
     where: {
       ...(branchId ? { branchId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(locationId ? { locationId } : {}),
       ...(recipeId ? { recipeId } : {}),
       ...(status ? { status } : {}),
@@ -860,10 +1036,19 @@ export async function listProductionOrders({
       startedAt: true,
       completedAt: true,
       createdAt: true,
-      recipe: { select: { id: true, name: true, version: true } },
-      location: { select: { id: true, name: true } },
+      createdById: true,
+      recipe: {
+        select: {
+          id: true,
+          name: true,
+          version: true,
+          yieldUom: { select: { code: true, precision: true } },
+          outputItem: { select: { id: true, name: true } },
+        },
+      },
+      location: { select: { id: true, name: true, branch: { select: { id: true, name: true } } } },
     },
-    orderBy: { createdAt: "desc" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     ...cursorArgs(cursor, limit),
   });
 
@@ -886,10 +1071,12 @@ export async function listProductionOrders({
  * material cost and no output yet, and including it would make every period
  * look catastrophic until the last batch finished.
  */
-export async function productionVarianceReport({ branchId, from, to, recipeId = null } = {}) {
+export async function productionVarianceReport({ branchId, from, to, recipeId = null, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const runs = await prisma.productionOrder.findMany({
     where: {
       ...(branchId ? { branchId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(recipeId ? { recipeId } : {}),
       status: "COMPLETED",
       ...(from || to

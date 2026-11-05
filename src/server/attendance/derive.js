@@ -155,12 +155,23 @@ function totalMinutes(intervals) {
 /**
  * Turns a day's punches into the row payroll reads.
  *
+ * `timezone` is the branch's, because a shift's "10:00" is a wall clock and
+ * the punches are instants; without it every late minute is the UTC offset.
+ *
  * `shift` may be null — an unrostered day, or somebody who turned up when they
  * were not expected. The day is still derived; there is simply nothing to be
  * late for, so lateness and overtime are not computed against a window that
  * does not exist.
  */
-export function deriveDay({ punches = [], shift = null, workDate, isHoliday = false, isWeeklyOff = false, leave = null }) {
+export function deriveDay({
+  punches = [],
+  shift = null,
+  workDate,
+  timezone = "UTC",
+  isHoliday = false,
+  isWeeklyOff = false,
+  leave = null,
+}) {
   const cleaned = resolveDirections(dedupePunches(punches));
   const { work, breaks, unmatched, openAtEnd } = pairIntervals(cleaned);
 
@@ -177,8 +188,8 @@ export function deriveDay({ punches = [], shift = null, workDate, isHoliday = fa
   const fullDay = shift?.fullDayThresholdMinutes ?? 480;
   const halfDay = shift?.halfDayThresholdMinutes ?? 240;
 
-  const late = shift ? lateMinutes({ firstInAt, shift, workDate }) : 0;
-  const early = shift && lastOutAt ? earlyLeaveMinutes({ lastOutAt, shift, workDate }) : 0;
+  const late = shift ? lateMinutes({ firstInAt, shift, workDate, timezone }) : 0;
+  const early = shift && lastOutAt ? earlyLeaveMinutes({ lastOutAt, shift, workDate, timezone }) : 0;
 
   // Overtime is time beyond the shift's own length, not beyond eight hours —
   // a six-hour shift worked for eight is two hours of overtime to the person

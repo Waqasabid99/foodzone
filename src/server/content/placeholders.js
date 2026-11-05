@@ -119,16 +119,3 @@ export const HOW_IT_WORKS = [
   },
 ];
 
-/**
- * Social tiles.
- *
- * No backend feeds these yet — pulling an Instagram grid needs a Graph API
- * token and a refresh job, which is a decision about a third-party dependency
- * rather than a frontend task. Until then they render as branded tiles.
- */
-export const PLACEHOLDER_SOCIAL = [
-  { id: "ph-s1", href: null, alt: "Flame-grilled double burger" },
-  { id: "ph-s2", href: null, alt: "Loaded fries close-up" },
-  { id: "ph-s3", href: null, alt: "Wings tossed in bold sauce" },
-  { id: "ph-s4", href: null, alt: "Shake and fries on a tray" },
-];

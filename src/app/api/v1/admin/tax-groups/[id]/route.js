@@ -1,4 +1,5 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { assertTaxAccess } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { updateTaxGroupSchema } from "@/server/validation/pricing.schemas";
 import { deleteTaxGroup, getTaxGroup, updateTaxGroup } from "@/server/services/tax.service";
@@ -17,7 +18,10 @@ export const PATCH = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "tax_group.update", entityType: "TaxGroup" },
   },
-  async ({ params, body }) => ok(await updateTaxGroup(params.id, body)),
+  async ({ params, body, auth }) => {
+    assertTaxAccess(auth);
+    return ok(await updateTaxGroup(params.id, body));
+  },
 );
 
 export const DELETE = apiHandler(
@@ -28,5 +32,8 @@ export const DELETE = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "tax_group.delete", entityType: "TaxGroup" },
   },
-  async ({ params }) => ok(await deleteTaxGroup(params.id)),
+  async ({ params, auth }) => {
+    assertTaxAccess(auth);
+    return ok(await deleteTaxGroup(params.id));
+  },
 );

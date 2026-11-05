@@ -26,6 +26,8 @@ export function publicUser(user, { roles = [], permissions } = {}) {
     phone: user.phone,
     avatarUrl: user.avatarUrl,
     locale: user.locale,
+    /** Which workspace page they open on; null means "decide from my job". */
+    homePage: user.homePage ?? null,
     status: user.status,
     emailVerified: Boolean(user.emailVerifiedAt),
     phoneVerified: Boolean(user.phoneVerifiedAt),

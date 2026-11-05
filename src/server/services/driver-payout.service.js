@@ -6,6 +6,7 @@ import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { money } from "@/server/pricing/engine";
 import { enqueue } from "@/server/jobs/outbox";
+import { branchFilter } from "@/server/access/scope";
 
 /**
  * Driver payouts.
@@ -102,8 +103,12 @@ export async function generatePayout({ driverId, periodStart, periodEnd, adjustm
   const lines = [];
 
   for (const delivery of deliveries) {
-    // The driver's own per-delivery rate wins over whatever was stamped on the
-    // job, so a rate agreed after the drop still applies.
+    // What was stamped on the job wins: the rate in force when the drop was
+    // made, not whatever the driver's record says today. Re-reading the current
+    // rate would silently reprice work that was already done. The driver's own
+    // `payoutPerDelivery` is the fallback for a job that carried no rate at all
+    // — which, once `delivery.driver_base_earning` is set for a branch, is only
+    // the jobs created before it was.
     const earning = D(delivery.driverEarning).greaterThan(0)
       ? D(delivery.driverEarning)
       : D(driver.payoutPerDelivery ?? 0);
@@ -309,9 +314,18 @@ export async function cancelPayout({ payoutId, actor }) {
   return cancelled;
 }
 
-export async function listPayouts({ driverId, status, limit = 20, cursor } = {}) {
+export async function listPayouts({ driverId, status, branchId = null, scope = null, limit = 20, cursor } = {}) {
+  // A payout is somebody's pay, and it reaches a branch only through its
+  // driver — so that is the path the scope has to take.
+  const filter = branchFilter(scope);
+
   const rows = await prisma.driverPayout.findMany({
-    where: { ...(driverId ? { driverId } : {}), ...(status ? { status } : {}) },
+    where: {
+      ...(filter ? { AND: [{ driver: { branchId: filter } }] } : {}),
+      ...(branchId ? { driver: { branchId } } : {}),
+      ...(driverId ? { driverId } : {}),
+      ...(status ? { status } : {}),
+    },
     select: { ...SELECT, driver: { select: { id: true, user: { select: { name: true } } } } },
     orderBy: { createdAt: "desc" },
     ...cursorArgs(cursor, limit),

@@ -3,6 +3,7 @@ import { assertPermission } from "@/lib/api/permissions";
 import { idParamSchema } from "@/server/validation/schemas";
 import { assignDriverSchema } from "@/server/validation/delivery.schemas";
 import { assignDriver } from "@/server/services/delivery.service";
+import { assertRecordAccess } from "@/server/delivery/access";
 
 /**
  * Assigns or reassigns a driver.
@@ -27,6 +28,10 @@ export const POST = apiHandler(
       // reassigning is the stricter of the two actions.
       assertPermission(auth, "deliveries.reassign");
     }
+
+    // Whose delivery it is, before anything is done to it: the branch comes
+    // from the order behind it, not from the body.
+    await assertRecordAccess(auth, "delivery", params.id, "deliveries.assign");
 
     return ok(
       await assignDriver({

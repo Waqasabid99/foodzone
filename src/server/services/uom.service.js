@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/api";
+import { Prisma } from "@/generated/prisma";
 
 /**
  * Units of measure.
@@ -79,7 +80,63 @@ export async function createUnit(data) {
     });
   }
 
-  return prisma.unitOfMeasure.create({ data: { ...data, code }, select: SELECT });
+  // A base unit's factor is 1 by definition, and `factorOf` ignores whatever
+  // is stored there. Storing the 1000 someone typed would make the screen say
+  // one thing and every conversion do another.
+  return prisma.unitOfMeasure.create({
+    data: { ...data, code, factor: data.baseUnitId ? data.factor : 1 },
+    select: SELECT,
+  });
+}
+
+/**
+ * The units nearly every kitchen needs, created if missing.
+ *
+ * Weight and volume are based on the gram and the millilitre, the smallest
+ * units a recipe card uses, so a recipe never needs a fraction of a base unit.
+ * Existing codes are left alone — this fills gaps, it does not overwrite.
+ */
+export const STANDARD_UNITS = [
+  { code: "g", name: "Gram", type: "WEIGHT", precision: 1 },
+  { code: "kg", name: "Kilogram", type: "WEIGHT", base: "g", factor: 1000, precision: 3 },
+  { code: "ml", name: "Millilitre", type: "VOLUME", precision: 0 },
+  { code: "l", name: "Litre", type: "VOLUME", base: "ml", factor: 1000, precision: 3 },
+  { code: "pc", name: "Piece", type: "COUNT", precision: 0 },
+  { code: "dz", name: "Dozen", type: "COUNT", base: "pc", factor: 12, precision: 2 },
+];
+
+export async function createStandardUnits() {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.unitOfMeasure.findMany({ select: { id: true, code: true, type: true, baseUnitId: true } });
+    const byCode = new Map(existing.map((unit) => [unit.code, unit]));
+    const created = [];
+
+    for (const unit of STANDARD_UNITS) {
+      if (byCode.has(unit.code)) continue;
+
+      const base = unit.base ? byCode.get(unit.base) : null;
+      // A same-named base the owner redefined (a "g" that is not a base
+      // weight) cannot anchor the conversion, so the derived unit is skipped
+      // rather than wired to it.
+      if (unit.base && (!base || base.type !== unit.type || base.baseUnitId)) continue;
+
+      const row = await tx.unitOfMeasure.create({
+        data: {
+          code: unit.code,
+          name: unit.name,
+          type: unit.type,
+          precision: unit.precision,
+          baseUnitId: base?.id ?? null,
+          factor: base ? unit.factor : 1,
+        },
+        select: { id: true, code: true, type: true, baseUnitId: true },
+      });
+      byCode.set(row.code, row);
+      created.push(row.code);
+    }
+
+    return { created, skipped: STANDARD_UNITS.length - created.length };
+  });
 }
 
 /**
@@ -96,16 +153,25 @@ export async function updateUnit(id, data) {
       id: true,
       type: true,
       factor: true,
-      _count: { select: { stockMovements: true, items: true, recipeIngredients: true } },
+      baseUnitId: true,
+      _count: { select: { stockMovements: true, items: true, recipeIngredients: true, derived: true } },
     },
   });
   if (!unit) throw ApiError.notFound("Unit not found");
 
-  const inUse = unit._count.stockMovements > 0 || unit._count.items > 0 || unit._count.recipeIngredients > 0;
+  const inUse =
+    unit._count.stockMovements > 0 ||
+    unit._count.items > 0 ||
+    unit._count.recipeIngredients > 0 ||
+    // A base unit with units converting into it: changing its type would
+    // leave "1 kg = 1000 g" pointing at something that is no longer a weight.
+    unit._count.derived > 0;
+  // Compared as decimals. This used to compare strings with `startsWith`,
+  // which read a change from 1 to 10 — or 100 to 1000 — as "unchanged".
   const changesConversion =
-    (data.factor !== undefined && !String(data.factor).startsWith(String(unit.factor))) ||
-    data.baseUnitId !== undefined ||
-    data.type !== undefined;
+    (data.factor !== undefined && !new Prisma.Decimal(data.factor).equals(new Prisma.Decimal(unit.factor))) ||
+    (data.baseUnitId !== undefined && data.baseUnitId !== unit.baseUnitId) ||
+    (data.type !== undefined && data.type !== unit.type);
 
   if (inUse && changesConversion) {
     throw ApiError.conflict(
@@ -128,7 +194,9 @@ export async function updateUnit(id, data) {
     selfId: id,
   });
 
-  return prisma.unitOfMeasure.update({ where: { id }, data, select: SELECT });
+  // Becoming a base unit resets the factor to what a base unit means.
+  const next = data.baseUnitId === null ? { ...data, factor: 1 } : data;
+  return prisma.unitOfMeasure.update({ where: { id }, data: next, select: SELECT });
 }
 
 export async function deleteUnit(id) {
@@ -169,16 +237,38 @@ export async function listInventoryCategories({ isActive } = {}) {
   return rows.map(({ _count, ...row }) => ({ ...row, itemCount: _count.items }));
 }
 
-export async function createInventoryCategory(data) {
-  const clash = await prisma.inventoryCategory.findUnique({ where: { name: data.name }, select: { id: true } });
+export async function createInventoryCategory(input) {
+  // A blank code is no code; stored as "" it would collide with the next blank one.
+  const data = { ...input, ...(input.code !== undefined ? { code: input.code?.trim() || null } : {}) };
+  const clash = await prisma.inventoryCategory.findFirst({
+    where: { name: { equals: data.name, mode: "insensitive" } },
+    select: { id: true },
+  });
   if (clash) throw ApiError.conflict(`A category called "${data.name}" already exists`);
+  if (data.code) {
+    const codeClash = await prisma.inventoryCategory.findFirst({ where: { code: data.code }, select: { id: true } });
+    if (codeClash) throw ApiError.conflict(`Another category already uses the code "${data.code}"`);
+  }
 
   return prisma.inventoryCategory.create({ data, select: CATEGORY_SELECT });
 }
 
-export async function updateInventoryCategory(id, data) {
+export async function updateInventoryCategory(id, input) {
+  const data = { ...input, ...(input.code !== undefined ? { code: input.code?.trim() || null } : {}) };
   const category = await prisma.inventoryCategory.findUnique({ where: { id }, select: { id: true } });
   if (!category) throw ApiError.notFound("Category not found");
+
+  if (data.name) {
+    const clash = await prisma.inventoryCategory.findFirst({
+      where: { name: { equals: data.name, mode: "insensitive" }, id: { not: id } },
+      select: { id: true },
+    });
+    if (clash) throw ApiError.conflict(`A category called "${data.name}" already exists`);
+  }
+  if (data.code) {
+    const clash = await prisma.inventoryCategory.findFirst({ where: { code: data.code, id: { not: id } }, select: { id: true } });
+    if (clash) throw ApiError.conflict(`Another category already uses the code "${data.code}"`);
+  }
 
   return prisma.inventoryCategory.update({ where: { id }, data, select: CATEGORY_SELECT });
 }

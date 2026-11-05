@@ -88,6 +88,14 @@ enum WastageReason {
   OTHER
 }
 
+/// Why an adjustment exists. Opening stock is its own kind because it is not a
+/// correction: it is inventory the business already owned before the system
+/// did, and it belongs in equity, not in the period's profit.
+enum StockAdjustmentType {
+  CORRECTION
+  OPENING_STOCK
+}
+
 enum DocumentStatus {
   DRAFT
   PENDING_APPROVAL
@@ -544,6 +552,7 @@ model StockAdjustment {
   adjustmentNumber String         @unique
   location         StockLocation  @relation(fields: [locationId], references: [id])
   locationId       String
+  type             StockAdjustmentType @default(CORRECTION)
   status           DocumentStatus @default(DRAFT)
   reason           String
   totalValue       Decimal        @default(0) @db.Decimal(18, 4)
@@ -555,6 +564,7 @@ model StockAdjustment {
   items StockAdjustmentItem[]
 
   @@index([locationId])
+  @@index([type, status])
 }
 
 model StockAdjustmentItem {
@@ -568,6 +578,12 @@ model StockAdjustmentItem {
   unitCost     Decimal         @default(0) @db.Decimal(18, 6)
   totalCost    Decimal         @default(0) @db.Decimal(18, 4)
   note         String?
+  /// For a batch-tracked item coming in: the lot it arrives as. Without a
+  /// batch the stock is on the shelf but invisible to FIFO, and nothing can
+  /// draw it. `batchId` is the batch approval created.
+  batchNumber  String?
+  expiryDate   DateTime?
+  batchId      String?
 
   @@index([adjustmentId])
 }

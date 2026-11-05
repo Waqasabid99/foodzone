@@ -3,6 +3,7 @@ import { ApiError, cursorArgs, toPage } from "@/lib/api";
 import { generateUniqueSlug } from "@/server/utils/slug";
 import { slugify } from "@/lib/slug";
 import { withTransaction } from "@/server/utils/db";
+import { assertProductReach, productScopeWhere } from "@/server/catalog/access";
 
 /**
  * Products and their variants.
@@ -48,7 +49,7 @@ const LIST_SELECT = {
   sortOrder: true,
   deletedAt: true,
   updatedAt: true,
-  category: { select: { id: true, name: true, slug: true } },
+  category: { select: { id: true, name: true, slug: true, isActive: true } },
   variants: {
     where: { isActive: true },
     select: VARIANT_SELECT,
@@ -141,8 +142,27 @@ export function shapeProduct(product) {
   if (!product) return product;
   const { modifierGroups, ...rest } = product;
 
+  /*
+   * A combo slot's options are products too, and when the caller asked for
+   * their option groups they arrive in the same unflattened shape. Shaped here
+   * rather than in the page, so the form that renders a product's groups can
+   * render a combo choice's groups without knowing which it has.
+   */
+  const comboGroups = rest.comboGroups?.map((group) => ({
+    ...group,
+    options: group.options.map((option) =>
+      option.product?.modifierGroups
+        ? {
+            ...option,
+            product: { ...option.product, modifierGroups: shapeModifierGroups(option.product.modifierGroups) },
+          }
+        : option,
+    ),
+  }));
+
   return {
     ...rest,
+    ...(comboGroups ? { comboGroups } : {}),
     ...(modifierGroups ? { modifierGroups: shapeModifierGroups(modifierGroups) } : {}),
     ...(rest.variants
       ? {
@@ -211,13 +231,19 @@ export async function listProducts({
   type,
   isActive,
   isFeatured,
+  branchId,
+  scope = null,
   includeDeleted = false,
+  onlyDeleted = false,
   limit = 20,
   cursor,
 } = {}) {
   const rows = await prisma.product.findMany({
     where: {
-      ...(includeDeleted ? {} : { deletedAt: null }),
+      // The caller's scope first; a requested branch can only narrow it.
+      ...productScopeWhere(scope),
+      ...(branchId ? { branchId } : {}),
+      ...(onlyDeleted ? { deletedAt: { not: null } } : includeDeleted ? {} : { deletedAt: null }),
       ...(categoryId ? { categoryId } : {}),
       ...(stationId ? { stationId } : {}),
       ...(type ? { type } : {}),
@@ -242,23 +268,62 @@ export async function listProducts({
   return { ...page, items: page.items.map(shapeProduct) };
 }
 
-export async function getProduct(idOrSlug, { includeDeleted = false } = {}) {
+export async function getProduct(idOrSlug, { includeDeleted = false, scope = null } = {}) {
   const product = await prisma.product.findFirst({
     where: {
-      OR: [{ id: idOrSlug }, { slug: idOrSlug }],
+      AND: [
+        productScopeWhere(scope),
+        { OR: [{ id: idOrSlug }, { slug: idOrSlug }] },
+      ],
       ...(includeDeleted ? {} : { deletedAt: null }),
     },
     select: DETAIL_SELECT,
   });
+  // 404 rather than 403 for another branch's product: a 403 confirms the id
+  // is real. Out of scope and non-existent are the same answer here.
   if (!product) throw ApiError.notFound("Product not found");
 
   return shapeProduct(product);
+}
+
+/**
+ * The menus each product is on, keyed by product id.
+ *
+ * Publishing a product does not put it on sale: ordering always resolves
+ * against a branch's menu, so a published product on no menu is visible in the
+ * catalog and cannot be bought. That is the most likely "why isn't it selling?"
+ * question an operator will have, so the admin screens show placement next to
+ * the publish state rather than leaving it to be discovered.
+ *
+ * A menu lists a product once per variant; this counts menus, not rows.
+ */
+export async function menuPlacements(productIds) {
+  const placements = new Map(productIds.map((id) => [id, []]));
+  if (!productIds.length) return placements;
+
+  const rows = await prisma.menuItem.findMany({
+    where: { productId: { in: productIds } },
+    distinct: ["productId", "menuId"],
+    select: {
+      productId: true,
+      menu: {
+        select: { id: true, name: true, type: true, isActive: true, branch: { select: { id: true, name: true } } },
+      },
+    },
+  });
+
+  for (const row of rows) placements.get(row.productId)?.push(row.menu);
+  return placements;
 }
 
 // --- writes -----------------------------------------------------------------
 
 export async function createProduct(data, actor) {
   const { price, variants: variantInput, images, ...productData } = data;
+
+  // A product with no branch is on every outlet's catalogue, so writing one
+  // takes a company-wide grant — the same test a chain-wide promotion gets.
+  assertProductReach(actor, productData.branchId ?? null, "products.create");
 
   await assertReferencesExist(productData);
 
@@ -311,9 +376,21 @@ export async function createProduct(data, actor) {
   return getProduct(product.id);
 }
 
-export async function updateProduct(id, data) {
-  const existing = await prisma.product.findFirst({ where: { id, deletedAt: null }, select: { id: true } });
+export async function updateProduct(id, data, actor = null) {
+  const existing = await prisma.product.findFirst({
+    where: { id, deletedAt: null },
+    select: { id: true, branchId: true },
+  });
   if (!existing) throw ApiError.notFound("Product not found");
+
+  // Both sides of the edit, as with commission rules: the product as it
+  // stands, and the product it would become. Checking only the new owner
+  // would let a branch manager promote their own item to the whole chain;
+  // checking only the old one would let them capture somebody else's.
+  if (actor) {
+    assertProductReach(actor, existing.branchId, "products.update");
+    if ("branchId" in data) assertProductReach(actor, data.branchId ?? null, "products.update");
+  }
 
   await assertReferencesExist(data);
 
@@ -400,6 +477,23 @@ export async function setProductImages(id, images) {
 
 // --- variants ---------------------------------------------------------------
 
+/**
+ * SKUs are unique across the whole catalogue, not just within a product. The
+ * database enforces it, but its refusal reads "That record already exists" —
+ * which does not say *what* exists or where. Checked first so the message names
+ * the SKU and the product already using it.
+ */
+async function assertSkuIsFree(sku, { exceptVariantId = null } = {}) {
+  if (!sku) return;
+  const clash = await prisma.productVariant.findFirst({
+    where: { sku: sku.trim(), ...(exceptVariantId ? { id: { not: exceptVariantId } } : {}) },
+    select: { name: true, product: { select: { name: true } } },
+  });
+  if (clash) {
+    throw ApiError.conflict(`The SKU "${sku.trim()}" is already used by ${clash.product.name} (${clash.name})`);
+  }
+}
+
 export async function listVariants(productId) {
   const product = await prisma.product.findFirst({ where: { id: productId, deletedAt: null }, select: { id: true } });
   if (!product) throw ApiError.notFound("Product not found");
@@ -421,6 +515,7 @@ export async function addVariant(productId, data) {
   const clash = product.variants.some((variant) => variant.name.toLowerCase() === data.name.trim().toLowerCase());
   if (clash) throw ApiError.conflict(`This product already has a variant called "${data.name}"`);
 
+  await assertSkuIsFree(data.sku);
   const sku = data.sku ?? (await generateSku({ productSlug: product.slug, variantName: data.name }));
 
   const variant = await withTransaction(async (tx) => {
@@ -456,6 +551,8 @@ export async function updateVariant({ productId, variantId, data }) {
     });
     if (clash) throw ApiError.conflict(`This product already has a variant called "${data.name}"`);
   }
+
+  await assertSkuIsFree(data.sku, { exceptVariantId: variantId });
 
   // Never leave a product with no sellable variant, and never leave the default
   // pointing at a deactivated one.

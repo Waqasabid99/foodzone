@@ -2,6 +2,7 @@ import { apiHandler, created, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { recordBillPaymentSchema } from "@/server/validation/finance.schemas";
 import { recordBillPayment } from "@/server/services/supplier-bill.service";
+import { assertRecordAccess } from "@/server/purchasing/access";
 
 /**
  * Records a payment against a bill.
@@ -18,5 +19,8 @@ export const POST = apiHandler(
     body: recordBillPaymentSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => created(await recordBillPayment(params.id, body, auth)),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "supplierBill", params.id, "supplier_bills.record_payment");
+    return created(await recordBillPayment(params.id, body, auth));
+  },
 );

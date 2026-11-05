@@ -1,10 +1,16 @@
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, created, ok, RateLimits } from "@/lib/api";
 import { createRuleSchema, listRulesSchema } from "@/server/validation/creator.schemas";
 import { createRule, listRules } from "@/server/services/creator-commission.service";
 
+/**
+ * Scoped to the branches the caller may read rules at. A rule carries a list
+ * of branches and an empty list means the whole chain, so the cut is the same
+ * one promotions get — see `server/access/scope.js`.
+ */
 export const GET = apiHandler(
-  { auth: true, permissions: "creator_commission_rules.read", query: listRulesSchema },
-  async ({ query }) => ok(await listRules(query)),
+  { auth: true, permissions: "creator_commission_rules.read", query: listRulesSchema, branch: "query" },
+  async ({ auth, query }) =>
+    ok(await listRules({ ...query, scope: branchScope(auth, "creator_commission_rules.read") })),
 );
 
 /**

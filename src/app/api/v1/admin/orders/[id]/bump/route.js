@@ -16,6 +16,14 @@ export const POST = apiHandler(
   },
   async ({ auth, params, body }) => {
     await assertOrderAccess(auth, params.id, "kds.update_item_status");
-    return ok(await bumpOrder({ orderId: params.id, status: body.status, actorId: auth.userId }));
+    return ok(
+      await bumpOrder({
+        orderId: params.id,
+        status: body.status,
+        stationId: body.stationId ?? null,
+        course: body.course ?? null,
+        actorId: auth.userId,
+      }),
+    );
   },
 );

@@ -2,6 +2,7 @@ import { apiHandler, created, paginated, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { addMenuItemSchema, menuItemQuerySchema } from "@/server/validation/catalog.schemas";
 import { addMenuItem, assertMenuAccess, listMenuItems } from "@/server/services/menu.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 export const GET = apiHandler(
   { auth: true, permissions: "menu_items.read", params: idParamSchema, query: menuItemQuerySchema },
@@ -24,6 +25,7 @@ export const POST = apiHandler(
     body: addMenuItemSchema,
     rateLimit: RateLimits.write,
     audit: { action: "menu_item.create", entityType: "MenuItem" },
+    invalidates: [CacheTag.MENUS],
   },
   async ({ auth, params, body }) => {
     await assertMenuAccess(auth, params.id, "menus.update");

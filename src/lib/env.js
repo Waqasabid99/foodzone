@@ -90,6 +90,32 @@ const schema = z.object({
   /// How long an upload ticket stays valid.
   UPLOAD_TICKET_TTL_SECONDS: z.coerce.number().int().positive().default(900),
 
+  // --- payment gateway credentials -----------------------------------------
+  /// Keys that encrypt each branch's gateway credentials at rest, newest first:
+  /// `keyId:base64key[,keyId:base64key...]`. Generate one with
+  /// `openssl rand -base64 32`.
+  ///
+  /// Declared here so it is documented and discoverable with the rest of the
+  /// configuration, but deliberately *not* consumed through `env()`:
+  /// `server/utils/secret-box.js` reads `process.env` directly, because a key
+  /// added at deploy time must be picked up without a restart and `env()`
+  /// caches for the life of the process. That file owns the format checks.
+  CREDENTIAL_ENCRYPTION_KEYS: z.string().optional(),
+
+  // --- accounting ------------------------------------------------------------
+  /// The month a fiscal year opens in, 1-12. Defaults to 7: Pakistan's
+  /// financial year runs 1 July to 30 June. Read before the first `db:seed`,
+  /// which opens the year covering today; changing it afterwards does not move
+  /// years that already exist.
+  ///
+  /// Declared here to be documented with the rest of the configuration, but
+  /// deliberately *not* consumed through `env()`:
+  /// `server/accounting/fiscal-calendar.js` reads `process.env` directly so
+  /// that `prisma/seed.js` — which runs with only a database URL — need not
+  /// satisfy this whole schema to insert a fiscal year. That file owns the
+  /// range check.
+  FISCAL_YEAR_START_MONTH: z.coerce.number().int().min(1).max(12).default(7),
+
   // --- background work ------------------------------------------------------
   /// Shared secret for the internal cron endpoints. Required in production.
   CRON_SECRET: z.string().optional(),

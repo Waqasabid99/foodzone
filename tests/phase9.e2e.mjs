@@ -59,6 +59,29 @@ async function api(pathname, { method = "GET", body, token, ip } = {}) {
   return { status: res.status, body: json };
 }
 
+/**
+ * Drains the outbox **until it is empty**, not once.
+ *
+ * Selling a dish does not deduct its ingredients in the request that completes
+ * the order — a job does it. The worker claims a bounded batch and handlers
+ * enqueue more as they run, so a single cycle leaves the stock event sitting
+ * in the queue and the deduction appears never to have happened. That is why
+ * this suite failed only when run after the others: they left a backlog in
+ * front of it.
+ */
+async function drainOutbox() {
+  for (let cycle = 0; cycle < 40; cycle += 1) {
+    const res = await fetch(`${BASE}/api/internal/jobs/outbox`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${process.env.E2E_CRON_SECRET ?? "phase2-test-secret"}` },
+    });
+    if (!res.ok) return;
+
+    const body = await res.json().catch(() => null);
+    if ((body?.data?.processed ?? 0) === 0 && (body?.data?.failed ?? 0) === 0) return;
+  }
+}
+
 const num = (value) => Number(value ?? 0);
 const round = (value, dp = 4) => Math.round(Number(value ?? 0) * 10 ** dp) / 10 ** dp;
 
@@ -568,7 +591,7 @@ async function main() {
   const menuRes = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
+    body: { branchId, isActive: true, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
   });
   await api(`/admin/menus/${menuRes.body.data.id}/items`, {
     method: "POST",
@@ -614,10 +637,7 @@ async function main() {
     await api(`/admin/orders/${orderId}/status`, { method: "PUT", token: adminToken, body: { status } });
   }
 
-  await fetch(`${BASE}/api/internal/jobs/outbox`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${process.env.E2E_CRON_SECRET ?? "phase2-test-secret"}` },
-  });
+  await drainOutbox();
 
   const beefAfter = await api(`/admin/stock/levels?itemId=${beefId}&locationId=${storeId}`, { token: adminToken });
   const bunAfter = await api(`/admin/stock/levels?itemId=${bunId}&locationId=${storeId}`, { token: adminToken });
@@ -633,10 +653,7 @@ async function main() {
   const saleMovements = await prisma.stockMovement.count({ where: { orderId, type: "SALE_OUT" } });
   check("the deduction is tagged to the order", saleMovements === 2, { saleMovements });
 
-  await fetch(`${BASE}/api/internal/jobs/outbox`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${process.env.E2E_CRON_SECRET ?? "phase2-test-secret"}` },
-  });
+  await drainOutbox();
   const stillTwo = await prisma.stockMovement.count({ where: { orderId, type: "SALE_OUT" } });
   check("draining the outbox again does not deduct twice", stillTwo === 2, { stillTwo });
 

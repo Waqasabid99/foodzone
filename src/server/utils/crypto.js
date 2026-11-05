@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 
 /**
- * Secrets the system hands out: password-reset links, OTPs, delivery handover
- * codes, QR tokens, share links.
+ * Secrets the system hands out: password-reset links, OTPs, QR tokens,
+ * share links.
  *
  * Anything a user can present back to us is stored hashed, never in plaintext,
  * so a database leak does not hand over live credentials. The only exceptions

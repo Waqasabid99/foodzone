@@ -7,6 +7,8 @@ import { logger } from "@/lib/logger";
 import { shortCode } from "@/server/utils/crypto";
 import { money } from "@/server/accounting/balance";
 import { startOfDay } from "@/server/attendance/shift";
+import { assertPublishReach } from "@/server/creator/access";
+import { soleBranchId } from "@/server/catalog/access";
 
 /**
  * Views, likes, shares and the public feed.
@@ -218,19 +220,90 @@ export async function followShareLink({ code, sessionId = null, userId = null, r
  * ordered by popularity is one where the video that happened to go up first
  * stays on top for ever, and no new creator can ever get seen.
  */
-export async function videosForProduct({ productId, limit = 10 }) {
+export async function videosForProduct({ productId, branchId, limit = 10 }) {
+  // The product page at one outlet shows what was filmed at that outlet. This
+  // is the surface the whole branch rule exists for: without it, an outlet that
+  // does not even put an item on its menu still carried a stranger's video of
+  // it, filmed in another city.
+  const branch = await resolveFeedBranch(branchId);
+  if (!branch) return [];
+
   return prisma.creatorVideo.findMany({
-    where: { productId, status: "APPROVED", creator: { status: "ACTIVE" } },
+    where: { productId, branchId: branch, status: "APPROVED", creator: { status: "ACTIVE" } },
     select: PUBLIC_VIDEO_SELECT,
     orderBy: [{ featuredRank: { sort: "asc", nulls: "last" } }, { publishedAt: "desc" }],
     take: limit,
   });
 }
 
+/**
+ * Which outlet a public video query means, or null for "none chosen".
+ *
+ * A single-restaurant installation is never asked — there is one answer, and
+ * asking would be ceremony.
+ *
+ * A chain with no outlet chosen gets **nothing, not everything**. The
+ * storefront lets you browse before picking a branch, and that view already
+ * degrades honestly elsewhere — the menu falls back to indicative catalogue
+ * prices. There is no catalogue equivalent of a video: every one of them was
+ * filmed at a particular outlet by a particular person, so with no outlet in
+ * mind the right answer is an empty shelf. Answering "all of them" is the bug
+ * this replaced, and it is the one failure mode that must never come back.
+ */
+async function resolveFeedBranch(branchId) {
+  return branchId ?? (await soleBranchId());
+}
+
+/**
+ * One creator's own page.
+ *
+ * Deliberately not the branch feed. This page is about a person rather than a
+ * shelf — you arrive on it from a video you were already shown — so a branch
+ * narrows it when the caller knows one and is not demanded when they do not.
+ */
+export async function videosByCreator({ creatorHandle, branchId = null, limit = 24 }) {
+  return prisma.creatorVideo.findMany({
+    where: {
+      status: "APPROVED",
+      creator: { status: "ACTIVE", handle: creatorHandle },
+      ...(branchId ? { branchId } : {}),
+    },
+    /*
+     * The outlet is named on this page and only this page.
+     *
+     * Everywhere else a video appears, the branch is already the context —
+     * you are on one outlet's product page or one outlet's feed, so saying so
+     * again would be noise. Here it is the opposite: this is the one surface
+     * that deliberately crosses outlets, and a clip of a dish from a city the
+     * reader has never been to should say which city, rather than leaving them
+     * to wonder why they cannot order it.
+     */
+    select: { ...PUBLIC_VIDEO_SELECT, branchId: true, branch: { select: { id: true, name: true, city: true } } },
+    orderBy: [{ featuredRank: { sort: "asc", nulls: "last" } }, { publishedAt: "desc" }],
+    take: limit,
+  });
+}
+
 /** The browse feed. */
-export async function videoFeed({ categoryId, creatorHandle, limit = 20, cursor } = {}) {
+export async function videoFeed({ branchId, categoryId, creatorHandle, limit = 20, cursor } = {}) {
+  /*
+   * One outlet's feed, never the company's.
+   *
+   * This query had no branch condition at all, so every approved video in the
+   * business was served to every visitor: a clip filmed in one city appeared
+   * on the storefront of an outlet in another, for an item that outlet may not
+   * even put on its menu. A video is one person's meal at one branch.
+   *
+   * A single-restaurant installation does not have to say which branch it
+   * means — there is only one, and asking would be ceremony. A chain does:
+   * answering "all of them" is the bug this replaced.
+   */
+  const branch = await resolveFeedBranch(branchId);
+  if (!branch) return toPage([], limit);
+
   const rows = await prisma.creatorVideo.findMany({
     where: {
+      branchId: branch,
       status: "APPROVED",
       creator: { status: "ACTIVE", ...(creatorHandle ? { handle: creatorHandle } : {}) },
       ...(categoryId ? { product: { categoryId } } : {}),
@@ -258,6 +331,9 @@ export async function publicVideo(id) {
 
 /** Admin curation: pinning a video to the top of a product's feed. */
 export async function setFeaturedRank(videoId, { rank, actor }) {
+  // Pinning puts one creator's video at the top of a product's feed, so it
+  // reaches as far as that product does and takes the same grant.
+  await assertPublishReach(actor, videoId, "creator_videos.publish");
   const video = await prisma.creatorVideo.findUnique({ where: { id: videoId }, select: { id: true, status: true } });
   if (!video) throw ApiError.notFound("Video not found");
 

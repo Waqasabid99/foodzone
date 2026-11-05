@@ -1,7 +1,7 @@
-import { apiHandler, created, RateLimits } from "@/lib/api";
+import { apiHandler, ApiError, can, created, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { reviseRecipeSchema } from "@/server/validation/production.schemas";
-import { reviseRecipe } from "@/server/services/recipe.service";
+import { reviseRecipe, withoutCosts } from "@/server/services/recipe.service";
 
 /**
  * Creates the next version of a recipe.
@@ -17,5 +17,11 @@ export const POST = apiHandler(
     body: reviseRecipeSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => created(await reviseRecipe(params.id, body, auth)),
+  async ({ params, body, auth }) => {
+    if (!can(auth, "recipes.view_cost") && (body.laborCost != null || body.overheadCost != null)) {
+      throw ApiError.forbidden("You cannot set a recipe's costs", { required: ["recipes.view_cost"] });
+    }
+    const recipe = await reviseRecipe(params.id, body, auth);
+    return created(can(auth, "recipes.view_cost") ? recipe : withoutCosts(recipe));
+  },
 );

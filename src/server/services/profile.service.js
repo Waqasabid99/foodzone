@@ -20,7 +20,7 @@ export async function getProfile(principal) {
   });
 }
 
-export async function updateProfile(principal, { name, phone, locale, avatarUrl }) {
+export async function updateProfile(principal, { name, phone, locale, avatarUrl, homePage }) {
   const user = await prisma.user.findFirst({
     where: { id: principal.userId, deletedAt: null },
     select: { id: true, phone: true },
@@ -37,6 +37,8 @@ export async function updateProfile(principal, { name, phone, locale, avatarUrl 
       ...(phoneChanged ? { phone: phone || null, phoneVerifiedAt: null } : {}),
       ...(locale !== undefined ? { locale } : {}),
       ...(avatarUrl !== undefined ? { avatarUrl } : {}),
+      // An empty choice is "decide from what I do here", which is a null.
+      ...(homePage !== undefined ? { homePage: homePage || null } : {}),
     },
   });
 

@@ -1,4 +1,5 @@
 import { apiHandler, created, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { reverseJournalEntrySchema } from "@/server/validation/finance.schemas";
 import { reverseJournalEntry } from "@/server/services/journal.service";
@@ -21,6 +22,8 @@ export const POST = apiHandler(
     body: reverseJournalEntrySchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) =>
-    created(await reverseJournalEntry(params.id, { reason: body.reason, entryDate: body.entryDate, actor: auth })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "journalEntry", params.id, "journal_entries.void");
+    return created(await reverseJournalEntry(params.id, { reason: body.reason, entryDate: body.entryDate, actor: auth }));
+  },
 );

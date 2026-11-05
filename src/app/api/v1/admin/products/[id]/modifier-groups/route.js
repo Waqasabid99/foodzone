@@ -2,6 +2,7 @@ import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { attachModifierGroupSchema } from "@/server/validation/catalog.schemas";
 import { attachModifierGroup, listProductModifierGroups } from "@/server/services/modifier.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 export const GET = apiHandler(
   { auth: true, permissions: "products.read", params: idParamSchema },
@@ -17,6 +18,7 @@ export const POST = apiHandler(
     body: attachModifierGroupSchema,
     rateLimit: RateLimits.write,
     audit: { action: "product.attach_modifier_group", entityType: "Product" },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ params, body }) => created(await attachModifierGroup(params.id, body)),
 );

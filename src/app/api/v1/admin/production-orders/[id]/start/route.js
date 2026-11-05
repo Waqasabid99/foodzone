@@ -1,7 +1,8 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess, productionCostVisible } from "@/server/inventory/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { startProductionSchema } from "@/server/validation/production.schemas";
-import { startProduction } from "@/server/services/production-order.service";
+import { startProduction, withoutRunCosts } from "@/server/services/production-order.service";
 
 /**
  * Issues material and starts the run.
@@ -21,5 +22,9 @@ export const POST = apiHandler(
     body: startProductionSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => ok(await startProduction(params.id, { items: body.items, actor: auth })),
+  async ({ params, body, auth }) => {
+    const branchId = await assertRecordAccess(auth, "production", params.id, "production_orders.start");
+    const run = await startProduction(params.id, { items: body.items, actor: auth });
+    return ok(productionCostVisible(auth, branchId) ? run : withoutRunCosts(run));
+  },
 );

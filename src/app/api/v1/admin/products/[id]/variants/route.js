@@ -2,6 +2,7 @@ import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { variantInputSchema } from "@/server/validation/catalog.schemas";
 import { addVariant, listVariants } from "@/server/services/product.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 export const GET = apiHandler(
   { auth: true, permissions: "variants.read", params: idParamSchema },
@@ -16,6 +17,7 @@ export const POST = apiHandler(
     body: variantInputSchema,
     rateLimit: RateLimits.write,
     audit: { action: "variant.create", entityType: "ProductVariant" },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ params, body }) => created(await addVariant(params.id, body)),
 );

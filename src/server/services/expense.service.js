@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
@@ -349,9 +350,11 @@ export async function deleteExpense(id, actor = null) {
   return { id, deleted: true };
 }
 
-export async function listExpenses({ branchId, categoryId, status, from, to, limit = 20, cursor } = {}) {
+export async function listExpenses({ branchId, categoryId, status, from, to, scope = null, limit = 20, cursor } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.expense.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(categoryId ? { categoryId } : {}),
       ...(status ? { status } : {}),
@@ -379,11 +382,13 @@ export async function listExpenses({ branchId, categoryId, status, from, to, lim
 }
 
 /** Spend by category over a window — where the money actually went. */
-export async function expenseSummary({ branchId, from, to } = {}) {
+export async function expenseSummary({ branchId, from, to, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.expense.groupBy({
     by: ["categoryId"],
     where: {
       status: "APPROVED",
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(from || to
         ? { expenseDate: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }

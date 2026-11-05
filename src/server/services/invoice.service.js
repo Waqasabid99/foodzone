@@ -3,6 +3,7 @@ import { ApiError } from "@/lib/api";
 import { withRetryingTransaction } from "@/server/utils/db";
 import { nextDocumentNumber, monthPeriodKey } from "@/server/utils/sequence";
 import { getSettings } from "@/server/services/setting.service";
+import { paymentTotals } from "@/server/payments/state";
 
 /**
  * Invoices.
@@ -135,6 +136,11 @@ export async function voidInvoice({ orderId, reason, actorId = null }) {
  * names and tax lines were all frozen at purchase. A receipt reprinted a year
  * later shows what the customer actually bought, not what the catalog says
  * today.
+ *
+ * What was *paid*, though, is summed from the payment and refund rows rather
+ * than read off `Order.paidTotal`, which is a column nothing maintains. Reading
+ * it printed "paid 0" at the bottom of a receipt the customer had just settled
+ * in cash.
  */
 export async function receiptPayload(orderId) {
   const order = await prisma.order.findUnique({
@@ -161,7 +167,6 @@ export async function receiptPayload(orderId) {
       tipAmount: true,
       roundOff: true,
       grandTotal: true,
-      paidTotal: true,
       addressSnapshot: true,
       user: { select: { name: true, email: true, phone: true } },
       table: { select: { name: true, area: true } },
@@ -182,6 +187,8 @@ export async function receiptPayload(orderId) {
         },
       },
       invoice: { select: SELECT },
+      payments: { select: { status: true, amount: true } },
+      refunds: { select: { status: true, amount: true } },
       taxLines: { select: { name: true, rate: true, taxableAmount: true, amount: true } },
       discounts: { select: { label: true, amount: true, source: true } },
       items: {
@@ -251,7 +258,7 @@ export async function receiptPayload(orderId) {
       tipAmount: order.tipAmount,
       roundOff: order.roundOff,
       grandTotal: order.grandTotal,
-      paidTotal: order.paidTotal,
+      paidTotal: paymentTotals(order.payments, order.refunds).netCaptured,
     },
   };
 }

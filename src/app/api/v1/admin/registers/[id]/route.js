@@ -1,4 +1,5 @@
 import { apiHandler, ok } from "@/lib/api";
+import { assertRecordAccess } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { getSession } from "@/server/services/register.service";
 
@@ -11,5 +12,8 @@ import { getSession } from "@/server/services/register.service";
  */
 export const GET = apiHandler(
   { auth: true, permissions: "cash_registers.read", params: idParamSchema },
-  async ({ params }) => ok(await getSession(params.id)),
+  async ({ params, auth }) => {
+    await assertRecordAccess(auth, "registerSession", params.id, "cash_registers.read");
+    return ok(await getSession(params.id));
+  },
 );

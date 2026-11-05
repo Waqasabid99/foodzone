@@ -65,6 +65,48 @@ export function assertRulesAreSatisfiable({ selectionType, minSelect, maxSelect,
   }
 }
 
+/**
+ * The group's rules must hold for the group itself *and* for every product that
+ * overrides them.
+ *
+ * A product may tighten a group — "choose 2 sauces" on wings where the group
+ * says "up to 3". Changing the group, or switching an option off, can break
+ * that product without touching it: two active sauces and a product minimum of
+ * three is an item no customer can finish ordering. So every change that can
+ * shrink the choice is checked against each attachment, and the refusal names
+ * the product.
+ */
+async function assertAttachmentsSatisfiable({ groupId, selectionType, minSelect, maxSelect, allowQuantity, optionCount }) {
+  const attachments = await prisma.productModifierGroup.findMany({
+    where: { groupId, OR: [{ minSelect: { not: null } }, { maxSelect: { not: null } }], product: { deletedAt: null } },
+    select: { minSelect: true, maxSelect: true, product: { select: { name: true } } },
+  });
+
+  for (const row of attachments) {
+    try {
+      assertRulesAreSatisfiable({
+        selectionType,
+        minSelect: row.minSelect ?? minSelect,
+        maxSelect: row.maxSelect ?? maxSelect,
+        allowQuantity,
+        optionCount,
+      });
+    } catch (error) {
+      throw ApiError.validation(`That would break "${row.product.name}", which sets its own limits for this group: ${error.message.charAt(0).toLowerCase()}${error.message.slice(1)}`, error.details);
+    }
+  }
+}
+
+async function assertInternalNameFree(internalName, { exceptId = null } = {}) {
+  if (!internalName) return;
+  const clash = await prisma.modifierGroup.findFirst({
+    where: { internalName, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { name: true },
+  });
+  // Without this the unique index answers "That record already exists".
+  if (clash) throw ApiError.conflict(`The internal name "${internalName}" is already used by the "${clash.name}" group`);
+}
+
 function assertDefaultsFit({ selectionType, options }) {
   const defaults = options.filter((option) => option.isDefault);
   if (selectionType === "SINGLE" && defaults.length > 1) {
@@ -87,7 +129,7 @@ export async function listModifierGroups({ search, isActive } = {}) {
           }
         : {}),
     },
-    select: { ...GROUP_SELECT, _count: { select: { products: true } } },
+    select: { ...GROUP_SELECT, _count: { select: { products: { where: { product: { deletedAt: null } } } } } },
     orderBy: { name: "asc" },
   });
 
@@ -100,13 +142,26 @@ export async function getModifierGroup(id) {
     select: {
       ...GROUP_SELECT,
       products: {
-        select: { product: { select: { id: true, name: true, slug: true } }, isRequired: true },
+        where: { product: { deletedAt: null } },
+        select: {
+          product: { select: { id: true, name: true, slug: true, type: true, isActive: true } },
+          isRequired: true,
+          minSelect: true,
+          maxSelect: true,
+        },
       },
     },
   });
   if (!group) throw ApiError.notFound("Modifier group not found");
 
-  return { ...group, products: group.products.map((row) => ({ ...row.product, isRequired: row.isRequired })) };
+  return {
+    ...group,
+    products: group.products.map((row) => ({
+      ...row.product,
+      isRequired: row.isRequired,
+      overrides: { minSelect: row.minSelect, maxSelect: row.maxSelect },
+    })),
+  };
 }
 
 export async function createModifierGroup(data) {
@@ -114,6 +169,12 @@ export async function createModifierGroup(data) {
 
   assertRulesAreSatisfiable({ ...group, optionCount: options.length });
   assertDefaultsFit({ selectionType: group.selectionType, options });
+  await assertInternalNameFree(group.internalName);
+
+  const names = options.map((option) => option.name.trim().toLowerCase());
+  if (new Set(names).size !== names.length) {
+    throw ApiError.validation("Two options in this group have the same name", { options: ["Option names must differ"] });
+  }
 
   const created = await prisma.modifierGroup.create({
     data: {
@@ -134,7 +195,12 @@ export async function updateModifierGroup(id, data) {
   if (!existing) throw ApiError.notFound("Modifier group not found");
 
   const merged = { ...existing, ...data };
-  assertRulesAreSatisfiable({ ...merged, optionCount: existing._count.options });
+  const optionCount = existing._count.options;
+  assertRulesAreSatisfiable({ ...merged, optionCount });
+  // Switching to single-choice must not leave two options pre-selected.
+  assertDefaultsFit({ selectionType: merged.selectionType, options: existing.options.filter((option) => option.isActive) });
+  await assertInternalNameFree(data.internalName, { exceptId: id });
+  await assertAttachmentsSatisfiable({ groupId: id, ...merged, optionCount });
 
   await prisma.modifierGroup.update({ where: { id }, data });
   return getModifierGroup(id);
@@ -148,8 +214,14 @@ export async function deleteModifierGroup(id) {
   if (!group) throw ApiError.notFound("Modifier group not found");
 
   if (group._count.products > 0) {
+    // Deleted products keep their attachments (a restore brings its options
+    // back), but they do not appear anywhere a person could detach them from —
+    // so the refusal says which kind is in the way.
+    const live = await prisma.productModifierGroup.count({ where: { groupId: id, product: { deletedAt: null } } });
     throw ApiError.conflict(
-      `This group is attached to ${group._count.products} product(s). Detach it first, or deactivate the group.`,
+      live > 0
+        ? `This group is used by ${live} product${live === 1 ? "" : "s"}. Remove it from them first, or switch the group off instead.`
+        : "Only deleted products still use this group, and restoring them would bring it back. Switch the group off instead.",
     );
   }
 
@@ -180,9 +252,21 @@ export async function addOption(groupId, data) {
 export async function updateOption({ groupId, optionId, data }) {
   const option = await prisma.modifierOption.findFirst({
     where: { id: optionId, groupId },
-    select: { id: true, group: { select: { selectionType: true } } },
+    select: {
+      id: true,
+      isActive: true,
+      group: { select: { selectionType: true, minSelect: true, maxSelect: true, allowQuantity: true } },
+    },
   });
   if (!option) throw ApiError.notFound("Modifier option not found");
+
+  // Switching an option off shrinks the choice exactly as deleting it does,
+  // and used to skip the check deleting makes.
+  if (data.isActive === false && option.isActive) {
+    const remaining = await prisma.modifierOption.count({ where: { groupId, id: { not: optionId }, isActive: true } });
+    assertRulesAreSatisfiable({ ...option.group, optionCount: remaining });
+    await assertAttachmentsSatisfiable({ groupId, ...option.group, optionCount: remaining });
+  }
 
   if (data.name) {
     const clash = await prisma.modifierOption.findFirst({
@@ -220,6 +304,7 @@ export async function deleteOption({ groupId, optionId }) {
   const remaining = await prisma.modifierOption.count({ where: { groupId, id: { not: optionId }, isActive: true } });
   // Removing the option must not leave the group asking for more than it offers.
   assertRulesAreSatisfiable({ ...group, optionCount: remaining });
+  await assertAttachmentsSatisfiable({ groupId, ...group, optionCount: remaining });
 
   await prisma.modifierOption.delete({ where: { id: optionId } });
   return { deleted: true, id: optionId };

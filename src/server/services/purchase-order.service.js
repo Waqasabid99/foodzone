@@ -6,6 +6,7 @@ import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { nextDocumentNumber, monthPeriodKey } from "@/server/utils/sequence";
 import { convertQuantity, quantity as q, totalCost as tc, unitCost as uc } from "@/server/inventory/uom";
+import { branchFilter } from "@/server/access/scope";
 
 /**
  * Purchase orders.
@@ -378,9 +379,14 @@ export async function closePurchaseOrder(id, { reason = null, actor }) {
   });
 }
 
-export async function listPurchaseOrders({ branchId, supplierId, status, from, to, limit = 20, cursor } = {}) {
+export async function listPurchaseOrders({ branchId, supplierId, status, from, to, scope = null, limit = 20, cursor } = {}) {
+  // Without the scope an unfiltered request returns every branch's spend to
+  // anyone holding the permission anywhere. See src/server/purchasing/access.js.
+  const filter = branchFilter(scope);
+
   const rows = await prisma.purchaseOrder.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(supplierId ? { supplierId } : {}),
       ...(status ? { status } : {}),

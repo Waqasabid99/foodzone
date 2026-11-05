@@ -5,6 +5,7 @@ import { AlertCircle, MapPin } from "lucide-react";
 import MenuHero from "@/components/menu/MenuHero";
 import MenuItemCard from "@/components/menu/MenuItemCard";
 import OrderSummaryBar from "@/components/menu/OrderSummaryBar";
+import OrderTypeSwitch from "@/components/menu/OrderTypeSwitch";
 
 /**
  * Why a chosen outlet is not showing its own menu.
@@ -36,8 +37,11 @@ const DIETARY_LABELS = {
  * that split means the menu is in the HTML for a crawler and for someone on a
  * slow connection, and the filtering costs no round trip.
  */
-export default function MenuBrowser({ data, canChooseBranch = false, orderingAvailable = true }) {
-  const [query, setQuery] = useState("");
+export default function MenuBrowser({ data, canChooseBranch = false, orderingAvailable = true, initialQuery = "" }) {
+  // A scanned category code opens the menu already narrowed to that category.
+  // The search already matches category names, so this reuses the filter the
+  // customer can see and clear rather than hiding a mode they cannot.
+  const [query, setQuery] = useState(initialQuery);
   const [activeSection, setActiveSection] = useState(null);
   const [dietary, setDietary] = useState([]);
 
@@ -96,27 +100,32 @@ export default function MenuBrowser({ data, canChooseBranch = false, orderingAva
           matters: an outlet whose menu could not be served falls back to the
           catalog, and claiming that is "the live menu for Seaside" would be the
           worst thing this page could say. */}
-      <p className="flex flex-wrap items-center gap-2 text-body-md text-on-surface-variant">
-        {data.source === "branch" ? (
-          <>
-            <MapPin aria-hidden="true" className="size-4 text-primary" />
-            Showing the live menu for <strong className="text-on-surface">{data.branch.name}</strong>
-            {data.menuName ? <span>· {data.menuName}</span> : null}
-          </>
-        ) : (
-          <>
-            <AlertCircle aria-hidden="true" className="size-4 text-warning" />
-            {data.branch ? (
-              <>
-                <strong className="text-on-surface">{data.branch.name}</strong> has no menu running
-                right now — showing our full catalog instead.
-              </>
-            ) : (
-              <>Showing our full catalog. Prices and availability depend on the outlet you choose.</>
-            )}
-          </>
-        )}
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="flex flex-wrap items-center gap-2 text-body-md text-on-surface-variant">
+          {data.source === "branch" ? (
+            <>
+              <MapPin aria-hidden="true" className="size-4 text-primary" />
+              Showing the live menu for <strong className="text-on-surface">{data.branch.name}</strong>
+              {data.menuName ? <span>· {data.menuName}</span> : null}
+            </>
+          ) : (
+            <>
+              <AlertCircle aria-hidden="true" className="size-4 text-warning" />
+              {data.branch ? (
+                <>
+                  <strong className="text-on-surface">{data.branch.name}</strong> has no menu running
+                  right now — showing our full catalog instead.
+                </>
+              ) : (
+                <>Showing our full catalog. Prices and availability depend on the outlet you choose.</>
+              )}
+            </>
+          )}
+        </p>
+        {/* Only with an outlet: without one there is no menu for the order
+            type to choose between. */}
+        <OrderTypeSwitch renderedType={data.orderType} showSwitch={Boolean(data.branch)} />
+      </div>
 
       {REASON_NOTES[data.reason] ? (
         <p className="rounded-field bg-warning-container px-4 py-3 text-body-md text-on-warning-container">

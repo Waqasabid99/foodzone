@@ -120,9 +120,17 @@ model Refund {
 /// Raw gateway callbacks. Stored before processing and keyed on the provider's
 /// own event id so a redelivered webhook is a no-op.
 model PaymentWebhookEvent {
-  id          String    @id @default(cuid())
-  provider    String
-  eventId     String
+  id       String @id @default(cuid())
+  provider String
+  /// Whose gateway account this callback came from.
+  ///
+  /// Each restaurant holds its own merchant account, so a callback can only be
+  /// verified against *that* branch's signing secret — which is why the branch
+  /// is in the callback URL rather than read from the body. Stored so a replay
+  /// can resolve the same credentials the original verification used.
+  /// Nullable for the rows written before gateways were per-branch.
+  branchId String?
+  eventId  String
   eventType   String
   payload     Json
   signature   String?
@@ -134,6 +142,7 @@ model PaymentWebhookEvent {
 
   @@unique([provider, eventId])
   @@index([status])
+  @@index([branchId, createdAt])
 }
 
 enum RegisterSessionStatus {
@@ -190,4 +199,73 @@ model CashMovement {
   createdAt     DateTime            @default(now())
 
   @@index([sessionId])
+}
+
+// ---------------------------------------------------------------------------
+// Bring-your-own gateway credentials.
+//
+// Each restaurant is the merchant of record: it holds its own contract with
+// Safepay or a bank, its own keys, and the money settles into its own account.
+// We never hold anyone's funds, which keeps the platform outside SBP's payment
+// aggregator regime entirely.
+//
+// So credentials live per branch rather than in the environment. Secret fields
+// are sealed by `server/utils/secret-box.js` and bound to the branch, the
+// provider and the field name, so an envelope lifted into another row will not
+// open. Public fields — a checkout key the browser already sees — are stored
+// readable so the dashboard can show an operator which account they pasted.
+// ---------------------------------------------------------------------------
+
+enum PaymentProviderMode {
+  SANDBOX
+  LIVE
+}
+
+model BranchPaymentProvider {
+  id       String @id @default(cuid())
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId String
+  /// Registry key from `server/payments/providers`: "safepay", "cash", ...
+  provider String
+
+  /// Off by default. A gateway appears at checkout only once somebody has
+  /// entered its credentials and deliberately switched it on.
+  isEnabled Boolean @default(false)
+  /// Order the options are offered in when a branch has several enabled.
+  sortOrder Int     @default(0)
+
+  /// What this branch calls the gateway at checkout.
+  ///
+  /// Optional, and blank by default: the provider declares a presentable name
+  /// of its own. This exists because "Safepay" means nothing to most diners
+  /// while "Card / Easypaisa / JazzCash" means everything — and the wording
+  /// that works in one neighbourhood is not the wording that works in another,
+  /// which is why it is per branch rather than one company-wide setting.
+  displayName String?
+
+  /// Gateways issue separate credential sets per environment, and a branch left
+  /// on SANDBOX in production would hand out free food, so it is recorded
+  /// rather than inferred from NODE_ENV.
+  mode PaymentProviderMode @default(SANDBOX)
+
+  /// The sealed set, shaped by the provider's own `credentials` declaration.
+  credentials Json @default("{}")
+  /// Which encryption key sealed the secrets here, so a key rotation can find
+  /// the rows that still need re-sealing without opening every one of them.
+  keyId String?
+
+  /// Result of the last "test connection". A gateway that has never been
+  /// verified is the most likely thing to be quietly broken.
+  lastVerifiedAt  DateTime?
+  lastVerifyError String?
+
+  /// Who last touched the credentials. The full before/after goes to the audit
+  /// log; this is here so the screen can say it without a second query.
+  updatedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([branchId, provider])
+  @@index([branchId, isEnabled])
 }

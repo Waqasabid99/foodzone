@@ -5,13 +5,18 @@ import { ChevronRight, Clock, Flame, Info } from "lucide-react";
 import ProductGallery from "@/components/products/ProductGallery";
 import ProductOrderForm from "@/components/products/ProductOrderForm";
 import ProductReviews from "@/components/products/ProductReviews";
+import VideoRail from "@/components/videos/VideoRail";
 import RelatedProducts from "@/components/products/RelatedProducts";
 import OrderSummaryBar from "@/components/menu/OrderSummaryBar";
+import OrderTypeSwitch from "@/components/menu/OrderTypeSwitch";
 import Stars from "@/components/ui/Stars";
 import { getProductPageData } from "@/server/content/product";
+import { productVideos } from "@/server/content/creator-videos";
 import { getPublicBranches } from "@/server/content/branches";
 import { formatMoney, formatRating } from "@/lib/format";
 import { BRANCH_COOKIE, resolveBranch } from "@/lib/branch";
+import { ORDER_TYPE_COOKIE, resolveOrderType } from "@/lib/order-type";
+import { serialize } from "@/lib/api/serialize";
 import { ApiError } from "@/lib/api";
 
 const DIETARY_LABELS = {
@@ -46,14 +51,18 @@ export async function generateMetadata({ params }) {
   }
 }
 
-export default async function ProductPage({ params }) {
-  const { slug } = await params;
+export default async function ProductPage({ params, searchParams }) {
+  const [{ slug }, query] = await Promise.all([params, searchParams]);
   const [branches, cookieStore] = await Promise.all([getPublicBranches(), cookies()]);
   const branch = resolveBranch(branches, cookieStore.get(BRANCH_COOKIE)?.value ?? null);
 
   let data;
   try {
-    data = await getProductPageData({ slug, branch });
+    data = await getProductPageData({
+      slug,
+      branch,
+      orderType: resolveOrderType(cookieStore.get(ORDER_TYPE_COOKIE)?.value ?? null),
+    });
   } catch (error) {
     // `publicProduct` throws a NOT_FOUND for an unpublished or missing slug,
     // which is exactly a 404 here. Anything else is a real fault and should
@@ -63,6 +72,26 @@ export default async function ProductPage({ params }) {
   }
 
   const { product, currency, reviews, related, priceSource, onBranchMenu } = data;
+
+  /*
+   * Videos of this item, filmed at this outlet.
+   *
+   * After the product read rather than beside it, because the product id comes
+   * out of it — and a video section is not worth delaying the price for.
+   */
+  const videos = serialize(await productVideos({ productId: product.id, branchId: branch?.id ?? null }));
+
+  /*
+   * `?v=` is a video handing the sale over.
+   *
+   * Something filmed against a product that needs choices made cannot be added
+   * from the feed, so the viewer sends people here instead. Carrying the id
+   * means the creator still gets the credit for a sale their clip caused, two
+   * taps later. Checked against the videos actually on this page, so the
+   * parameter cannot be used to credit an arbitrary video.
+   */
+  const fromVideo = Array.isArray(query?.v) ? query.v[0] : query?.v;
+  const creditVideoId = videos.some((video) => video.id === fromVideo) ? fromVideo : null;
   const cheapest = product.variants.reduce(
     (min, variant) => (min === null || variant.price < min ? variant.price : min),
     null,
@@ -169,6 +198,7 @@ export default async function ProductPage({ params }) {
             canChooseBranch={branches.length > 1}
             onBranchMenu={onBranchMenu}
             priceSource={priceSource}
+            creatorVideoId={creditVideoId}
           />
         </div>
       </div>
@@ -180,9 +210,12 @@ export default async function ProductPage({ params }) {
         branchId={branch?.id ?? null}
       />
 
+      <VideoRail videos={videos} productName={product.name} />
+
       <ProductReviews reviews={reviews} productName={product.name} />
 
       <OrderSummaryBar currency={currency} prepMinutes={data.prepMinutes} />
+      <OrderTypeSwitch renderedType={data.orderType} />
     </div>
   );
 }

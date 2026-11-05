@@ -207,6 +207,7 @@ export const PERMISSION_MODULES = [
       ["create", "Create orders", "Counter, phone and POS order entry"],
       ["update", "Edit orders"],
       ["edit_items", "Add or remove order items after placement"],
+      ["request_bill", "Ask the till to settle a table", "What a waiter does instead of taking the money"],
       ["update_status", "Advance order status"],
       ["cancel", "Cancel orders"],
       ["apply_manual_discount", "Apply a manual discount"],
@@ -219,6 +220,7 @@ export const PERMISSION_MODULES = [
     actions: [
       ["read", "View kitchen tickets"],
       ["update_item_status", "Mark items preparing, ready or served"],
+      ["set_aside", "Take a stuck ticket off the board for someone to resolve"],
     ],
   },
   {
@@ -285,6 +287,18 @@ export const PERMISSION_MODULES = [
       ["request", "Request a refund"],
       ["approve", "Approve and process refunds"],
       ["reject", "Reject refund requests"],
+    ],
+  },
+  {
+    module: "payment_providers",
+    label: "Payment gateways",
+    actions: [
+      ["read", "View gateway setup", "See which gateways a branch has configured, never their credentials"],
+      [
+        "manage",
+        "Configure gateway credentials",
+        "Enter a branch's own merchant keys and switch a gateway on or off. Whoever holds this can redirect that branch's takings, so grant it sparingly",
+      ],
     ],
   },
   {
@@ -691,6 +705,22 @@ export const PERMISSION_MODULES = [
   },
 
   // --- Platform ------------------------------------------------------------
+  {
+    module: "hero_slides",
+    label: "Home page banners",
+    actions: [
+      ["read", "View home page banners"],
+      ["manage", "Create, change and remove home page banners"],
+    ],
+  },
+  {
+    module: "content_pages",
+    label: "Public pages",
+    actions: [
+      ["read", "View public page content"],
+      ["update", "Edit public page content"],
+    ],
+  },
   {
     module: "settings",
     label: "Settings",

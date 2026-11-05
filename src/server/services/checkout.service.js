@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/api";
+import { phoneKey } from "@/lib/phone-key";
 import { withRetryingTransaction } from "@/server/utils/db";
 import { getSettings } from "@/server/services/setting.service";
 import { getBranch } from "@/server/services/branch.service";
@@ -118,7 +119,7 @@ async function resolveAddress({ addressId, userId }) {
  * been quoted a promotion that has since ended, and the customer is charged
  * what the rules say now.
  */
-async function priceForCheckout({
+export async function priceForCheckout({
   branchId,
   branch = null,
   type,
@@ -310,8 +311,20 @@ export async function placeOrder({
     if (!table) throw ApiError.validation("That table does not belong to this branch", { tableId: ["No such table"] });
   }
 
-  if (!userId && !guest?.name) {
-    throw ApiError.validation("A name is required for a guest order", { guest: ["Provide a name and phone"] });
+  /*
+   * A guest order has to be identifiable when it is ready, and a name is how
+   * that is normally done — "Order for Sana".
+   *
+   * **Except at a table.** A dine-in order carries the table it belongs to, and
+   * the table is a better answer than a name: the food goes to table six
+   * whoever is sitting there. Requiring a name anyway meant a cashier taking a
+   * walk-in at the counter was refused with `A name is required for a guest
+   * order` while the screen in front of them said the field was optional.
+   */
+  if (!userId && !guest?.name && !(type === "DINE_IN" && tableId)) {
+    throw ApiError.validation("A name is required for a guest order", {
+      guest: ["A name, or a table for a dine-in order"],
+    });
   }
 
   const prepMinutes = Math.max(
@@ -331,6 +344,7 @@ export async function placeOrder({
         userId,
         guestName: guest?.name ?? null,
         guestPhone: guest?.phone ?? null,
+        guestPhoneKey: phoneKey(guest?.phone) || null,
         guestEmail: guest?.email ?? null,
         channel,
         type,
@@ -404,7 +418,7 @@ export async function placeOrder({
       // A combo's choices become child lines at zero price: the kitchen needs
       // to know what to make, and the parent already carries the money.
       for (const choice of line.comboSelections ?? []) {
-        await tx.orderItem.create({
+        const child = await tx.orderItem.create({
           data: {
             orderId: createdOrder.id,
             productId: choice.productId,
@@ -419,6 +433,29 @@ export async function placeOrder({
             status: "QUEUED",
           },
         });
+
+        /*
+         * How that choice is made, on the child line that is actually made.
+         *
+         * At zero price here, like the line itself: the customer was charged
+         * for it on the parent, and repeating the money on a child would
+         * double it in every total built from the item rows. What this is for
+         * is the ticket — "Zinger Burger · no onions" has to reach the person
+         * cooking it, and the parent line cannot say which half of the meal
+         * the instruction belongs to.
+         */
+        if (choice.modifiers?.length) {
+          await tx.orderItemModifier.createMany({
+            data: choice.modifiers.map((modifier) => ({
+              orderItemId: child.id,
+              optionId: modifier.optionId,
+              groupNameSnapshot: modifier.groupName,
+              nameSnapshot: modifier.name,
+              quantity: modifier.quantity,
+              priceDelta: 0,
+            })),
+          });
+        }
       }
     }
 

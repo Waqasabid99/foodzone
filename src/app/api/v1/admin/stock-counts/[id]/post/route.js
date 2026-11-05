@@ -1,6 +1,7 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { postCount } from "@/server/services/stock-count.service";
+import { assertRecordAccess } from "@/server/inventory/access";
 
 /**
  * Posts the count, writing a correction for every non-zero variance.
@@ -16,5 +17,8 @@ export const POST = apiHandler(
     params: idParamSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, auth }) => ok(await postCount(params.id, auth)),
+  async ({ params, auth }) => {
+    await assertRecordAccess(auth, "count", params.id, "stock_counts.approve");
+    return ok(await postCount(params.id, auth));
+  },
 );

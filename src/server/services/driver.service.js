@@ -5,6 +5,7 @@ import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
 import { ACTIVE_STATUSES } from "@/server/delivery/state";
 import { money } from "@/server/pricing/engine";
+import { branchFilter } from "@/server/access/scope";
 
 /**
  * Drivers.
@@ -48,9 +49,12 @@ const SELECT = {
   user: { select: { id: true, name: true, email: true, phone: true, status: true } },
 };
 
-export async function listDrivers({ branchId, status, isActive, available, limit = 20, cursor } = {}) {
+export async function listDrivers({ branchId, status, isActive, available, scope = null, limit = 20, cursor } = {}) {
+  const filter = branchFilter(scope);
+
   const rows = await prisma.driver.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(status ? { status } : {}),
       ...(isActive !== undefined ? { isActive } : {}),
@@ -240,14 +244,23 @@ export async function pruneTrackPoints(retentionDays = TRACK_POINT_RETENTION_DAY
   return result.count;
 }
 
-/** Where a branch's drivers are right now — the dispatch map. */
+/**
+ * Who is on shift at a branch right now, and where they are if their phone has
+ * said.
+ *
+ * This feeds the dispatch board, which is the only place a job is handed out,
+ * so it is a roster first and a map second. Filtering on a location fix made it
+ * the other way round: a rider who had clocked on but whose phone had not
+ * pinged yet — GPS refused, inside a building, app asleep — simply was not on
+ * the board, and there was no way to offer them anything. A missing position is
+ * `lastLocationAt: null` on the row, for the board to show as it sees fit.
+ */
 export async function driverPositions({ branchId }) {
   const drivers = await prisma.driver.findMany({
     where: {
       branchId,
       isActive: true,
       status: { in: ["AVAILABLE", "ON_DELIVERY"] },
-      lastLocationAt: { not: null },
     },
     select: {
       id: true,
@@ -257,6 +270,13 @@ export async function driverPositions({ branchId }) {
       lastLongitude: true,
       lastHeading: true,
       lastLocationAt: true,
+      // The board decides whether a rider can take the job from these three,
+      // and prints the cash they are holding. Filtering on a field is not the
+      // same as sending it: without them every rider arrived looking inactive
+      // and capped at one job.
+      isActive: true,
+      maxActiveOrders: true,
+      cashInHand: true,
       user: { select: { name: true } },
       _count: { select: { deliveries: { where: { status: { in: ACTIVE_STATUSES } } } } },
     },

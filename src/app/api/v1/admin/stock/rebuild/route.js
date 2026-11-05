@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { apiHandler, assertCompanyWide, ok, RateLimits } from "@/lib/api";
 import { cuidSchema } from "@/server/validation/schemas";
 import { rebuildLevels } from "@/server/services/stock.service";
+import { assertRecordAccess } from "@/server/inventory/access";
 
 const bodySchema = z
   .object({ itemId: cuidSchema.optional(), locationId: cuidSchema.optional() })
@@ -24,5 +25,10 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "stock.rebuild_levels", entityType: "StockLevel" },
   },
-  async ({ body }) => ok(await rebuildLevels(body ?? {})),
+  async ({ body, auth }) => {
+    // One location is that branch's business; the whole ledger is the company's.
+    if (body?.locationId) await assertRecordAccess(auth, "location", body.locationId, "stock_adjustments.approve");
+    else assertCompanyWide(auth, "stock_adjustments.approve");
+    return ok(await rebuildLevels(body ?? {}));
+  },
 );

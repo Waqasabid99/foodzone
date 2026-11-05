@@ -4,7 +4,6 @@ import { logger } from "@/lib/logger";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
-import { randomNumericCode, hashToken, verifyToken } from "@/server/utils/crypto";
 import { getSettings } from "@/server/services/setting.service";
 import { changeOrderStatus } from "@/server/services/order.service";
 import { money } from "@/server/pricing/engine";
@@ -17,6 +16,7 @@ import {
   canTransitionDelivery,
   driverMayTransition,
 } from "@/server/delivery/state";
+import { branchFilter } from "@/server/access/scope";
 
 /**
  * Deliveries and dispatch.
@@ -52,7 +52,6 @@ const SELECT = {
   tipAmount: true,
   codAmount: true,
   codCollectedAt: true,
-  proofImageUrl: true,
   recipientName: true,
   assignedById: true,
   assignedAt: true,
@@ -290,8 +289,6 @@ export async function setDeliveryStatus({
   status,
   actor = null,
   byDriver = false,
-  handoverCode = null,
-  proofImageUrl = null,
   recipientName = null,
   reason = null,
   collectedCod = null,
@@ -312,12 +309,10 @@ export async function setDeliveryStatus({
     });
   }
 
-  const settings = await getSettings({ branchId: delivery.order.branchId });
+  // Nothing is gated on branch settings here any more: a drop is done when the
+  // rider says it is. A failure still needs a reason, because a job that ended
+  // with the food undelivered is the one case somebody has to answer for.
   const now = new Date();
-
-  if (status === "DELIVERED") {
-    await assertHandoverIsValid({ delivery, settings, handoverCode, proofImageUrl });
-  }
 
   if (status === "FAILED" && !reason?.trim()) {
     throw ApiError.validation("A failed delivery needs a reason", { reason: ["Required"] });
@@ -337,11 +332,7 @@ export async function setDeliveryStatus({
       data: {
         status,
         ...stamps,
-        ...(proofImageUrl ? { proofImageUrl } : {}),
         ...(recipientName ? { recipientName } : {}),
-        // The handover code is single-use; clearing it stops a photographed
-        // code being replayed against a later delivery.
-        ...(status === "DELIVERED" ? { otpHash: null } : {}),
       },
       select: WITH_ORDER,
     });
@@ -390,45 +381,16 @@ export async function setDeliveryStatus({
 }
 
 /**
- * The handover check.
- *
- * Whether a code or a photo is required is a branch setting, because it is a
- * genuine operational trade-off: a code stops "delivered" being tapped from the
- * end of the street, and it also strands a driver whose customer is not
- * answering their phone.
- */
-async function assertHandoverIsValid({ delivery, settings, handoverCode, proofImageUrl }) {
-  const codeRequired = settings["delivery.require_handover_code"] ?? false;
-  const photoRequired = settings["delivery.require_proof_photo"] ?? false;
-
-  if (codeRequired) {
-    const stored = await prisma.delivery.findUnique({ where: { id: delivery.id }, select: { otpHash: true } });
-
-    if (stored?.otpHash) {
-      if (!handoverCode) {
-        throw ApiError.validation("Ask the customer for their handover code", {
-          handoverCode: ["Required at this branch"],
-        });
-      }
-      if (!verifyToken(String(handoverCode), stored.otpHash)) {
-        throw ApiError.validation("That handover code is not right", { handoverCode: ["Incorrect"] });
-      }
-    }
-  }
-
-  if (photoRequired && !proofImageUrl && !delivery.proofImageUrl) {
-    throw ApiError.validation("A proof-of-delivery photo is required", {
-      proofImageUrl: ["Required at this branch"],
-    });
-  }
-}
-
-/**
  * Records the cash a driver took at the door.
  *
  * The COD payment is captured and the amount is added to the driver's balance
  * in one transaction. Both halves matter: the order is settled, *and* somebody
  * is on the hook for the notes in their pocket.
+ *
+ * The capture is announced with the same `payment.captured` event the till
+ * raises, because that event is the only thing that posts a receipt. Writing
+ * the row without it leaves the sale in accounts receivable for money already
+ * collected, and nothing complains: the order reads as paid either way.
  */
 async function settleCod({ tx, delivery, collectedCod, actor, now }) {
   const expected = D(delivery.codAmount);
@@ -502,34 +464,28 @@ async function settleCod({ tx, delivery, collectedCod, actor, now }) {
       }),
     },
   });
-}
 
-/**
- * Issues the customer's handover code.
- *
- * Only the hash is stored, exactly like a password: a code sitting in plain
- * text in the database is a code any staff member can read off a screen and
- * give to a driver who never went to the door.
- */
-export async function issueHandoverCode({ deliveryId }) {
-  const delivery = await loadDelivery(deliveryId, SELECT);
-
-  if (["DELIVERED", "CANCELLED"].includes(delivery.status)) {
-    throw ApiError.conflict("This delivery is already finished");
-  }
-
-  const code = randomNumericCode(4);
-  await prisma.delivery.update({ where: { id: deliveryId }, data: { otpHash: hashToken(code) } });
-
-  // Returned once, to be shown to the customer and never stored again.
-  return { deliveryId, code };
+  // In the transaction, so the capture and the thing that posts it either both
+  // happen or neither does.
+  await enqueue({
+    eventType: "payment.captured",
+    payload: { paymentId: payment.id, orderId: delivery.orderId },
+    db: tx,
+  });
 }
 
 // --- reads ------------------------------------------------------------------
 
-export async function listDeliveries({ branchId, driverId, status, unassigned, limit = 20, cursor } = {}) {
+export async function listDeliveries({ branchId, driverId, status, unassigned, scope = null, limit = 20, cursor } = {}) {
+  // A delivery carries the customer's home address. Without the scope an
+  // unfiltered request hands every one of them to anyone holding
+  // `deliveries.read` anywhere. The branch comes from the order, not the
+  // delivery — see src/server/delivery/access.js.
+  const filter = branchFilter(scope);
+
   const rows = await prisma.delivery.findMany({
     where: {
+      ...(filter ? { AND: [{ order: { branchId: filter } }] } : {}),
       ...(branchId ? { order: { branchId } } : {}),
       ...(driverId ? { driverId } : {}),
       ...(status ? { status } : {}),

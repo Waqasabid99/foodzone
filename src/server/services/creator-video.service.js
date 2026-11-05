@@ -6,6 +6,8 @@ import { recordAudit } from "@/server/utils/audit";
 import { enqueue } from "@/server/jobs/outbox";
 import { attemptsRemaining, canReupload } from "@/server/creator/strikes";
 import { programConfig, requireActiveCreator } from "@/server/services/creator.service";
+import { assertPublishReach, assertVideoAccess, videoScopeWhere } from "@/server/creator/access";
+import { FULFILLED_STATUSES } from "@/lib/order-status";
 
 /**
  * Creator videos and the moderation queue.
@@ -31,6 +33,7 @@ const VIDEO_SELECT = {
   id: true,
   creatorId: true,
   orderId: true,
+  branchId: true,
   orderItemId: true,
   productId: true,
   variantId: true,
@@ -81,7 +84,18 @@ const REVIEW_SELECT = {
 };
 
 /** Statuses from which a creator may submit for review. */
-const SUBMITTABLE = ["DRAFT", "REJECTED"];
+/**
+ * States a video may be sent to the queue from.
+ *
+ * `ARCHIVED` belongs here. Withdrawing is the creator taking their own video
+ * back, not spending anything: attempts are only ever spent by a rejection,
+ * and an order line can be filmed exactly once, so a withdrawal that could not
+ * be undone silently destroyed the only chance that line ever had. `attachAsset`
+ * already accepts an archived video and resets it to DRAFT, so this is the one
+ * remaining step of that path — a withdrawn clip that still has its file can go
+ * straight back without being re-uploaded for no reason.
+ */
+const SUBMITTABLE = ["DRAFT", "REJECTED", "ARCHIVED"];
 
 /**
  * Starts a video against a purchased line.
@@ -102,7 +116,7 @@ export async function createVideo({ userId, orderItemId, caption = null }) {
       variantId: true,
       nameSnapshot: true,
       status: true,
-      order: { select: { id: true, userId: true, status: true, completedAt: true, placedAt: true, orderNumber: true } },
+      order: { select: { id: true, userId: true, status: true, completedAt: true, placedAt: true, orderNumber: true, branchId: true } },
     },
   });
   if (!orderItem) throw ApiError.validation("Order line not found", { orderItemId: ["No such line"] });
@@ -111,8 +125,8 @@ export async function createVideo({ userId, orderItemId, caption = null }) {
   if (orderItem.order.userId !== userId) {
     throw ApiError.forbidden("That order line is not yours");
   }
-  if (orderItem.order.status !== "COMPLETED") {
-    throw ApiError.conflict("You can film an order once it is complete", { status: orderItem.order.status });
+  if (!FULFILLED_STATUSES.includes(orderItem.order.status)) {
+    throw ApiError.conflict("You can film an order once it has arrived", { status: orderItem.order.status });
   }
   if (orderItem.status === "CANCELLED") {
     throw ApiError.conflict("That line was cancelled");
@@ -148,6 +162,10 @@ export async function createVideo({ userId, orderItemId, caption = null }) {
       creatorId: creator.id,
       orderId: orderItem.order.id,
       orderItemId,
+      // The outlet the meal was actually bought from, carried over once at
+      // creation. Never read off the product, which may be on the whole
+      // chain's catalogue and would scatter one person's video across cities.
+      branchId: orderItem.order.branchId,
       productId: orderItem.productId,
       variantId: orderItem.variantId,
       caption,
@@ -333,6 +351,15 @@ export async function reviewVideo(videoId, { decision, reason = null, note = nul
   // user-generated video on a commercial product page, sending it back does
   // not. Checked here rather than at the route, which only gates the queue.
   assertPermission(actor, decision === "APPROVED" ? "creator_videos.publish" : "creator_videos.reject");
+  // Before either decision: is this a video they may touch at all? A video of
+  // another outlet's product is a 404, the same answer reading it gives.
+  await assertVideoAccess(actor, videoId, decision === "APPROVED" ? "creator_videos.publish" : "creator_videos.reject");
+  // Publishing reaches as far as the product does: one outlet for a
+  // branch-owned product, every outlet for one on the chain's catalogue.
+  // Rejecting stays unscoped on purpose — it only makes the storefront
+  // smaller, and a manager should not have to wait for head office to pull
+  // something wrong off a page they sell from.
+  if (decision === "APPROVED") await assertPublishReach(actor, videoId, "creator_videos.publish");
 
   const config = await programConfig();
   const video = await loadVideo(videoId);
@@ -429,6 +456,7 @@ export async function reviewVideo(videoId, { decision, reason = null, note = nul
  * is the explicit choice for fraud, where the sale itself is in question.
  */
 export async function takeDownVideo(videoId, { reason, revokeAttributions = false, actor }) {
+  await assertVideoAccess(actor, videoId, "creator_videos.takedown");
   const video = await loadVideo(videoId);
 
   if (!["APPROVED", "PENDING_REVIEW"].includes(video.status)) {
@@ -488,6 +516,10 @@ export async function takeDownVideo(videoId, { reason, revokeAttributions = fals
 
 /** Puts a taken-down video back. */
 export async function reinstateVideo(videoId, { note = null, actor }) {
+  await assertVideoAccess(actor, videoId, "creator_videos.publish");
+  // Putting it back is publishing it again, so it takes the same grant as
+  // approving it did in the first place.
+  await assertPublishReach(actor, videoId, "creator_videos.publish");
   const video = await loadVideo(videoId);
   if (video.status !== "TAKEN_DOWN") {
     throw ApiError.conflict("That video has not been taken down", { status: video.status });
@@ -571,9 +603,10 @@ export async function getVideo(id, { userId = null } = {}) {
   };
 }
 
-export async function listVideos({ creatorId, productId, status, isLocked, limit = 20, cursor } = {}) {
+export async function listVideos({ creatorId, productId, status, isLocked, scope = null, limit = 20, cursor } = {}) {
   const rows = await prisma.creatorVideo.findMany({
     where: {
+      ...videoScopeWhere(scope),
       ...(creatorId ? { creatorId } : {}),
       ...(productId ? { productId } : {}),
       ...(status ? { status } : {}),
@@ -588,9 +621,9 @@ export async function listVideos({ creatorId, productId, status, isLocked, limit
 }
 
 /** The moderation queue: oldest submission first, so nobody waits for ever. */
-export async function reviewQueue({ limit = 20, cursor } = {}) {
+export async function reviewQueue({ scope = null, limit = 20, cursor } = {}) {
   const rows = await prisma.creatorVideo.findMany({
-    where: { status: "PENDING_REVIEW" },
+    where: { ...videoScopeWhere(scope), status: "PENDING_REVIEW" },
     select: {
       ...VIDEO_SELECT,
       order: { select: { id: true, orderNumber: true, completedAt: true } },
@@ -634,7 +667,10 @@ export async function filmableOrderItems({ userId }) {
 
   const items = await prisma.orderItem.findMany({
     where: {
-      order: { userId, status: "COMPLETED", placedAt: { gte: cutoff } },
+      // Both fulfilled statuses: a delivery order rests at DELIVERED until a
+      // back-office close-out that may never come, and the creator's window to
+      // film is counted from the food arriving, not from the paperwork.
+      order: { userId, status: { in: FULFILLED_STATUSES }, placedAt: { gte: cutoff } },
       status: { not: "CANCELLED" },
     },
     select: {
@@ -660,49 +696,3 @@ export async function filmableOrderItems({ userId }) {
   return items.filter((item) => !used.has(item.id)).slice(0, 50);
 }
 
-// --- viewer reports ---------------------------------------------------------
-
-export async function reportVideo({ videoId, reason, note = null, userId = null, sessionId = null }) {
-  const video = await prisma.creatorVideo.findUnique({ where: { id: videoId }, select: { id: true, status: true } });
-  if (!video || video.status !== "APPROVED") throw ApiError.notFound("Video not found");
-
-  const report = await prisma.creatorVideoReport.create({
-    data: { videoId, reason, note, reportedById: userId, sessionId },
-    select: { id: true, videoId: true, reason: true, status: true, createdAt: true },
-  });
-
-  return report;
-}
-
-export async function listReports({ status = "OPEN", videoId, limit = 20, cursor } = {}) {
-  const rows = await prisma.creatorVideoReport.findMany({
-    where: { ...(status ? { status } : {}), ...(videoId ? { videoId } : {}) },
-    select: {
-      id: true,
-      videoId: true,
-      reason: true,
-      note: true,
-      status: true,
-      reportedById: true,
-      reviewedById: true,
-      reviewedAt: true,
-      createdAt: true,
-      video: { select: { id: true, status: true, creator: { select: { id: true, handle: true } } } },
-    },
-    orderBy: { createdAt: "asc" },
-    ...cursorArgs(cursor, limit),
-  });
-
-  return toPage(rows, limit);
-}
-
-export async function resolveReport(id, { status, actor }) {
-  const report = await prisma.creatorVideoReport.findUnique({ where: { id }, select: { id: true, videoId: true } });
-  if (!report) throw ApiError.notFound("Report not found");
-
-  return prisma.creatorVideoReport.update({
-    where: { id },
-    data: { status, reviewedById: actor?.userId ?? null, reviewedAt: new Date() },
-    select: { id: true, status: true, reviewedAt: true },
-  });
-}

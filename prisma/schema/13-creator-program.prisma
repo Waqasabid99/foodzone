@@ -70,6 +70,11 @@ enum CreatorVideoRejectionReason {
 enum CreatorVideoSurface {
   PRODUCT_PAGE
   VIDEO_FEED
+  /// A creator's own page. Its own value rather than folded into VIDEO_FEED:
+  /// surface is reporting data, and "people who came for this creator" and
+  /// "people browsing" are the two numbers a programme manager most wants
+  /// told apart.
+  CREATOR_PROFILE
   SHARE_LINK
   SEARCH
   HOME
@@ -148,14 +153,6 @@ enum CreatorStrikeReason {
   OTHER
 }
 
-enum CreatorReportReason {
-  INAPPROPRIATE
-  MISLEADING
-  SPAM
-  NOT_THE_PRODUCT
-  COPYRIGHT
-  OTHER
-}
 
 // ---------------------------------------------------------------------------
 // Program configuration and terms
@@ -292,6 +289,18 @@ model CreatorVideo {
   product     Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
   productId   String
   variantId   String?
+  /// The outlet this video belongs to, copied from the order it was filmed
+  /// against and never derived from the product.
+  ///
+  /// Required, and deliberately not nullable the way `Product.branchId` is.
+  /// On a product a null means "the whole chain sells this"; there is no
+  /// equivalent for a video, because a video is always one person filming one
+  /// meal they bought at one outlet. Reading the branch off the product instead
+  /// meant a video of a chain-wide item surfaced at every outlet — including
+  /// ones in other cities that the creator has never set foot in, and ones that
+  /// do not put that item on their menu at all.
+  branch      Branch         @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId    String
 
   status          CreatorVideoStatus @default(DRAFT)
   caption         String?
@@ -340,7 +349,6 @@ model CreatorVideo {
   likes             CreatorVideoLike[]
   shares            CreatorVideoShare[]
   shareLinks        CreatorShareLink[]
-  reports           CreatorVideoReport[]
   attributions      CreatorAttribution[]
   orderAttributions CreatorOrderAttribution[]
   earnings          CreatorEarning[]
@@ -351,6 +359,8 @@ model CreatorVideo {
   @@index([productId, status])
   @@index([creatorId, status])
   @@index([status, publishedAt])
+  /// The public feed: one outlet's approved videos, newest first.
+  @@index([branchId, status, publishedAt])
 }
 
 /// Every uploaded file, including superseded attempts — kept so a moderator can
@@ -393,22 +403,6 @@ model CreatorVideoReview {
   @@index([reviewedAt])
 }
 
-/// Viewer-submitted report on a live video.
-model CreatorVideoReport {
-  id           String              @id @default(cuid())
-  video        CreatorVideo        @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  videoId      String
-  reportedById String?
-  sessionId    String?
-  reason       CreatorReportReason
-  note         String?
-  status       String              @default("OPEN") // OPEN | REVIEWED | DISMISSED | ACTIONED
-  reviewedById String?
-  reviewedAt   DateTime?
-  createdAt    DateTime            @default(now())
-
-  @@index([videoId, status])
-}
 
 /// Moderation strike against a creator. Points accumulate; the thresholds in
 /// CreatorProgramConfig drive automatic suspension and ban.

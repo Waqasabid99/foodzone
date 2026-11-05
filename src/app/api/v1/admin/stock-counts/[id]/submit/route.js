@@ -2,6 +2,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { submitCountSchema } from "@/server/validation/inventory.schemas";
 import { submitCount } from "@/server/services/stock-count.service";
+import { assertRecordAccess } from "@/server/inventory/access";
 
 export const POST = apiHandler(
   {
@@ -11,5 +12,8 @@ export const POST = apiHandler(
     body: submitCountSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => ok(await submitCount(params.id, { ...body, actor: auth })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "count", params.id, "stock_counts.submit");
+    return ok(await submitCount(params.id, { ...body, actor: auth }));
+  },
 );

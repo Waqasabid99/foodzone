@@ -43,6 +43,15 @@ export default function MenuItemCard({
 
   const large = size === "lg";
   const multipleSizes = item.variants.length > 1;
+  /*
+   * A combo is built, not added.
+   *
+   * Its slots are chosen on the product page and the server refuses a line
+   * without them, so a one-tap Add here could only ever fail — and even a combo
+   * with nothing to choose is a bundle worth seeing the contents of before it
+   * goes in the bag.
+   */
+  const buildable = Boolean(item.isCombo);
   const variant = item.variants[0] ?? null;
   const soldOut = !item.available;
 
@@ -143,6 +152,13 @@ export default function MenuItemCard({
               className="rounded-full bg-surface-container-high px-4 py-2 text-label-bold text-on-surface transition-colors hover:bg-surface-container-highest focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             >
               View
+            </Link>
+          ) : buildable ? (
+            <Link
+              href={`/menu/${item.slug}`}
+              className="rounded-full bg-surface-container-high px-4 py-2 text-label-bold text-on-surface transition-colors hover:bg-surface-container-highest focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            >
+              Build it
             </Link>
           ) : multipleSizes ? (
             <Link

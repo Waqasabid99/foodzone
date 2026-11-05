@@ -161,6 +161,12 @@ model EmployeeSalaryComponent {
   amount        Decimal?  @db.Decimal(18, 4)
   percentOfBase Decimal?  @db.Decimal(6, 3)
   isTaxable     Boolean   @default(true)
+  /// Where a deduction lands in the ledger: a provident fund, a tax authority,
+  /// an advance being recovered. Null falls to 2320 Employee deductions
+  /// payable. Only meaningful on a deduction — earnings are expensed together
+  /// as gross pay.
+  account       Account?  @relation(fields: [accountId], references: [id])
+  accountId     String?
   effectiveFrom DateTime  @default(now())
   effectiveTo   DateTime?
 
@@ -419,7 +425,10 @@ model PayslipLine {
   quantity  Decimal? @db.Decimal(12, 3) // hours, days
   rate      Decimal? @db.Decimal(18, 4)
   amount    Decimal  @db.Decimal(18, 4)
-  /// Ledger account this component posts to.
+  /// Ledger account this component posts to, copied from the component when the
+  /// payslip is generated. Frozen: changing the component later must not
+  /// restate a payslip already issued.
+  account   Account? @relation(fields: [accountId], references: [id])
   accountId String?
 
   @@index([payslipId])

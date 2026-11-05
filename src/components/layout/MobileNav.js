@@ -10,6 +10,7 @@ import { loginHref, registerHref } from "@/lib/redirects";
 import { useSession, logoutSession } from "@/hooks/useSession";
 import { workspaceLinks } from "@/lib/dashboard-nav";
 import LocationPicker from "@/components/locations/LocationPicker";
+import SiteSearch from "@/components/layout/SiteSearch";
 
 /**
  * The small-screen navigation.
@@ -22,7 +23,7 @@ import LocationPicker from "@/components/locations/LocationPicker";
  * phone showing a logo, a theme toggle, two auth buttons, a cart and a
  * hamburger across about 380 pixels.
  */
-export default function MobileNav({ links, branches = [] }) {
+export default function MobileNav({ links, branches = [], currency = "PKR" }) {
   const [open, setOpen] = useState(false);
   const { status, user } = useSession();
   const pathname = usePathname();
@@ -56,6 +57,13 @@ export default function MobileNav({ links, branches = [] }) {
           id="mobile-nav"
           className="absolute inset-x-0 top-full border-t border-outline-variant bg-surface px-margin-mobile py-4 shadow-e3"
         >
+          {/* First, above the links: on a phone the menu is long and scrolling
+              it is the slow way to a dish somebody can already name. Closing
+              the drawer on navigate is the search's job, hence `onNavigate`. */}
+          <div className="mb-3">
+            <SiteSearch currency={currency} onNavigate={close} />
+          </div>
+
           <ul className="flex flex-col gap-1">
             {links.map((link) => (
               <li key={link.href}>

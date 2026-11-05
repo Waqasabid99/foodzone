@@ -1,10 +1,11 @@
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { createPurchaseOrderSchema, listPurchaseOrdersSchema } from "@/server/validation/inventory.schemas";
 import { createPurchaseOrder, listPurchaseOrders } from "@/server/services/purchase-order.service";
+import { branchScope } from "@/lib/api/permissions";
 
 export const GET = apiHandler(
   { auth: true, permissions: "purchase_orders.read", query: listPurchaseOrdersSchema, branch: "query" },
-  async ({ query }) => ok(await listPurchaseOrders(query)),
+  async ({ query, auth }) => ok(await listPurchaseOrders({ ...query, scope: branchScope(auth, "purchase_orders.read") })),
 );
 
 /**

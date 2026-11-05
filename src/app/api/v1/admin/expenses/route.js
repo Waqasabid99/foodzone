@@ -1,10 +1,11 @@
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { branchScope } from "@/lib/api/permissions";
 import { createExpenseSchema, listExpensesSchema } from "@/server/validation/finance.schemas";
 import { createExpense, listExpenses } from "@/server/services/expense.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "expenses.read", query: listExpensesSchema, branch: "query" },
-  async ({ query }) => ok(await listExpenses(query)),
+  async ({ query, auth }) => ok(await listExpenses({ ...query, scope: branchScope(auth, "expenses.read") })),
 );
 
 /** Recorded by whoever spent it; only approval puts it in the books. */

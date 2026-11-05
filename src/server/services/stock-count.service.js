@@ -2,11 +2,13 @@ import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
-import { withTransaction } from "@/server/utils/db";
+import { withBulkTransaction, withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { nextDocumentNumber, monthPeriodKey } from "@/server/utils/sequence";
 import { postMovement } from "@/server/inventory/ledger";
 import { quantity as q, totalCost as tc } from "@/server/inventory/uom";
+import { enqueue } from "@/server/jobs/outbox";
+import { branchFilter } from "@/server/inventory/access";
 
 /**
  * Physical stock counts.
@@ -36,7 +38,7 @@ const ITEM_SELECT = {
   unitCost: true,
   varianceValue: true,
   reason: true,
-  item: { select: { id: true, sku: true, name: true, uom: { select: { code: true } } } },
+  item: { select: { id: true, sku: true, name: true, uom: { select: { code: true, precision: true } } } },
 };
 
 const SELECT = {
@@ -52,8 +54,8 @@ const SELECT = {
   countedById: true,
   approvedById: true,
   notes: true,
-  location: { select: { id: true, name: true, branchId: true } },
-  items: { select: ITEM_SELECT },
+  location: { select: { id: true, name: true, branchId: true, branch: { select: { name: true } } } },
+  items: { select: ITEM_SELECT, orderBy: { item: { name: "asc" } } },
 };
 
 /**
@@ -66,9 +68,12 @@ const SELECT = {
 export async function startCount({ locationId, itemIds = null, categoryId = null, scope = null, actor }) {
   const location = await prisma.stockLocation.findUnique({
     where: { id: locationId },
-    select: { id: true, branchId: true, branch: { select: { id: true, code: true, timezone: true } } },
+    select: { id: true, branchId: true, isActive: true, branch: { select: { id: true, code: true, timezone: true } } },
   });
   if (!location) throw ApiError.validation("Stock location not found", { locationId: ["No such location"] });
+  if (!location.isActive) {
+    throw ApiError.validation("That location is switched off", { locationId: ["Choose an active location"] });
+  }
 
   const open = await prisma.stockCount.findFirst({
     where: { locationId, status: { in: ["DRAFT", "PENDING_APPROVAL"] } },
@@ -157,6 +162,15 @@ export async function submitCount(id, { lines, notes = null, actor }) {
   let totalVariance = D(0);
 
   await withTransaction(async (tx) => {
+    // Claimed first: a sheet submitted twice at once would otherwise be
+    // written twice, and the second write would win whatever it said.
+    const claimed = await tx.stockCount.updateMany({
+      where: { id, status: "DRAFT" },
+      data: { status: "PENDING_APPROVAL", completedAt: new Date(), notes, countedById: actor?.userId ?? null },
+    });
+    if (claimed.count === 0) throw ApiError.conflict("This count has just been submitted by someone else");
+
+    const seen = new Set();
     for (const line of lines) {
       const existing = byItem.get(line.itemId);
       if (!existing) {
@@ -164,6 +178,10 @@ export async function submitCount(id, { lines, notes = null, actor }) {
           itemId: [`${line.itemId} is out of scope for this count`],
         });
       }
+      if (seen.has(line.itemId)) {
+        throw ApiError.validation(`${existing.item.name} is counted twice`, { lines: ["Enter each item once"] });
+      }
+      seen.add(line.itemId);
 
       const counted = D(line.countedQuantity);
       if (counted.lessThan(0)) {
@@ -190,23 +208,14 @@ export async function submitCount(id, { lines, notes = null, actor }) {
     // Lines nobody counted keep their initial full-shortfall variance, which
     // would post the item to zero. That is almost never intended, so an
     // uncounted sheet cannot be submitted.
-    const uncounted = count.items.filter((line) => !lines.some((entry) => entry.itemId === line.itemId));
+    const uncounted = count.items.filter((line) => !seen.has(line.itemId));
     if (uncounted.length) {
       throw ApiError.validation(`${uncounted.length} item(s) on this sheet have not been counted`, {
         lines: uncounted.slice(0, 10).map((line) => line.item.name),
       });
     }
 
-    await tx.stockCount.update({
-      where: { id },
-      data: {
-        status: "PENDING_APPROVAL",
-        completedAt: new Date(),
-        varianceValue: tc(totalVariance),
-        notes,
-        countedById: actor?.userId ?? null,
-      },
-    });
+    await tx.stockCount.update({ where: { id }, data: { varianceValue: tc(totalVariance) } });
   });
 
   return loadCount(id);
@@ -231,7 +240,17 @@ export async function postCount(id, actor) {
     throw ApiError.conflict("Submit the counted quantities before posting", { status: count.status });
   }
 
-  const posted = await withTransaction(async (tx) => {
+  // Sized to the number of lines: a full count of a store room is the single
+  // biggest document this system posts.
+  const posted = await withBulkTransaction(async (tx) => {
+    // Claimed before any correction is written, so two approvals cannot post
+    // the same variances twice.
+    const claimed = await tx.stockCount.updateMany({
+      where: { id, status: "PENDING_APPROVAL" },
+      data: { status: "COMPLETED", approvedById: actor.userId },
+    });
+    if (claimed.count === 0) throw ApiError.conflict("This count has just been decided by someone else");
+
     for (const line of count.items) {
       const variance = D(line.varianceQuantity);
       if (variance.isZero()) continue;
@@ -250,12 +269,11 @@ export async function postCount(id, actor) {
       });
     }
 
-    return tx.stockCount.update({
-      where: { id },
-      data: { status: "COMPLETED", approvedById: actor.userId },
-      select: SELECT,
-    });
-  });
+    // Found and missing stock both change what the inventory is worth.
+    await enqueue({ eventType: "finance.stock_counted", payload: { countId: id }, db: tx });
+
+    return tx.stockCount.findUnique({ where: { id }, select: SELECT });
+  }, { lines: count.items.length });
 
   await recordAudit({
     actorId: actor.userId,
@@ -267,6 +285,7 @@ export async function postCount(id, actor) {
       countNumber: count.countNumber,
       varianceValue: Number(count.varianceValue),
       linesCorrected: count.items.filter((line) => !D(line.varianceQuantity).isZero()).length,
+      selfApproved: count.countedById === actor.userId,
     },
   });
 
@@ -278,18 +297,22 @@ export async function cancelCount(id, { reason = null }) {
   if (count.status === "COMPLETED") {
     throw ApiError.conflict("A posted count cannot be cancelled. Correct it with an adjustment.");
   }
+  if (count.status === "CANCELLED") return count;
 
-  return prisma.stockCount.update({
-    where: { id },
+  const claimed = await prisma.stockCount.updateMany({
+    where: { id, status: { in: ["DRAFT", "PENDING_APPROVAL"] } },
     data: { status: "CANCELLED", notes: reason ?? count.notes },
-    select: SELECT,
   });
+  if (claimed.count === 0) throw ApiError.conflict("This count has just been posted by someone else");
+
+  return loadCount(id);
 }
 
-export async function listCounts({ branchId, locationId, status, limit = 20, cursor } = {}) {
+export async function listCounts({ branchId, locationId, status, scope = null, limit = 20, cursor } = {}) {
   const rows = await prisma.stockCount.findMany({
     where: {
       ...(branchId ? { branchId } : {}),
+      ...(branchFilter(scope) ? { AND: [{ branchId: branchFilter(scope) }] } : {}),
       ...(locationId ? { locationId } : {}),
       ...(status ? { status } : {}),
     },
@@ -302,10 +325,12 @@ export async function listCounts({ branchId, locationId, status, limit = 20, cur
       startedAt: true,
       completedAt: true,
       varianceValue: true,
-      location: { select: { id: true, name: true } },
+      countedById: true,
+      approvedById: true,
+      location: { select: { id: true, name: true, branch: { select: { name: true } } } },
       _count: { select: { items: true } },
     },
-    orderBy: { startedAt: "desc" },
+    orderBy: [{ startedAt: "desc" }, { id: "desc" }],
     ...cursorArgs(cursor, limit),
   });
 
@@ -323,9 +348,21 @@ export async function getCount(id, { blind = false } = {}) {
   const count = await loadCount(id);
   if (!blind) return count;
 
+  // The variance goes too, not just the system figure: before anything is
+  // entered it is the system figure with a minus sign in front.
   return {
     ...count,
     items: count.items.map(({ systemQuantity, varianceQuantity, varianceValue, unitCost, ...line }) => line),
     varianceValue: undefined,
   };
+}
+
+/** How many counts are in each state, for the tabs. */
+export async function countCounts({ scope = null } = {}) {
+  const rows = await prisma.stockCount.groupBy({
+    by: ["status"],
+    where: branchFilter(scope) ? { branchId: branchFilter(scope) } : {},
+    _count: { _all: true },
+  });
+  return Object.fromEntries(rows.map((row) => [row.status, row._count._all]));
 }

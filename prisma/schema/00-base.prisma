@@ -55,10 +55,12 @@ model Branch {
   roleGrants        UserRoleAssignment[]
   permissionGrants  UserPermissionOverride[]
   menus             Menu[]
+  products          Product[]
   tables            RestaurantTable[]
   qrCodes           QrCode[]
   orders            Order[]
   payments          Payment[]
+  paymentProviders  BranchPaymentProvider[]
   registerSessions  CashRegisterSession[]
   drivers           Driver[]
   employees         Employee[]
@@ -77,6 +79,7 @@ model Branch {
   bills             SupplierBill[]
   settings          Setting[]
   auditLogs         AuditLog[]
+  creatorVideos     CreatorVideo[]
 
   @@index([isActive])
 }

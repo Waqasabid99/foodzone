@@ -2,7 +2,7 @@ import { unstable_cache } from "next/cache";
 import { CacheTag } from "@/lib/cache-tags";
 import { publicProduct, publicProducts } from "@/server/services/catalog.service";
 import { productReviews } from "@/server/services/review.service";
-import { getBranchMenu } from "@/server/services/menu.service";
+import { getOrderMenu } from "@/server/services/menu.service";
 import { getSettings } from "@/server/services/setting.service";
 import { logger } from "@/lib/logger";
 
@@ -47,8 +47,8 @@ const cachedRelated = (categorySlug, excludeId) =>
  * between two different shapes is a silent failure waiting to happen, so each
  * says which shape it holds.
  */
-const cachedBranchPricing = (branchId) =>
-  unstable_cache(() => getBranchMenu({ branchIdOrCode: branchId }), ["branch-menu-raw", branchId], {
+const cachedBranchPricing = (branchId, orderType) =>
+  unstable_cache(() => getOrderMenu({ branchIdOrCode: branchId, orderType }), ["branch-menu-raw", branchId, orderType], {
     revalidate: BRANCH_REVALIDATE,
     tags: [CacheTag.MENUS, CacheTag.CATALOG],
   })();
@@ -91,13 +91,13 @@ function applyBranchPricing(product, branchMenu) {
   };
 }
 
-export async function getProductPageData({ slug, branch = null }) {
+export async function getProductPageData({ slug, branch = null, orderType = "DELIVERY" }) {
   const product = await cachedProduct(slug);
 
   const [reviewsResult, relatedResult, branchResult, settingsResult] = await Promise.allSettled([
     productReviews({ productId: product.id, limit: 6 }),
     product.category?.slug ? cachedRelated(product.category.slug, product.id) : Promise.resolve([]),
-    branch ? cachedBranchPricing(branch.id) : Promise.resolve(null),
+    branch ? cachedBranchPricing(branch.id, orderType) : Promise.resolve(null),
     getSettings({ branchId: branch?.id ?? null, publicOnly: true }),
   ]);
 
@@ -153,10 +153,20 @@ export async function getProductPageData({ slug, branch = null }) {
           ...option,
           priceDelta: Number(option.priceDelta),
           variant: option.variant ? { ...option.variant, price: Number(option.variant.price) } : null,
+          // The chosen item's own options, with their surcharges as numbers —
+          // a Decimal does not survive the trip into a client component.
+          product: {
+            ...option.product,
+            modifierGroups: (option.product.modifierGroups ?? []).map((child) => ({
+              ...child,
+              options: child.options.map((row) => ({ ...row, priceDelta: Number(row.priceDelta) })),
+            })),
+          },
         })),
       })),
     },
     priceSource: pricing.priceSource,
+    orderType,
     onBranchMenu: pricing.onBranchMenu,
     branch: branch ? { id: branch.id, name: branch.name } : null,
     currency: branch?.currency || settings["store.currency"] || "PKR",

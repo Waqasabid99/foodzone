@@ -2,6 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { api } from "@/lib/api-client";
+import { writeOrderTypeCookie } from "@/lib/order-type";
 
 /**
  * The basket, read from and written to the server.
@@ -35,8 +36,15 @@ function subscribe(listener) {
 const getSnapshot = () => state;
 const getServerSnapshot = () => EMPTY;
 
-/** Replaces the cart with what the server just told us it is. */
+/**
+ * Replaces the cart with what the server just told us it is.
+ *
+ * Also mirrors its order type into the cookie the server-rendered menu reads,
+ * so the prices on the next page are the ones this cart is charged — including
+ * for a signed-in customer whose cart was switched to pickup on another device.
+ */
 function applyCart(cart) {
+  if (cart?.type) writeOrderTypeCookie(cart.type);
   setState({ status: "ready", cart, error: null });
   return cart;
 }

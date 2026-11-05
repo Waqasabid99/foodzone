@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ApiError, cursorArgs, toPage } from "@/lib/api";
+import { FULFILLED_STATUSES } from "@/lib/order-status";
 
 /**
  * Reviews.
@@ -32,10 +33,33 @@ const WITH_CONTEXT = {
   ...SELECT,
   user: { select: { id: true, name: true } },
   product: { select: { id: true, name: true, slug: true, imageUrl: true } },
+  order: { select: { id: true, orderNumber: true, branchId: true, placedAt: true, branch: { select: { id: true, name: true } } } },
 };
 
-/** Orders whose food has actually been received. */
-const REVIEWABLE_STATUSES = ["DELIVERED", "COMPLETED"];
+/**
+ * A review belongs where its order was placed.
+ *
+ * Moderation is a branch job — the manager of the outlet that cooked the food
+ * is who knows whether a complaint is fair — so a branch-scoped moderator sees
+ * and acts on their own branch's reviews. A review whose order has since been
+ * deleted has no branch left to belong to, and only a company-wide role can
+ * reach it.
+ */
+function scopeWhere(scope) {
+  if (!scope || scope.all) {
+    return scope?.except?.length ? { OR: [{ orderId: null }, { order: { branchId: { notIn: scope.except } } }] } : {};
+  }
+  return { order: { branchId: { in: scope.ids } } };
+}
+
+/** The branch a review is moderated at, or null when its order is gone. */
+export async function reviewBranchId(id) {
+  const review = await prisma.review.findUnique({ where: { id }, select: { order: { select: { branchId: true } } } });
+  if (!review) throw ApiError.notFound("Review not found");
+  return review.order?.branchId ?? null;
+}
+
+const REVIEWABLE_STATUSES = FULFILLED_STATUSES;
 
 /**
  * Checks the caller bought this, then records the review.
@@ -133,12 +157,27 @@ export async function listOwnReviews({ userId, limit = 20, cursor }) {
 }
 
 /** The moderation queue. */
-export async function listReviews({ status, productId, rating, limit = 20, cursor } = {}) {
+export async function listReviews({ status, productId, rating, branchId, search, scope = null, limit = 20, cursor } = {}) {
   const rows = await prisma.review.findMany({
     where: {
-      ...(status ? { status } : {}),
-      ...(productId ? { productId } : {}),
-      ...(rating ? { rating } : {}),
+      AND: [
+        scopeWhere(scope),
+        {
+          ...(status ? { status } : {}),
+          ...(productId ? { productId } : {}),
+          ...(rating ? { rating } : {}),
+          ...(branchId ? { order: { branchId } } : {}),
+          ...(search
+            ? {
+                OR: [
+                  { comment: { contains: search, mode: "insensitive" } },
+                  { user: { name: { contains: search, mode: "insensitive" } } },
+                  { product: { name: { contains: search, mode: "insensitive" } } },
+                ],
+              }
+            : {}),
+        },
+      ],
     },
     select: WITH_CONTEXT,
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -146,6 +185,14 @@ export async function listReviews({ status, productId, rating, limit = 20, curso
   });
 
   return toPage(rows, limit);
+}
+
+/** How many reviews sit in each state, for the queue's own tabs. */
+export async function reviewCounts({ scope = null } = {}) {
+  const rows = await prisma.review.groupBy({ by: ["status"], where: scopeWhere(scope), _count: { _all: true } });
+  const counts = { PENDING: 0, PUBLISHED: 0, REJECTED: 0 };
+  for (const row of rows) counts[row.status] = row._count._all;
+  return counts;
 }
 
 export async function moderateReview({ id, status, actorId }) {

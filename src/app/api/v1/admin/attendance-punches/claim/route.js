@@ -1,6 +1,7 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { claimPunchesSchema } from "@/server/validation/hr.schemas";
 import { claimUnmatchedPunches } from "@/server/services/punch.service";
+import { assertRecordAccess } from "@/server/hr/access";
 
 /**
  * Links orphaned punches to an employee and enrols the id.
@@ -15,5 +16,8 @@ export const POST = apiHandler(
     body: claimPunchesSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ body, auth }) => ok(await claimUnmatchedPunches({ ...body, actor: auth })),
+  async ({ body, auth }) => {
+    await assertRecordAccess(auth, "employee", body.employeeId, "employees.update");
+    return ok(await claimUnmatchedPunches({ ...body, actor: auth }));
+  },
 );

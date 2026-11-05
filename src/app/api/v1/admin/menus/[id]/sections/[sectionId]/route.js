@@ -1,6 +1,7 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { sectionParamSchema, updateSectionSchema } from "@/server/validation/catalog.schemas";
 import { assertMenuAccess, deleteSection, updateSection } from "@/server/services/menu.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 export const PATCH = apiHandler(
   {
@@ -10,6 +11,7 @@ export const PATCH = apiHandler(
     body: updateSectionSchema,
     rateLimit: RateLimits.write,
     audit: { action: "menu_section.update", entityType: "MenuSection", entityId: ({ params }) => params.sectionId },
+    invalidates: [CacheTag.MENUS],
   },
   async ({ auth, params, body }) => {
     await assertMenuAccess(auth, params.id, "menus.update");
@@ -25,6 +27,7 @@ export const DELETE = apiHandler(
     params: sectionParamSchema,
     rateLimit: RateLimits.write,
     audit: { action: "menu_section.delete", entityType: "MenuSection", entityId: ({ params }) => params.sectionId },
+    invalidates: [CacheTag.MENUS],
   },
   async ({ auth, params }) => {
     await assertMenuAccess(auth, params.id, "menus.update");

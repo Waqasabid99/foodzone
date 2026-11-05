@@ -2,10 +2,14 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { updateShiftSchema } from "@/server/validation/hr.schemas";
 import { getShift, updateShift } from "@/server/services/shift.service";
+import { assertRecordAccess } from "@/server/hr/access";
 
 export const GET = apiHandler(
   { auth: true, permissions: "shifts.read", params: idParamSchema },
-  async ({ params }) => ok(await getShift(params.id)),
+  async ({ params, auth }) => {
+    await assertRecordAccess(auth, "shift", params.id, "shifts.read");
+    return ok(await getShift(params.id));
+  },
 );
 
 /**
@@ -20,5 +24,8 @@ export const PATCH = apiHandler(
     body: updateShiftSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => ok(await updateShift(params.id, body, auth)),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "shift", params.id, "shifts.manage");
+    return ok(await updateShift(params.id, body, auth));
+  },
 );

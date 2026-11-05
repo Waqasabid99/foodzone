@@ -1,11 +1,12 @@
 import { apiHandler, created, paginated, RateLimits } from "@/lib/api";
 import { createQrSchema, qrQuerySchema } from "@/server/validation/dinein.schemas";
 import { createQrCode, listQrCodes } from "@/server/services/qr.service";
+import { branchScope } from "@/lib/api/permissions";
 
 export const GET = apiHandler(
   { auth: true, permissions: "qr_codes.read", query: qrQuerySchema, branch: "query" },
-  async ({ query }) => {
-    const { items, nextCursor, limit } = await listQrCodes(query);
+  async ({ query, auth }) => {
+    const { items, nextCursor, limit } = await listQrCodes({ ...query, scope: branchScope(auth, "qr_codes.read") });
     return paginated(items, { nextCursor, limit });
   },
 );

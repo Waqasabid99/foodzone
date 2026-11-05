@@ -62,12 +62,31 @@ async function api(pathname, { method = "GET", body, token, ip } = {}) {
   return { status: res.status, body: json };
 }
 
+/**
+ * Drains the outbox **until it is empty**, not once.
+ *
+ * One cycle is never enough: the worker claims a bounded batch, and the
+ * handlers enqueue further events as they run — posting a goods receipt
+ * raises the ledger event that this suite then asserts on. A single call
+ * leaves that second generation unprocessed, and the assertion fails for a
+ * reason that has nothing to do with the ledger.
+ */
 async function drainOutbox() {
-  const res = await fetch(`${BASE}/api/internal/jobs/outbox`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${CRON}` },
-  });
-  return res.status;
+  let status = 0;
+
+  for (let cycle = 0; cycle < 40; cycle += 1) {
+    const res = await fetch(`${BASE}/api/internal/jobs/outbox`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${CRON}` },
+    });
+    status = res.status;
+    if (!res.ok) return status;
+
+    const body = await res.json().catch(() => null);
+    if ((body?.data?.processed ?? 0) === 0 && (body?.data?.failed ?? 0) === 0) return status;
+  }
+
+  return status;
 }
 
 const num = (value) => Number(value ?? 0);
@@ -173,7 +192,26 @@ async function main() {
   });
 
   // ================= FISCAL CALENDAR =================
-  const year = new Date().getUTCFullYear();
+  /*
+   * Deliberately far from real trading.
+   *
+   * This suite owns a whole fiscal year: it creates one, rejects an
+   * overlapping one, closes and locks its periods and posts entries into
+   * them — then bins the lot. Run against the current calendar year, every
+   * one of those steps collides with the company's real books: the create
+   * conflicts with the live fiscal year, and the cleanup tries to delete
+   * periods that real sales have posted into.
+   */
+  /*
+   * Fifty years in the **past**, not the future.
+   *
+   * Either keeps the suite clear of the real books, but only the past keeps
+   * it clear of the *ordering* rule: periods must be closed oldest-first
+   * across every fiscal year, so a suite trading in 2076 cannot close its own
+   * January while the current year's January is still open. Trading in 1976
+   * puts every period this suite touches before anything real.
+   */
+  const year = new Date().getUTCFullYear() - 50;
   const fy = await api("/admin/fiscal-years", {
     method: "POST",
     token: adminToken,
@@ -182,6 +220,39 @@ async function main() {
   check("a fiscal year is created", fy.status === 201, fy.body);
   const fyId = fy.body.data.id;
   check("twelve monthly periods are generated", fy.body.data.periods.length === 12, fy.body?.data?.periods?.length);
+
+  /*
+   * A fiscal year covering *today*, because most of what follows posts in
+   * real time.
+   *
+   * Receiving stock, approving an expense, paying a bill — all of them post
+   * on the day they happen, and `assertPostable` refuses a date that no
+   * accounting period covers. The suite's own year is fifty years out to stay
+   * clear of the real books, so it cannot serve for this.
+   *
+   * Created only when there is not one already — which, since `db:seed` opens
+   * the year covering today, is now the uncommon case. It stays as a fallback
+   * for a database where that year was deleted or never seeded, and because a
+   * suite that silently depends on the seed having run is a suite that fails
+   * confusingly. On a live database the real year must survive cleanup; the
+   * stamp in the name is what tells the cleanup which years are ours to
+   * delete.
+   */
+  const today = new Date();
+  const existingCurrent = await prisma.accountingPeriod.findFirst({
+    where: { startDate: { lte: today }, endDate: { gte: today } },
+    select: { id: true },
+  });
+
+  if (!existingCurrent) {
+    const thisYear = today.getUTCFullYear();
+    const current = await api("/admin/fiscal-years", {
+      method: "POST",
+      token: adminToken,
+      body: { name: `FY current ${stamp}`, startDate: `${thisYear}-01-01`, endDate: `${thisYear}-12-31` },
+    });
+    check("a fiscal year covering today exists", current.status === 201, current.body?.error);
+  }
 
   const overlapping = await api("/admin/fiscal-years", {
     method: "POST",
@@ -275,12 +346,36 @@ async function main() {
   });
   check("a posted entry cannot be voided", voidPosted.status === 409, voidPosted.body?.error);
 
+  /*
+   * Dated inside this suite's own fiscal year, on purpose.
+   *
+   * A reversal defaults to *today*, so that a correction cannot be back-dated
+   * into a period somebody has already reported on. This suite deliberately
+   * trades fifty years out to stay clear of the real books, so "today" has no
+   * period here and the default would be refused — correctly. Passing the
+   * date exercises the documented escape hatch instead, and proves the
+   * reversal lands in the period the original was posted to.
+   */
+  const reversalDate = `${year}-01-20`;
   const reversal = await api(`/admin/journal-entries/${capitalEntryId}/reverse`, {
     method: "POST",
     token: adminToken,
-    body: { reason: "Wrong bank account" },
+    body: { reason: "Wrong bank account", entryDate: reversalDate },
   });
   check("a posted entry is corrected by reversing it", reversal.status === 201, reversal.body);
+  check("the reversal lands in the period it was dated into", reversal.body?.data?.periodId === januaryId, {
+    got: reversal.body?.data?.periodId,
+    wanted: januaryId,
+  });
+
+  // The default is still today, which is exactly why it cannot be used here:
+  // a correction must not quietly appear in a period nobody is expecting.
+  const defaultDated = await api(`/admin/journal-entries/${draftId}/reverse`, {
+    method: "POST",
+    token: adminToken,
+    body: { reason: "undated" },
+  });
+  check("a draft cannot be reversed at all", defaultDated.status === 409, defaultDated.status);
   const reversalId = reversal.body.data.id;
   check("the reversal flips the sides", num(reversal.body.data.lines.find((l) => l.account.code === "1200").credit) === 100000, reversal.body?.data?.lines);
 
@@ -414,10 +509,31 @@ async function main() {
   check("payables now carry the debt", num(billEntry?.lines.find((l) => l.account.code === "2100")?.credit) === 17000, billEntry?.lines);
   check("and GRNI is cleared by the same amount it accrued", num(billEntry?.lines.find((l) => l.account.code === "2450")?.debit) === 15500, billEntry?.lines);
 
-  // GRNI should now be flat: accrued 15500 on receipt, cleared 15500 on the bill.
+  /*
+   * GRNI should now be flat for this suite's own paperwork: accrued 15500 on
+   * the receipt, cleared 15500 by the bill.
+   *
+   * Asserted over *our two entries* in the drill-down and not over the
+   * account's closing balance, which is every branch's unbilled stock at once.
+   * This read the closing balance until `db:seed` began opening the current
+   * fiscal year: before that, the other suites' receipts were being refused
+   * for want of a period covering today, so the account happened to be empty
+   * and a global balance happened to be our balance. It passed by accident, and
+   * on any real installation — where other outlets genuinely do hold unbilled
+   * stock — this assertion would have been false from the first week.
+   */
   const grniAccount = byCode.get("2450");
-  const grniLedger = await api(`/admin/accounts/${grniAccount.id}/ledger`, { token: adminToken });
-  check("GRNI nets to zero once the invoice lands", round(num(grniLedger.body.data.closingBalance)) === 0, grniLedger.body?.data);
+  const grniLedger = await api(`/admin/accounts/${grniAccount.id}/ledger?limit=500`, { token: adminToken });
+  const ours = await prisma.journalEntry.findMany({
+    where: { OR: [{ source: "GOODS_RECEIPT", sourceId: grnId }, { source: "SUPPLIER_BILL", sourceId: billId }] },
+    select: { id: true },
+  });
+  const ourIds = new Set(ours.map((entry) => entry.id));
+  const ourRows = (grniLedger.body?.data?.movements ?? []).filter((row) => ourIds.has(row.entryId));
+  const ourNet = ourRows.reduce((total, row) => total + num(row.credit) - num(row.debit), 0);
+
+  check("the drill-down shows both sides of the accrual", ourRows.length === 2, ourRows);
+  check("GRNI nets to zero once the invoice lands", round(ourNet) === 0, ourRows);
 
   const overpay = await api(`/admin/supplier-bills/${billId}/payments`, {
     method: "POST",
@@ -519,6 +635,145 @@ async function main() {
   const summary = await api(`/admin/expenses/summary?branchId=${branchId}`, { token: adminToken });
   check("spend is summarised by category", num(summary.body.data.total) === 5500, summary.body?.data);
 
+  /*
+   * ===================== A POSTING WITH NOWHERE TO GO =====================
+   *
+   * The year runs out, nobody opens the next one, and business carries on.
+   * What must not happen is the ledger quietly losing those days.
+   *
+   * Postings run from the outbox, which retries a handful of times with
+   * backoff and then marks an event FAILED for good. That is right for a
+   * malformed event and wrong for this one: "no accounting period" is a
+   * configuration fault that fixes itself the moment somebody opens the year,
+   * and the recovery endpoint only covers orders, payments, receipts and
+   * production runs — an expense, a refund or a cash session that failed this
+   * way could never be recovered at all.
+   *
+   * So the event waits instead of dying, and opening the year releases it.
+   */
+  const orphanDate = "2001-03-03";
+  const orphanPeriod = await prisma.accountingPeriod.findFirst({
+    where: { startDate: { lte: new Date(`${orphanDate}T00:00:00Z`) }, endDate: { gte: new Date(`${orphanDate}T00:00:00Z`) } },
+    select: { id: true },
+  });
+  check("the date this uses really is in no period", orphanPeriod === null, orphanPeriod);
+
+  const orphan = await api("/admin/expenses", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      branchId,
+      categoryId,
+      paidFromId: byCode.get("1200").id,
+      payee: `Orphan ${stamp}`,
+      amount: 1200,
+      expenseDate: orphanDate,
+      description: "Dated outside every accounting period",
+    },
+  });
+  check("an expense can be dated outside the calendar", orphan.status === 201, orphan.body);
+  const orphanId = orphan.body.data.id;
+
+  const orphanApproved = await api(`/admin/expenses/${orphanId}/approve`, { method: "POST", token: adminToken });
+  check("approving it still succeeds — the operational record is not the ledger", orphanApproved.status === 200, orphanApproved.body?.error);
+
+  await drainOutbox();
+
+  const parked = await prisma.outboxEvent.findFirst({
+    where: { eventType: "finance.expense_approved", payload: { path: ["expenseId"], equals: orphanId } },
+    select: { id: true, status: true, attempts: true, lastError: true },
+  });
+  check("the posting event is parked rather than retried", parked?.status === "BLOCKED", parked);
+  check("and it has not spent any of its retry budget", parked?.attempts === 0, parked);
+  check("the reason is recorded where somebody will read it", /accounting period/i.test(parked?.lastError ?? ""), parked?.lastError);
+
+  const notPosted = await prisma.journalEntry.count({ where: { source: "EXPENSE", sourceId: orphanId } });
+  check("nothing is posted while it waits", notPosted === 0, notPosted);
+
+  // Draining again must not touch it: a parked event that is re-claimed every
+  // cycle is a hot loop, and one that is re-counted as work makes the drain
+  // loop in CI never finish.
+  const secondDrain = await fetch(`${BASE}/api/internal/jobs/outbox`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${CRON}` },
+  }).then((res) => res.json());
+  const stillParked = await prisma.outboxEvent.findUnique({ where: { id: parked.id }, select: { status: true, attempts: true } });
+  check("a parked event is not claimed again on the next cycle", stillParked?.attempts === 0 && stillParked?.status === "BLOCKED", stillParked);
+  check("and the queue reports it separately from failures", secondDrain?.data?.stats?.blocked >= 1, secondDrain?.data?.stats);
+
+  /*
+   * ===================== THE WARNING, AND WHO GETS IT =====================
+   *
+   * A year that lapses is an outage of the books with no symptom anywhere
+   * else, so the daily maintenance cycle warns the people who can open the
+   * next one. Checked end to end because the parts that matter are the parts a
+   * unit test cannot see: that it reaches a real user, through the real
+   * permission, and that running it twice does not send it twice.
+   */
+  const maintenance = await fetch(`${BASE}/api/internal/jobs/maintenance`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${CRON}` },
+  }).then((res) => res.json());
+  check("the maintenance cycle reports on the fiscal calendar", Boolean(maintenance?.data?.fiscalRunway), maintenance?.data);
+
+  // The seeded year covers today and runs to next June, so there is nothing to
+  // warn about yet — but the orphan postings above are waiting, which is the
+  // case a calendar-only check would miss.
+  check(
+    "a healthy calendar is reported as such",
+    ["OK", "EXPIRING"].includes(maintenance.data.fiscalRunway.state),
+    maintenance.data.fiscalRunway,
+  );
+
+  /*
+   * The audience, every run.
+   *
+   * A fan-out that reaches nobody is the quietest possible failure for a
+   * warning system — nothing is sent, nothing errors, and the first symptom is
+   * a lapsed year. This asserts the permission query actually resolves to real
+   * users, which no amount of unit testing of the wording can tell you.
+   */
+  check("the warning has somebody to go to", maintenance.data.fiscalRunway.audience >= 1, maintenance.data.fiscalRunway);
+
+  // The orphan postings above are parked, so there *is* something to say even
+  // though the calendar itself is healthy — the case a days-left check misses.
+  check("postings waiting are warned about even with a healthy calendar", maintenance.data.fiscalRunway.warned >= 1, maintenance.data.fiscalRunway);
+
+  const told = await prisma.notification.findFirst({
+    where: { type: "finance.fiscal_year_runway" },
+    select: { userId: true, title: true, data: true },
+  });
+  check("it reached a real user", Boolean(told?.userId), told);
+  check("and says what is waiting", /waiting for an accounting period/i.test(told?.title ?? ""), told?.title);
+
+  const warnings = await prisma.notification.count({ where: { type: "finance.fiscal_year_runway" } });
+  const secondRun = await fetch(`${BASE}/api/internal/jobs/maintenance`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${CRON}` },
+  }).then((res) => res.json());
+  const afterSecond = await prisma.notification.count({ where: { type: "finance.fiscal_year_runway" } });
+  check("running it again sends nothing twice", afterSecond === warnings, { warnings, afterSecond });
+  check("and it still releases parked postings", typeof secondRun?.data?.postingsReleased === "number", secondRun?.data);
+
+  // Now open the year it was waiting for.
+  const rescueYear = await api("/admin/fiscal-years", {
+    method: "POST",
+    token: adminToken,
+    body: { name: `FY orphan ${stamp}`, startDate: "2001-01-01", endDate: "2001-12-31" },
+  });
+  check("the year it was waiting for can be opened", rescueYear.status === 201, rescueYear.body?.error);
+
+  const released = await prisma.outboxEvent.findUnique({ where: { id: parked.id }, select: { status: true } });
+  check("opening the year releases the parked event", released?.status === "PENDING", released);
+
+  await drainOutbox();
+  const rescuedEntry = await prisma.journalEntry.findFirst({
+    where: { source: "EXPENSE", sourceId: orphanId },
+    select: { id: true, period: { select: { name: true } } },
+  });
+  check("and the posting lands once there is a period for it", Boolean(rescuedEntry), rescuedEntry);
+  check("in the period it was always dated into", rescuedEntry?.period?.name === "March 2001", rescuedEntry?.period);
+
   // ================= STATEMENTS =================
   const trial = await api(`/admin/reports/trial-balance?branchId=${branchId}`, { token: adminToken });
   check("the trial balance agrees", trial.body?.data?.balanced === true, {
@@ -534,8 +789,21 @@ async function main() {
   });
   check("inventory is on the balance sheet at what was received", num(sheet.body.data.assets.find((a) => a.code === "1400")?.balance) === 15500, sheet.body?.data?.assets);
 
-  const pnl = await api(`/admin/reports/profit-and-loss?branchId=${branchId}`, { token: adminToken });
-  // The only expense so far is the utility bill, net of its recoverable tax.
+  /*
+   * Dated, because a P&L always is.
+   *
+   * The window is this month, which is when the utility bill was recorded. It
+   * used to be left open, which read as "everything ever" — fine while that
+   * was the same thing, and wrong once this suite deliberately posts an
+   * expense dated 2001 to prove a lapsed calendar recovers. An undated profit
+   * figure is not a number anybody would report anyway.
+   */
+  const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const pnl = await api(
+    `/admin/reports/profit-and-loss?branchId=${branchId}&from=${monthStart}&to=${iso(new Date())}`,
+    { token: adminToken },
+  );
+  // The only expense this month is the utility bill, net of its recoverable tax.
   check("the P&L shows the operating spend", num(pnl.body.data.operatingExpenses) === 5000, pnl.body?.data);
   check("with no revenue yet, the loss is that spend", num(pnl.body.data.netProfit) === -5000, pnl.body?.data);
 
@@ -686,7 +954,16 @@ async function cleanup() {
   await prisma.expense.deleteMany({ where: { branchId: { in: branchIds } } });
   await prisma.expenseCategory.deleteMany({ where: { name: { contains: String(stamp) } } });
 
-  await prisma.accountingPeriod.deleteMany({ where: { fiscalYear: { name: { contains: String(stamp) } } } });
+  // Entries first: a period holding a posting cannot be deleted, which is the
+  // constraint that stops a stray cleanup orphaning somebody's books.
+  const ownPeriods = await prisma.accountingPeriod.findMany({
+    where: { fiscalYear: { name: { contains: String(stamp) } } },
+    select: { id: true },
+  });
+  const ownPeriodIds = ownPeriods.map((row) => row.id);
+  await prisma.journalLine.deleteMany({ where: { entry: { periodId: { in: ownPeriodIds } } } });
+  await prisma.journalEntry.deleteMany({ where: { periodId: { in: ownPeriodIds } } });
+  await prisma.accountingPeriod.deleteMany({ where: { id: { in: ownPeriodIds } } });
   await prisma.fiscalYear.deleteMany({ where: { name: { contains: String(stamp) } } });
 
   // Only accounts this suite created — the seeded chart stays.
@@ -713,13 +990,23 @@ async function cleanup() {
   await prisma.refreshToken.deleteMany({ where: { userId: { in: ids } } });
   await prisma.userRoleAssignment.deleteMany({ where: { userId: { in: ids } } });
   await prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  // The runway warning goes to whoever holds the grant, which on a live
+  // database is not only this suite's users.
+  await prisma.notification.deleteMany({ where: { type: "finance.fiscal_year_runway" } });
   await prisma.rolePermission.deleteMany({ where: { role: { name: { contains: String(stamp) } } } });
   await prisma.role.deleteMany({ where: { name: { contains: String(stamp) } } });
   await prisma.user.deleteMany({ where: { id: { in: ids } } });
   await prisma.branch.deleteMany({ where: { code: { startsWith: "E2EB" } } });
   await prisma.setting.deleteMany({});
 
-  const leftovers = {
+  const leftovers = await countAll();
+  console.log("\nDatabase after cleanup:", JSON.stringify(leftovers));
+  return leftovers;
+}
+
+/** Every count the cleanliness gate looks at, read the same way before and after. */
+async function countAll() {
+  return {
     users: await prisma.user.count(),
     branches: await prisma.branch.count(),
     journalEntries: await prisma.journalEntry.count(),
@@ -737,14 +1024,29 @@ async function cleanup() {
     roles: await prisma.role.count(),
     accounts: await prisma.account.count(),
   };
-  console.log("\nDatabase after cleanup:", JSON.stringify(leftovers));
-  return leftovers;
 }
+
+/*
+ * The cleanliness gate: this suite must leave the database as it found it.
+ *
+ * Compared against a baseline taken before the first assertion, not against
+ * zero. Zero was right while an e2e database was effectively empty of
+ * accounting data, and stopped being right when `db:seed` began opening the
+ * fiscal year covering today: the seeded year, its twelve periods, and the
+ * ledger rows the *earlier* phases legitimately post are all part of the
+ * database this suite inherits, and none of them are its mess to clean.
+ *
+ * A baseline keeps the gate honest in both directions — anything this suite
+ * leaves behind still fails, without it having to be taught which rows other
+ * suites own.
+ */
+let baseline = {};
 
 try {
   // Wake the database before the first assertion, so a suspended compute
   // fails here rather than as a mystery timeout mid-suite.
   await warmUpDatabase(prisma);
+  baseline = await countAll();
   await main();
 } catch (error) {
   console.log("SUITE ERROR:", error.message, "\n", error.stack?.split("\n").slice(0, 5).join("\n"));
@@ -756,8 +1058,11 @@ try {
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));
 
-  const ignore = ["roles", "accounts"];
-  const dirty = Object.entries(leftovers).filter(([key, value]) => !ignore.includes(key) && value > 0);
+  // Only growth counts. `[name, left behind, total]` so the number that
+  // matters is not buried in the number that does not.
+  const dirty = Object.entries(leftovers)
+    .filter(([key, value]) => value > (baseline[key] ?? 0))
+    .map(([key, value]) => [key, value - (baseline[key] ?? 0), value]);
   if (dirty.length) console.log("WARNING: database not clean:", JSON.stringify(dirty));
 
   process.exit(failures.length || dirty.length ? 1 : 0);

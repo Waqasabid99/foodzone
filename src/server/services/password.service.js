@@ -82,6 +82,8 @@ export async function resetPassword({ email, code, password }) {
         // completes verification for an account still waiting on it.
         ...(user.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }),
         ...(user.status === "PENDING_VERIFICATION" ? { status: "ACTIVE" } : {}),
+        // Whatever an administrator issued, this one is theirs.
+        mustChangePassword: false,
       },
     });
 
@@ -124,7 +126,7 @@ export async function changePassword({ principal, currentPassword, newPassword, 
   await prisma.$transaction(async (tx) => {
     await tx.user.update({
       where: { id: user.id },
-      data: { passwordHash: await hashPassword(newPassword) },
+      data: { passwordHash: await hashPassword(newPassword), mustChangePassword: false },
     });
     await invalidateAllCredentials(tx, user.id, "PASSWORD_CHANGED");
   });

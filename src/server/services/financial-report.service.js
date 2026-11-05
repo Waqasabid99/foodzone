@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { Prisma } from "@/generated/prisma";
 import { ACCOUNTS } from "@/server/accounting/chart";
 import { money } from "@/server/accounting/balance";
@@ -21,8 +22,8 @@ import { accountBalances } from "@/server/services/journal.service";
 const D = (value) => new Prisma.Decimal(value ?? 0);
 
 /** Balances with the sign already applied, as the report functions want them. */
-async function balancesFor({ branchId, from, to }) {
-  const rows = await accountBalances({ branchId, from, to });
+async function balancesFor({ branchId, from, to, scope }) {
+  const rows = await accountBalances({ branchId, from, to, scope });
 
   return rows.map((row) => ({
     ...row,
@@ -31,8 +32,8 @@ async function balancesFor({ branchId, from, to }) {
   }));
 }
 
-export async function trialBalanceReport({ branchId = null, from = null, to = null } = {}) {
-  const rows = await balancesFor({ branchId, from, to });
+export async function trialBalanceReport({ branchId = null, from = null, to = null, scope = null } = {}) {
+  const rows = await balancesFor({ branchId, from, to, scope });
   return { ...trialBalance(rows), branchId, from, to };
 }
 
@@ -43,8 +44,8 @@ export async function trialBalanceReport({ branchId = null, from = null, to = nu
  * is a period statement, so running one with no start date silently reports
  * since the beginning of time.
  */
-export async function profitAndLossReport({ branchId = null, from = null, to = null } = {}) {
-  const rows = await balancesFor({ branchId, from, to });
+export async function profitAndLossReport({ branchId = null, from = null, to = null, scope = null } = {}) {
+  const rows = await balancesFor({ branchId, from, to, scope });
   return { ...profitAndLoss(rows), branchId, from, to };
 }
 
@@ -56,8 +57,8 @@ export async function profitAndLossReport({ branchId = null, from = null, to = n
  * statement of movements dressed up as a statement of position, and it would
  * not balance.
  */
-export async function balanceSheetReport({ branchId = null, asOf = new Date() } = {}) {
-  const rows = await balancesFor({ branchId, from: null, to: asOf });
+export async function balanceSheetReport({ branchId = null, asOf = new Date(), scope = null } = {}) {
+  const rows = await balancesFor({ branchId, from: null, to: asOf, scope });
   return { ...balanceSheet(rows), branchId, asOf };
 }
 
@@ -68,7 +69,8 @@ export async function balanceSheetReport({ branchId = null, asOf = new Date() } 
  * what makes the statement readable — "paid suppliers", "took money at the
  * till" — rather than a list of undifferentiated movements.
  */
-export async function cashFlowReport({ branchId = null, from = null, to = null } = {}) {
+export async function cashFlowReport({ branchId = null, from = null, to = null, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const cashAccounts = await prisma.account.findMany({
     where: { code: { in: [ACCOUNTS.CASH, ACCOUNTS.BANK, ACCOUNTS.CARD_CLEARING] } },
     select: { id: true, code: true, name: true },
@@ -81,6 +83,7 @@ export async function cashFlowReport({ branchId = null, from = null, to = null }
       accountId: { in: cashIds },
       entry: {
         status: "POSTED",
+        ...(filter ? { AND: [{ branchId: filter }] } : {}),
         ...(branchId ? { branchId } : {}),
         ...(from || to
           ? { entryDate: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
@@ -124,11 +127,11 @@ export async function cashFlowReport({ branchId = null, from = null, to = null }
  * pack whose statements do not tie is a pack nobody should sign off — and that
  * is much better said on the page than discovered later.
  */
-export async function financialSummary({ branchId = null, from = null, to = new Date() } = {}) {
+export async function financialSummary({ branchId = null, from = null, to = new Date(), scope = null } = {}) {
   const [pnl, sheet, trial] = await Promise.all([
-    profitAndLossReport({ branchId, from, to }),
-    balanceSheetReport({ branchId, asOf: to }),
-    trialBalanceReport({ branchId, from, to }),
+    profitAndLossReport({ branchId, from, to, scope }),
+    balanceSheetReport({ branchId, asOf: to, scope }),
+    trialBalanceReport({ branchId, from, to, scope }),
   ]);
 
   return {

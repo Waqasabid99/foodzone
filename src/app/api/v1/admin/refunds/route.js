@@ -1,10 +1,11 @@
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { branchScope } from "@/lib/api/permissions";
 import { listRefundsSchema, requestRefundSchema } from "@/server/validation/payment.schemas";
 import { listRefunds, requestRefund } from "@/server/services/refund.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "refunds.read", query: listRefundsSchema, branch: "query" },
-  async ({ query }) => ok(await listRefunds(query)),
+  async ({ query, auth }) => ok(await listRefunds({ ...query, scope: branchScope(auth, "refunds.read") })),
 );
 
 /**

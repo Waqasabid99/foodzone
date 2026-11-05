@@ -39,6 +39,7 @@ export const DASHBOARD_NAV = [
     items: [
       { label: "Orders", href: "/dashboard/orders", icon: "ReceiptText", permission: "orders.read" },
       { label: "Kitchen", href: "/dashboard/kitchen", icon: "ChefHat", permission: "kds.read" },
+      { label: "The pass", href: "/dashboard/pass", icon: "HandPlatter", permission: "kds.read" },
       { label: "Tables", href: "/dashboard/tables", icon: "Armchair", permission: "tables.read" },
       { label: "QR codes", href: "/dashboard/qr-codes", icon: "QrCode", permission: "qr_codes.read" },
       { label: "Live carts", href: "/dashboard/carts", icon: "ShoppingCart", permission: "carts.read" },
@@ -48,6 +49,7 @@ export const DASHBOARD_NAV = [
     id: "delivery",
     label: "Delivery",
     items: [
+      { label: "Dispatch", href: "/dashboard/dispatch", icon: "Radar", permission: "deliveries.read" },
       { label: "Deliveries", href: "/dashboard/deliveries", icon: "Bike", permission: "deliveries.read" },
       { label: "Drivers", href: "/dashboard/drivers", icon: "IdCard", permission: "drivers.read" },
       { label: "Driver payouts", href: "/dashboard/driver-payouts", icon: "HandCoins", permission: "driver_payouts.read" },
@@ -150,6 +152,7 @@ export const DASHBOARD_NAV = [
       { label: "Shifts", href: "/dashboard/shifts", icon: "Clock", permission: "shifts.read" },
       { label: "Rosters", href: "/dashboard/rosters", icon: "CalendarDays", permission: "rosters.read" },
       { label: "Attendance", href: "/dashboard/attendance", icon: "Fingerprint", permission: "attendance.read" },
+      { label: "Terminals", href: "/dashboard/devices", icon: "ScanFace", permission: "attendance_devices.read" },
       { label: "Leave", href: "/dashboard/leave", icon: "Plane", permission: "leave_requests.read" },
       { label: "Holidays", href: "/dashboard/holidays", icon: "PartyPopper", permission: "holidays.read" },
       { label: "Payroll", href: "/dashboard/payroll", icon: "Coins", permission: "payroll.read" },
@@ -183,7 +186,11 @@ export const DASHBOARD_NAV = [
       { label: "Users", href: "/dashboard/users", icon: "UserCog", permission: "users.read" },
       { label: "Roles", href: "/dashboard/roles", icon: "ShieldCheck", permission: "roles.read" },
       { label: "Media", href: "/dashboard/media", icon: "Image", anyOf: ["media.upload", "media.delete"] },
+      { label: "Home banners", href: "/dashboard/hero", icon: "GalleryHorizontal", permission: "hero_slides.read" },
+      { label: "Public pages", href: "/dashboard/pages", icon: "FileText", permission: "content_pages.read" },
       { label: "Notifications", href: "/dashboard/notifications", icon: "Bell", permission: "notifications.read" },
+      { label: "Payment callbacks", href: "/dashboard/payment-webhooks", icon: "Webhook", permission: "payment_webhooks.read" },
+      { label: "Payment gateways", href: "/dashboard/payment-gateways", icon: "CreditCard", permission: "payment_providers.read" },
       { label: "Numbering", href: "/dashboard/numbering", icon: "Hash", permission: "number_sequences.read" },
       { label: "Settings", href: "/dashboard/settings", icon: "Settings", permission: "settings.read" },
     ],
@@ -220,7 +227,14 @@ export const ACCOUNT_NAV = [
         label: "Creator studio",
         href: "/account/creator",
         icon: "Sparkles",
-        permission: "self.view_creator_dashboard",
+        /**
+         * Either permission, because this one link does two jobs. A creator
+         * holds `view_creator_dashboard`; somebody who could *become* one
+         * holds only `become_creator`. Requiring the first hid the programme
+         * from exactly the people it is for — the page that invites you to
+         * join was reachable only once you had joined.
+         */
+        anyOf: ["self.view_creator_dashboard", "self.become_creator"],
       },
       { label: "My videos", href: "/account/creator/videos", icon: "Video", permission: "self.manage_own_videos" },
     ],

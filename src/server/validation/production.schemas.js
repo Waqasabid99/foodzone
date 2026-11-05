@@ -87,6 +87,8 @@ export const reviseRecipeSchema = z.object({
 
 export const listRecipesSchema = z.object({
   search: z.string().trim().max(120).optional(),
+  /** DISH: recipes for menu items. STOCK: recipes for prep items. */
+  output: z.enum(["DISH", "STOCK"]).optional(),
   variantId: cuidSchema.optional(),
   outputItemId: cuidSchema.optional(),
   isActive: z.stringbool().optional(),

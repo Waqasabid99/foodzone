@@ -1,21 +1,25 @@
 import { prisma } from "@/lib/prisma";
 import { ApiError, cursorArgs, toPage } from "@/lib/api";
 import { invalidatePrincipal } from "@/lib/api/permissions";
-import { hashPassword } from "@/server/utils/password";
+import { generateTemporaryPassword, hashPassword } from "@/server/utils/password";
 import { assertCanGrantRole } from "@/server/services/role.service";
 import { consumeCredentialCode, issueCredentialCode, revokeCredentialCodes } from "@/server/services/credential-token.service";
 import { issueSessionFor, normalizeEmail, publicUser } from "@/server/services/auth.service";
 import { sendMailSafely } from "@/server/mail/mailer";
-import { accountStatusEmail, staffInviteEmail } from "@/server/mail/templates";
+import { accountStatusEmail, staffInviteEmail, temporaryPasswordEmail } from "@/server/mail/templates";
 import { env } from "@/lib/env";
 
 /**
  * User administration.
  *
- * Staff never get a password from an administrator. They are created without
- * one, emailed a single-use invitation code, and set their own — so no password
- * ever travels over WhatsApp, and accepting the invite doubles as proof that
- * they control the address.
+ * Staff are normally created without a password, emailed a single-use
+ * invitation code, and set their own — so no password travels over WhatsApp,
+ * and accepting the invite doubles as proof that they control the address.
+ *
+ * `setTemporaryPassword` is the deliberate exception, for kitchen and counter
+ * staff who have no reachable email. It is generated rather than chosen, shown
+ * once, kills every session, and leaves the account able to do nothing but
+ * choose a real password.
  */
 
 const USER_SELECT = {
@@ -39,6 +43,18 @@ function toAdminUser(user) {
   const { passwordHash, ...rest } = user;
   return {
     ...publicUser(rest, { roles: user.roleAssignments ?? [] }),
+    // The admin screens say "Branch Manager at Downtown", so the grants carry
+    // the branch and the assignment id the revoke button needs.
+    roles: (user.roleAssignments ?? []).map((assignment) => ({
+      assignmentId: assignment.id,
+      key: assignment.role.key,
+      name: assignment.role.name,
+      scope: assignment.role.scope,
+      level: assignment.role.level,
+      branchId: assignment.branchId ?? null,
+      branch: assignment.branch ?? null,
+      expiresAt: assignment.expiresAt ?? null,
+    })),
     lastLoginAt: user.lastLoginAt,
     // Distinguishes an invited account that has not been accepted yet from a
     // real one, which is the difference the admin list needs to show.
@@ -196,6 +212,7 @@ async function sendInvitation({ user, actor }) {
     to: user.email,
     ...staffInviteEmail({
       name: user.name,
+      email: user.email,
       code,
       inviterName: actor?.name,
       roleNames: assignments.map((assignment) => assignment.role.name),
@@ -239,6 +256,8 @@ export async function acceptInvitation({ email, code, password, client, ipAddres
         passwordHash: await hashPassword(password),
         emailVerifiedAt: new Date(),
         status: "ACTIVE",
+        // They have just chosen it themselves.
+        mustChangePassword: false,
       },
     });
   });
@@ -309,6 +328,101 @@ export async function setUserStatus(userId, { status, reason }, actor) {
   }
 
   return getUser(userId);
+}
+
+/**
+ * Issues a temporary password an administrator reads out to someone locked
+ * out — the fallback for staff with no reachable email.
+ *
+ * Three things make it survivable: the system generates it (nobody types in a
+ * password they also use elsewhere), every session is revoked so the account
+ * is briefly reachable by nobody, and `mustChangePassword` holds the account
+ * to changing it before it can do anything else. It is returned exactly once,
+ * in this response, and never stored in readable form.
+ */
+export async function setTemporaryPassword(userId, actor) {
+  const user = await prisma.user.findFirst({ where: { id: userId, deletedAt: null } });
+  if (!user) throw ApiError.notFound("User not found");
+  assertCanManage(actor, user, { action: "set a password for" });
+  if (user.status === "SUSPENDED" || user.status === "DEACTIVATED") {
+    throw ApiError.conflict("Reactivate this account before giving it a password");
+  }
+
+  const password = generateTemporaryPassword();
+  const passwordHash = await hashPassword(password);
+  const at = new Date();
+
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: userId },
+      data: {
+        passwordHash,
+        mustChangePassword: true,
+        tokensValidFrom: at,
+        // An invited account that never accepted is now usable, so it counts
+        // as active; the address stays unverified until they prove it.
+        ...(user.status === "PENDING_VERIFICATION" && user.emailVerifiedAt ? { status: "ACTIVE" } : {}),
+      },
+    });
+    await tx.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: at, revokedReason: "TEMPORARY_PASSWORD_ISSUED" },
+    });
+  });
+
+  // Outstanding invitation and reset codes are dead: the password they would
+  // have set is no longer the current one.
+  await revokeCredentialCodes({ userId });
+  invalidatePrincipal(userId);
+
+  if (user.email) {
+    await sendMailSafely({
+      to: user.email,
+      ...temporaryPasswordEmail({ name: user.name, at: at.toUTCString(), byName: actor?.name }),
+    });
+  }
+
+  // The only time this value exists in readable form.
+  return { password, mustChangePassword: true, user: await getUser(userId) };
+}
+
+/** Where an account is signed in. The token itself is never shown, only its trail. */
+export async function listSessions(userId) {
+  const user = await prisma.user.findFirst({ where: { id: userId, deletedAt: null }, select: { id: true } });
+  if (!user) throw ApiError.notFound("User not found");
+
+  return prisma.refreshToken.findMany({
+    where: { userId, revokedAt: null, expiresAt: { gt: new Date() } },
+    select: { id: true, client: true, ipAddress: true, userAgent: true, createdAt: true, lastUsedAt: true, expiresAt: true },
+    orderBy: [{ lastUsedAt: "desc" }, { createdAt: "desc" }],
+    take: 50,
+  });
+}
+
+/**
+ * Signs an account out everywhere, or off one device.
+ *
+ * Revoking the refresh token alone would leave the current access token
+ * working until it expires, so a full revoke also moves `tokensValidFrom` —
+ * which is what "sign them out now" has to mean.
+ */
+export async function revokeSessions(userId, { sessionId = null, actor }) {
+  const user = await prisma.user.findFirst({ where: { id: userId, deletedAt: null } });
+  if (!user) throw ApiError.notFound("User not found");
+  assertCanManage(actor, user, { action: "sign out" });
+
+  const at = new Date();
+  const result = await prisma.refreshToken.updateMany({
+    where: { userId, revokedAt: null, ...(sessionId ? { id: sessionId } : {}) },
+    data: { revokedAt: at, revokedReason: sessionId ? "REVOKED_BY_ADMIN" : "ALL_REVOKED_BY_ADMIN" },
+  });
+
+  if (!sessionId) {
+    await prisma.user.update({ where: { id: userId }, data: { tokensValidFrom: at } });
+    invalidatePrincipal(userId);
+  }
+
+  return { revoked: result.count };
 }
 
 /**

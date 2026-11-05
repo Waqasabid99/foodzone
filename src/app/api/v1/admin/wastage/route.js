@@ -1,10 +1,11 @@
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, created, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/inventory/access";
 import { listWastageSchema, recordWastageSchema } from "@/server/validation/inventory.schemas";
 import { listWastage, recordWastage } from "@/server/services/stock-adjustment.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "wastage.read", query: listWastageSchema, branch: "query" },
-  async ({ query }) => ok(await listWastage(query)),
+  async ({ query, auth }) => ok(await listWastage({ ...query, scope: branchScope(auth, "wastage.read") })),
 );
 
 /**
@@ -23,5 +24,8 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "wastage.record", entityType: "Wastage", entityId: ({ result }) => result?.id ?? null },
   },
-  async ({ body, auth }) => created(await recordWastage({ ...body, actor: auth })),
+  async ({ body, auth }) => {
+    await assertRecordAccess(auth, "location", body.locationId, "wastage.create");
+    return created(await recordWastage({ ...body, actor: auth }));
+  },
 );

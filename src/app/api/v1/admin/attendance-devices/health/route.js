@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiHandler, ok } from "@/lib/api";
+import { apiHandler, branchScope, ok } from "@/lib/api";
 import { deviceHealth } from "@/server/services/attendance-device.service";
 
 const querySchema = z.object({
@@ -17,5 +17,5 @@ const querySchema = z.object({
  */
 export const GET = apiHandler(
   { auth: true, permissions: "attendance_devices.read", query: querySchema, branch: "query" },
-  async ({ query }) => ok(await deviceHealth(query)),
+  async ({ query, auth }) => ok(await deviceHealth({ ...query, scope: branchScope(auth, "attendance_devices.read") })),
 );

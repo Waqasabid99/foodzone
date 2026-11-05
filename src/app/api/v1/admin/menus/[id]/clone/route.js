@@ -2,6 +2,7 @@ import { apiHandler, assertBranchAccess, created, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { cloneMenuSchema } from "@/server/validation/catalog.schemas";
 import { assertMenuAccess, cloneMenu, menuBranchId } from "@/server/services/menu.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 /**
  * Copies a menu, with its sections and items, to another branch or channel.
@@ -24,12 +25,14 @@ export const POST = apiHandler(
     body: cloneMenuSchema,
     rateLimit: RateLimits.write,
     audit: { action: "menu.clone", entityType: "Menu", entityId: ({ result }) => result?.id ?? null },
+    invalidates: [CacheTag.MENUS],
   },
   async ({ params, body, auth }) => {
     await assertMenuAccess(auth, params.id, "menus.read");
 
     const targetBranchId = body.branchId ?? (await menuBranchId(params.id));
     assertBranchAccess(auth, targetBranchId, "menus.create");
+    if (body.isActive) assertBranchAccess(auth, targetBranchId, "menus.publish");
 
     return created(await cloneMenu(params.id, body));
   },

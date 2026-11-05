@@ -32,6 +32,8 @@ export default function AuthNav() {
   const next = pathname ?? "/";
 
   if (status === "loading") {
+    // Sized to the control it stands in for, or the header jumps under the
+    // cursor as the session resolves — which is what this exists to prevent.
     return <div aria-hidden="true" className="h-10 w-32 animate-pulse rounded-full bg-surface-container-high" />;
   }
 
@@ -115,6 +117,7 @@ function AccountMenu({ user }) {
         aria-expanded={open}
         aria-haspopup="menu"
         aria-controls="account-menu"
+        aria-label={user.name ? `Account menu for ${user.name}` : "Account menu"}
         className="flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-2 text-on-surface transition-colors hover:bg-surface-container-high focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <span
@@ -123,9 +126,8 @@ function AccountMenu({ user }) {
         >
           {initials(user.name) || <UserRound className="size-4" />}
         </span>
-        <span className="hidden max-w-24 truncate text-body-md sm:inline">{user.name}</span>
+        <span className="hidden max-w-24 truncate text-body-md lg:inline">{user.name}</span>
         <ChevronDown aria-hidden="true" className={`size-4 transition-transform ${open ? "rotate-180" : ""}`} />
-        <span className="sr-only">Account menu</span>
       </button>
 
       {open ? (

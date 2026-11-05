@@ -1,0 +1,188 @@
+name: CI
+
+# Pull requests and pushes to main. Nothing scheduled: a pipeline that runs
+# when nobody is looking is a pipeline whose failures nobody reads.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push to the same branch cancels the first. The only run worth
+# waiting for is the one for the newest commit.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Secrets that exist only for the length of a job. None of these are real,
+  # and none of them may ever become real: CI runs against a throwaway
+  # database, so a leaked value here is worth nothing.
+  JWT_SECRET: ci-only-jwt-secret-at-least-32-characters-long-xxxx
+  CREDENTIAL_ENCRYPTION_KEYS: ci1:Y2ktb25seS1rZXktbm90LWEtcmVhbC1zZWNyZXQhISE=
+  MOCK_PAYMENT_SECRET: mock-payment-secret
+  SMTP_HOST: ""
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Everything that needs no database. Fast, and the first thing to fail.
+  # ---------------------------------------------------------------------------
+  check:
+    name: Lint, unit tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The unit suite and the build both read validated config at import time,
+      # so a URL has to be present even though nothing connects to it.
+      DATABASE_URL: postgresql://unused:unused@127.0.0.1:5432/unused
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # The client is generated code and is not committed, so everything after
+      # this point depends on it existing.
+      - name: Generate the Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      # Regenerates the OpenAPI document and fails if it differs from the one
+      # committed. The document is the contract the mobile app will build
+      # against, so it drifting silently is worse than it being wrong loudly.
+      - name: OpenAPI is current
+        run: npm run docs:api:check
+
+      - name: Build
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # The end-to-end suites, against a real Postgres built from the migrations.
+  #
+  # This is the only place the migration chain is ever run from empty. The
+  # development database grew one migration at a time and can hide a chain
+  # that no longer applies to a fresh schema, which is exactly the failure
+  # that only shows up on the first real deploy.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: foodzone_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d foodzone_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # sslmode=disable because this Postgres is a container on the same host.
+      # Neon needs TLS; a local service container has no certificate to verify.
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/foodzone_ci?sslmode=disable
+      APP_URL: http://localhost:3100
+      CRON_SECRET: phase2-test-secret
+      E2E_CRON_SECRET: phase2-test-secret
+      E2E_MAIL: console
+      WORKER_IN_PROCESS: "false"
+      # The email suite reads verification codes out of the server's own log,
+      # so the server and the tests must agree on where it is.
+      E2E_LOG: ${{ github.workspace }}/e2e-server.log
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Deliberately *not* UTC.
+      #
+      # Neon runs UTC and so does this container by default, which hides a
+      # whole class of bug: `DateTime` columns are `timestamp without time
+      # zone` holding UTC, so any SQL that compares one against a real instant
+      # — `now()` above all — is only correct where the session zone happens to
+      # be UTC. A self-hosted Postgres takes the machine's zone, so the first
+      # place that bug would ever have shown up is a customer's own server.
+      #
+      # Asia/Karachi because that is where this system runs, and because +05:00
+      # with no daylight saving is a clean, constant offset: a failure here is
+      # a real timezone mistake rather than a seasonal flake.
+      - name: Make the database non-UTC
+        run: |
+          psql "$DATABASE_URL" -c "ALTER DATABASE foodzone_ci SET timezone = 'Asia/Karachi'"
+          # A second connection, because the setting only reaches new sessions —
+          # asked in the same one it would still answer UTC and prove nothing.
+          echo "sessions now open in: $(psql "$DATABASE_URL" -tAc 'SHOW timezone')"
+
+      - name: Apply migrations from empty
+        run: npx prisma migrate deploy
+
+      - name: Generate the Prisma client
+        run: npx prisma generate
+
+      - name: Seed
+        run: npm run db:seed
+
+      - name: Build
+        run: npm run build
+
+      # Started in the background with the project's own script, which sets the
+      # cron secret the suites expect and redirects to E2E_LOG. Hand-rolling
+      # this command is how the two drift apart.
+      - name: Start the server
+        run: |
+          npm run test:e2e:server &
+          # Waits on the server's own "Ready in" line rather than polling a
+          # URL: there is no unauthenticated health endpoint, and every real
+          # route would answer before the app had finished starting.
+          for i in $(seq 1 90); do
+            if grep -q "Ready in" "$E2E_LOG" 2>/dev/null; then
+              echo "server ready after ${i}s"
+              exit 0
+            fi
+            if grep -qE "EADDRINUSE|Error:" "$E2E_LOG" 2>/dev/null; then
+              echo "the server failed to start"; cat "$E2E_LOG"; exit 1
+            fi
+            sleep 1
+          done
+          echo "the server never came up"; cat "$E2E_LOG" 2>/dev/null || true; exit 1
+
+      # Runs every suite rather than stopping at the first failure, and
+      # decides what blocks. Four suites fail for reasons that predate this
+      # pipeline; they are listed in the script with what is wrong, and one of
+      # them starting to pass also fails the build so the list cannot rot.
+      - name: End-to-end suites
+        run: npm run test:e2e:ci
+
+      # The server log is where a failure explains itself. Without it a red
+      # run says only which assertion failed, not why.
+      - name: Server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-server-log
+          path: ${{ github.workspace }}/e2e-server.log
+          if-no-files-found: warn
+          retention-days: 7

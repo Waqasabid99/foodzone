@@ -151,9 +151,32 @@ function withHourLabels(hours) {
     }));
 }
 
-export async function listBranches({ search, isActive, limit = 20, cursor, includeState = false, channel = null }) {
+/**
+ * Narrows a query to the branches a `branchScope()` result covers.
+ *
+ * `{ all: false, ids: [] }` deliberately becomes `{ id: { in: [] } }` — a
+ * filter that matches nothing — because the alternative reading of "no branches
+ * listed" is "no filter", which would show everything to the one person who may
+ * see none of it.
+ */
+function scopeWhere(scope) {
+  if (!scope || (scope.all && !scope.except?.length)) return {};
+  if (scope.all) return { id: { notIn: scope.except } };
+  return { id: { in: scope.ids } };
+}
+
+export async function listBranches({
+  search,
+  isActive,
+  limit = 20,
+  cursor,
+  includeState = false,
+  channel = null,
+  scope = null,
+}) {
   const rows = await prisma.branch.findMany({
     where: {
+      ...scopeWhere(scope),
       ...(isActive !== undefined ? { isActive } : {}),
       ...(search
         ? {

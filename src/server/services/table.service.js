@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { ApiError, assertBranchAccess, cursorArgs, toPage } from "@/lib/api";
 import { withTransaction } from "@/server/utils/db";
+import { branchFilter } from "@/server/access/scope";
 
 /**
  * Restaurant tables.
@@ -23,20 +24,18 @@ const SELECT = {
 };
 
 /** Table id in, branch permission check done, branch id out. */
+/** A table at a branch the caller cannot work at answers not-found, not forbidden. */
 export async function assertTableAccess(principal, tableId, permissionKey) {
-  const table = await prisma.restaurantTable.findUnique({
-    where: { id: tableId },
-    select: { branchId: true },
-  });
-  if (!table) throw ApiError.notFound("Table not found");
-
-  assertBranchAccess(principal, table.branchId, permissionKey);
-  return table.branchId;
+  const { assertRecordAccess } = await import("@/server/ordering/access");
+  return assertRecordAccess(principal, "table", tableId, permissionKey);
 }
 
-export async function listTables({ branchId, area, isActive, search, limit = 50, cursor } = {}) {
+export async function listTables({ branchId, area, isActive, search, scope = null, limit = 50, cursor } = {}) {
+  const filter = branchFilter(scope);
+
   const rows = await prisma.restaurantTable.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(area ? { area } : {}),
       ...(isActive !== undefined ? { isActive } : {}),

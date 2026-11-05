@@ -1,6 +1,8 @@
 import { z } from "zod";
+import { fitsScale } from "@/lib/money-math";
 import { cuidSchema, phoneSchema } from "@/server/validation/schemas";
 import { moneySchema } from "@/server/validation/catalog.schemas";
+import { patchSchema } from "@/server/validation/patch";
 
 /**
  * Driver, delivery and payout request schemas.
@@ -49,10 +51,7 @@ export const createDriverSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
-export const updateDriverSchema = createDriverSchema
-  .partial()
-  .omit({ userId: true })
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateDriverSchema = patchSchema(createDriverSchema.omit({ userId: true }));
 
 /** Staff may set any status; the driver's own endpoint narrows this further. */
 export const setDriverStatusSchema = z.object({ status: driverStatusSchema });
@@ -109,8 +108,6 @@ export const unassignSchema = z
  */
 export const setDeliveryStatusSchema = z.object({
   status: deliveryStatusSchema,
-  handoverCode: z.string().trim().regex(/^\d{4,10}$/, "Enter the code the customer gives you").optional(),
-  proofImageUrl: z.url().max(2000).optional(),
   recipientName: z.string().trim().max(80).optional(),
   reason: z.string().trim().max(500).optional(),
   collectedCod: moneySchema.optional(),
@@ -137,7 +134,7 @@ export const generatePayoutSchema = z.object({
     .finite()
     .min(-1_000_000)
     .max(1_000_000)
-    .refine((value) => Number.isInteger(value * 10_000), "Supports at most 4 decimal places")
+    .refine((value) => fitsScale(value, 4), "Supports at most 4 decimal places")
     .optional(),
 });
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fitsScale } from "@/lib/money-math";
 import { cuidSchema } from "@/server/validation/schemas";
 
 /**
@@ -22,7 +23,7 @@ export const amountSchema = z
   .finite()
   .min(-999_999_999_999)
   .max(999_999_999_999)
-  .refine((value) => Number.isInteger(Math.round(value * 10_000)), "Supports at most 4 decimal places");
+  .refine((value) => fitsScale(value, 4), "Supports at most 4 decimal places");
 
 export const positiveAmountSchema = amountSchema.refine((value) => value > 0, "Must be greater than zero");
 export const nonNegativeAmountSchema = amountSchema.refine((value) => value >= 0, "Cannot be negative");

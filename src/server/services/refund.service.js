@@ -1,10 +1,13 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { getProvider } from "@/server/payments/providers";
+import { refundability } from "@/server/payments/refund-window";
+import { resolveProviderConfig } from "@/server/services/payment-provider.service";
 import { syncOrderPaymentState } from "@/server/services/payment.service";
 import { money } from "@/server/pricing/engine";
 import { enqueue } from "@/server/jobs/outbox";
@@ -31,6 +34,26 @@ import { enqueue } from "@/server/jobs/outbox";
  */
 
 const D = (value) => new Prisma.Decimal(value ?? 0);
+
+/**
+ * Whether the gateway will still take this one, and for how much longer.
+ *
+ * Read from the provider rather than hardcoded, because the window is a fact
+ * about that gateway: Safepay stops at 90 days, cash never does, and the next
+ * one will be different again.
+ */
+export function refundWindowFor(payment) {
+  let maxAgeDays = null;
+  try {
+    maxAgeDays = getProvider(payment?.provider).refundMaxAgeDays ?? null;
+  } catch {
+    // A payment taken through a provider that is no longer registered. Not a
+    // reason to block sending somebody their money back.
+    maxAgeDays = null;
+  }
+
+  return refundability({ capturedAt: payment?.capturedAt ?? null, maxAgeDays });
+}
 
 const SELECT = {
   id: true,
@@ -62,6 +85,7 @@ async function loadRefundablePayment(paymentId) {
       amount: true,
       refundedAmount: true,
       currency: true,
+      capturedAt: true,
     },
   });
   if (!payment) throw ApiError.notFound("Payment not found");
@@ -102,6 +126,17 @@ export async function requestRefund({ paymentId, amount = null, reason, actor = 
 
   if (available.lessThanOrEqualTo(0)) {
     throw ApiError.conflict("This payment has already been fully refunded");
+  }
+
+  // Refused at the point of asking as well as at approval. Raising a refund
+  // that can never be approved just leaves a row somebody has to explain to
+  // the customer later.
+  const window = refundWindowFor(payment);
+  if (!window.allowed) {
+    throw ApiError.conflict(`This payment can no longer be refunded through ${payment.provider}. ${window.reason}.`, {
+      lapsedAt: window.lapsesAt?.toISOString() ?? null,
+      settleAnotherWay: "Pay the customer back in cash or by transfer, and record it as an expense so the books still balance",
+    });
   }
 
   const requested = amount == null ? available : money(amount);
@@ -153,6 +188,41 @@ export async function rejectRefund({ refundId, reason = null, actor = null }) {
 }
 
 /**
+ * Which drawer a cash refund comes out of.
+ *
+ * The till the sale was rung on, while it is still open: the notes are
+ * physically in that drawer, and taking them from anywhere else leaves two
+ * tills wrong — the one that sold closes over, the one that paid closes short.
+ * Picking the most recently opened session did exactly that as soon as a second
+ * register was running.
+ *
+ * Once that session is closed its cash is counted and gone, so the money comes
+ * from wherever the person handing it over is standing: their own open drawer,
+ * or the branch's only open one. With several open and no way to tell, nothing
+ * is guessed — a movement in an arbitrary till is worse than none, because it
+ * reads as a real count.
+ */
+async function drawerToRefundFrom(tx, refund, actor) {
+  const open = (where) => tx.cashRegisterSession.findFirst({ where: { ...where, status: "OPEN" }, select: { id: true } });
+
+  const original = refund.payment.registerSessionId
+    ? await open({ id: refund.payment.registerSessionId })
+    : null;
+  if (original) return original;
+
+  const branchId = refund.payment.branchId;
+  const mine = actor?.userId ? await open({ branchId, openedById: actor.userId }) : null;
+  if (mine) return mine;
+
+  const atBranch = await tx.cashRegisterSession.findMany({
+    where: { branchId, status: "OPEN" },
+    select: { id: true },
+    take: 2,
+  });
+  return atBranch.length === 1 ? atBranch[0] : null;
+}
+
+/**
  * Approves a refund and sends it to the provider.
  *
  * The provider call sits **between** two transactions rather than inside one.
@@ -164,7 +234,15 @@ export async function rejectRefund({ refundId, reason = null, actor = null }) {
 export async function approveRefund({ refundId, actor = null, context = {} }) {
   const refund = await prisma.refund.findUnique({
     where: { id: refundId },
-    select: { ...SELECT, payment: { select: { id: true, provider: true, method: true, amount: true, status: true, refundedAmount: true, branchId: true } } },
+    select: {
+      ...SELECT,
+      payment: {
+        select: {
+          id: true, provider: true, method: true, amount: true, status: true,
+          refundedAmount: true, branchId: true, registerSessionId: true, capturedAt: true,
+        },
+      },
+    },
   });
   if (!refund) throw ApiError.notFound("Refund not found");
 
@@ -187,6 +265,21 @@ export async function approveRefund({ refundId, actor = null, context = {} }) {
     });
   }
 
+  /*
+   * Checked here rather than only at request time: a refund raised inside the
+   * window can sit awaiting approval until it is outside one. Refusing before
+   * the row is marked PROCESSING means nothing is left half-done, and the
+   * message carries the date so whoever reads it knows this is a hard limit
+   * at the gateway rather than a rule of ours.
+   */
+  const window = refundWindowFor(refund.payment);
+  if (!window.allowed) {
+    throw ApiError.conflict(`This payment can no longer be refunded through ${refund.payment.provider}. ${window.reason}.`, {
+      lapsedAt: window.lapsesAt?.toISOString() ?? null,
+      settleAnotherWay: "Pay the customer back in cash or by transfer, and record it as an expense so the books still balance",
+    });
+  }
+
   await prisma.refund.update({
     where: { id: refundId },
     data: { status: "PROCESSING", approvedById: actor?.userId ?? null, approvedAt: new Date() },
@@ -196,7 +289,14 @@ export async function approveRefund({ refundId, actor = null, context = {} }) {
 
   let result;
   try {
-    result = await adapter.refund({ payment: refund.payment, refund });
+    // Refunding money a gateway already took must keep working after that
+    // gateway has been switched off for new sales.
+    const { config, mode } = await resolveProviderConfig({
+      branchId: refund.payment.branchId,
+      provider: refund.payment.provider,
+      requireEnabled: false,
+    });
+    result = await adapter.refund({ payment: refund.payment, refund, config, mode });
   } catch (error) {
     const failed = await prisma.refund.update({
       where: { id: refundId },
@@ -237,11 +337,7 @@ export async function approveRefund({ refundId, actor = null, context = {} }) {
 
     // Cash out of the drawer is a movement, so the till still reconciles.
     if (["CASH", "CASH_ON_DELIVERY"].includes(refund.payment.method)) {
-      const session = await tx.cashRegisterSession.findFirst({
-        where: { branchId: refund.payment.branchId, status: "OPEN" },
-        select: { id: true },
-        orderBy: { openedAt: "desc" },
-      });
+      const session = await drawerToRefundFrom(tx, refund, actor);
       if (session) {
         await tx.cashMovement.create({
           data: {
@@ -278,11 +374,15 @@ export async function approveRefund({ refundId, actor = null, context = {} }) {
   return completed;
 }
 
-export async function listRefunds({ status, orderId, branchId, limit = 20, cursor } = {}) {
+export async function listRefunds({ status, orderId, branchId, scope = null, limit = 20, cursor } = {}) {
+  // A refund has no branch column; it is scoped through the payment it
+  // reverses, which is the only place the money's outlet is recorded.
+  const filter = branchFilter(scope);
   const rows = await prisma.refund.findMany({
     where: {
       ...(status ? { status } : {}),
       ...(orderId ? { orderId } : {}),
+      ...(filter ? { AND: [{ payment: { branchId: filter } }] } : {}),
       ...(branchId ? { payment: { branchId } } : {}),
     },
     select: {

@@ -2,6 +2,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { unassignSchema } from "@/server/validation/delivery.schemas";
 import { unassignDelivery } from "@/server/services/delivery.service";
+import { assertRecordAccess } from "@/server/delivery/access";
 
 export const POST = apiHandler(
   {
@@ -12,5 +13,8 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "delivery.unassign", entityType: "Delivery" },
   },
-  async ({ params, body }) => ok(await unassignDelivery({ deliveryId: params.id, reason: body?.reason ?? null })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "delivery", params.id, "deliveries.reassign");
+    return ok(await unassignDelivery({ deliveryId: params.id, reason: body?.reason ?? null }));
+  },
 );

@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { randomToken, verifySignature } from "@/server/utils/crypto";
 
 /**
@@ -22,12 +23,45 @@ import { randomToken, verifySignature } from "@/server/utils/crypto";
  */
 export const mockProvider = {
   name: "mock",
+  /** What a person should see. The registry key is an identifier, not a name. */
+  label: "Test gateway",
+  /** One line of customer-facing copy, shown under the option at checkout. */
+  description: "A fake gateway for development. It never moves money.",
+  signatureHeader: "x-mock-signature",
   supportsOnline: true,
   methods: ["CARD", "UPI", "NET_BANKING", "WALLET"],
 
-  /** The secret webhooks are signed with. */
-  secret() {
-    return process.env.MOCK_PAYMENT_SECRET ?? "mock-payment-secret";
+  /**
+   * Declared so the bring-your-own-credentials path has something to exercise
+   * end to end before a real gateway is configured — the same shape Safepay's
+   * webhook secret will have.
+   */
+  credentials: [
+    {
+      key: "webhookSecret",
+      label: "Webhook signing secret",
+      type: "string",
+      secret: true,
+      // Optional by design: `secret()` falls back to MOCK_PAYMENT_SECRET, so
+      // the fake gateway works before any branch has been configured. A real
+      // gateway has no such fallback and marks its fields required.
+      required: false,
+      schema: z.string().trim().min(8),
+      hint: "Used to verify that a callback really came from the gateway.",
+    },
+  ],
+
+  /**
+   * The secret webhooks are signed with.
+   *
+   * Per-branch config wins when there is any, so each outlet can hold its own
+   * credentials. The environment variable stays as a fallback for the e2e
+   * suite and for a developer with nothing configured — it is the deployment's
+   * secret, not a restaurant's, which is exactly the distinction the real
+   * gateways force us to make.
+   */
+  secret(config = null) {
+    return config?.webhookSecret ?? process.env.MOCK_PAYMENT_SECRET ?? "mock-payment-secret";
   },
 
   /**
@@ -94,10 +128,11 @@ export const mockProvider = {
    * formatting, so any signature checked against a re-encoded body is a
    * signature check that passes when it should fail.
    */
-  verifySignature({ rawBody, headers }) {
+  verifySignature({ rawBody, headers, config = null }) {
     const signature = headers?.["x-mock-signature"] ?? headers?.get?.("x-mock-signature");
     if (!signature) return false;
-    return verifySignature(rawBody, signature, this.secret());
+    // The branch's own secret when it has one, the deployment's otherwise.
+    return verifySignature(rawBody, signature, this.secret(config));
   },
 
   /** Normalises a callback into the shape the webhook service understands. */

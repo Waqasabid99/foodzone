@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { Prisma } from "@/generated/prisma";
 import { money } from "@/server/accounting/balance";
 import { quantity as q } from "@/server/inventory/uom";
@@ -29,10 +30,12 @@ function windowFor(from, to) {
  * Only completed orders count. A cancelled order is not a sale, and including
  * pending ones would make the report change as the evening went on.
  */
-export async function salesReport({ branchId = null, from = null, to = null, groupBy = "day" } = {}) {
+export async function salesReport({ branchId = null, from = null, to = null, groupBy = "day", scope = null } = {}) {
+  const filter = branchFilter(scope);
   const window = windowFor(from, to);
   const where = {
     status: "COMPLETED",
+    ...(filter ? { AND: [{ branchId: filter }] } : {}),
     ...(branchId ? { branchId } : {}),
     ...(from || to ? { completedAt: window } : {}),
   };
@@ -125,13 +128,15 @@ export async function salesReport({ branchId = null, from = null, to = null, gro
 }
 
 /** What actually sold, best first — the menu-mix half of menu engineering. */
-export async function productMixReport({ branchId = null, from = null, to = null, limit = 50 } = {}) {
+export async function productMixReport({ branchId = null, from = null, to = null, limit = 50, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const items = await prisma.orderItem.groupBy({
     by: ["variantId", "nameSnapshot"],
     where: {
       status: { not: "CANCELLED" },
       order: {
         status: "COMPLETED",
+        ...(filter ? { AND: [{ branchId: filter }] } : {}),
         ...(branchId ? { branchId } : {}),
         ...(from || to ? { completedAt: windowFor(from, to) } : {}),
       },
@@ -183,9 +188,13 @@ export async function productMixReport({ branchId = null, from = null, to = null
  * so this total and the Inventory account on the balance sheet are computed the
  * same way and can be compared without an argument about method.
  */
-export async function inventoryReport({ branchId = null } = {}) {
+export async function inventoryReport({ branchId = null, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const levels = await prisma.stockLevel.findMany({
-    where: { ...(branchId ? { location: { branchId } } : {}) },
+    where: {
+      ...(filter ? { AND: [{ location: { branchId: filter } }] } : {}),
+      ...(branchId ? { location: { branchId } } : {}),
+    },
     select: {
       quantity: true,
       reservedQuantity: true,
@@ -253,9 +262,11 @@ export async function inventoryReport({ branchId = null } = {}) {
  * how long the kitchen took — a delivery that was quick but late is still late
  * to the person waiting for it.
  */
-export async function deliveryReport({ branchId = null, from = null, to = null } = {}) {
+export async function deliveryReport({ branchId = null, from = null, to = null, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const deliveries = await prisma.delivery.findMany({
     where: {
+      ...(filter ? { AND: [{ order: { branchId: filter } }] } : {}),
       ...(branchId ? { order: { branchId } } : {}),
       ...(from || to ? { createdAt: windowFor(from, to) } : {}),
     },

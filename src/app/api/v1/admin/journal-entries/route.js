@@ -1,10 +1,11 @@
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { branchScope } from "@/lib/api/permissions";
 import { createJournalEntrySchema, listJournalEntriesSchema } from "@/server/validation/finance.schemas";
 import { createManualEntry, listJournalEntries } from "@/server/services/journal.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "journal_entries.read", query: listJournalEntriesSchema, branch: "query" },
-  async ({ query }) => ok(await listJournalEntries(query)),
+  async ({ query, auth }) => ok(await listJournalEntries({ ...query, scope: branchScope(auth, "journal_entries.read") })),
 );
 
 /**

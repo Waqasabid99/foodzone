@@ -109,7 +109,13 @@ model OutboxEvent {
   id          String    @id @default(cuid())
   eventType   String
   payload     Json
-  status      String    @default("PENDING") // PENDING | PROCESSING | DONE | FAILED
+  /// PENDING | PROCESSING | DONE | FAILED | BLOCKED
+  ///
+  /// BLOCKED is waiting for configuration rather than failed: a posting whose
+  /// date is in no accounting period becomes valid, unchanged, the moment
+  /// somebody opens the year. It is not a claim candidate, keeps its attempt
+  /// count, and is released when a fiscal year is created.
+  status      String    @default("PENDING")
   attempts    Int       @default(0)
   lastError   String?
   availableAt DateTime  @default(now())
@@ -117,4 +123,92 @@ model OutboxEvent {
   createdAt   DateTime  @default(now())
 
   @@index([status, availableAt])
+}
+
+/// A public page whose words the owner edits, not a developer.
+///
+/// About, Contact, the legal pages — the routes exist in code, the prose does
+/// not. Deliberately one editable body rather than a block builder: the thing
+/// these pages have in common is that somebody needs to correct a phone number
+/// or a refund window without a deploy, and nothing is served by making that a
+/// layout exercise.
+///
+/// Rows are seeded and edited, never created or deleted through the API. A
+/// slug is half of a route, so letting one be invented at runtime means a page
+/// that 404s because of a typo nobody can see.
+model ContentPage {
+  id       String @id @default(cuid())
+  /// The URL segment. Seeded, and never editable — see above.
+  slug     String @unique
+  title    String
+  /// Plain text. Blank lines separate paragraphs and a leading `## ` marks a
+  /// heading; there is no HTML, so nothing an editor types can break a page.
+  body     String
+  /// For the `<meta name="description">`. Falls back to the first paragraph.
+  summary  String?
+  /// Unpublished pages 404 rather than render empty, so a page can be prepared
+  /// before anybody is pointed at it.
+  isPublished Boolean @default(true)
+
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+
+  @@index([isPublished])
+}
+
+/// A hero banner on the home page: the shop's front window.
+///
+/// Authored, not derived. The headline and the artwork *are* the campaign —
+/// generating them from whatever happens to be discounted produces a window
+/// display nobody chose. This is the surface a chain's marketing team owns,
+/// and it is modelled as content for that reason.
+///
+/// Deliberately chain-wide, with no `branchId`. The home page is statically
+/// rendered and cached, and it is the one page where that matters most: the
+/// hero is the largest contentful paint on the site. Pinning a banner to an
+/// outlet would mean reading the branch cookie on the server, which makes the
+/// whole page dynamic for every visitor — a real cost paid on every request
+/// for a feature nobody has asked for. Per-branch banners can be added later,
+/// together with the decision to make the page dynamic.
+/// Which part of a banner's artwork must survive the crop.
+///
+/// The hero is a wide band and photography is not: a portrait shot dropped into
+/// it shows its middle third and nothing else. Rather than letterbox every
+/// banner for the sake of the occasional tall one, the editor says where the
+/// food is and the crop keeps that edge.
+enum HeroFocus {
+  TOP
+  CENTER
+  BOTTOM
+}
+
+model HeroSlide {
+  id       String  @id @default(cuid())
+  headline String
+  subtext  String?
+  /// The artwork. Null falls back to the same branded placeholder the rest of
+  /// the storefront uses, so a slide is never a blank rectangle.
+  imageUrl String?
+  /// Where the button goes. Validated as a path on this site — an arbitrary
+  /// URL in the front window is a phishing link somebody can set from the
+  /// dashboard.
+  /// Which edge of `imageUrl` the crop holds on to. Centre is right for most
+  /// photographs; a tall shot of a burger usually wants TOP.
+  focalPoint HeroFocus @default(CENTER)
+  ctaHref  String  @default("/menu")
+  ctaLabel String  @default("Order now")
+
+  /// Lowest first. Ties break on `createdAt`, so the order is always total.
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+  /// Optional campaign window. Null at either end means "no bound that side".
+  startsAt  DateTime?
+  endsAt    DateTime?
+
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
 }

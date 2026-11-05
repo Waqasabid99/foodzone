@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, assertCompanyWide, created, ok, RateLimits } from "@/lib/api";
 import { createUnitSchema, uomTypeSchema } from "@/server/validation/inventory.schemas";
 import { createUnit, listUnits } from "@/server/services/uom.service";
 
@@ -18,5 +18,10 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "uom.create", entityType: "UnitOfMeasure", entityId: ({ result }) => result?.id ?? null },
   },
-  async ({ body }) => created(await createUnit(body)),
+  async ({ body, auth }) => {
+    // Every branch measures in the same units; a conversion is not one
+    // outlet's to decide.
+    assertCompanyWide(auth, "units.manage");
+    return created(await createUnit(body));
+  },
 );

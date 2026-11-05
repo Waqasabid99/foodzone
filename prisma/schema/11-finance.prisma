@@ -101,6 +101,8 @@ model Account {
   expenseCategories ExpenseCategory[]
   billPayments      BillPayment[]
   methodMappings    PaymentMethodAccount[]
+  salaryComponents  EmployeeSalaryComponent[]
+  payslipLines      PayslipLine[]
 
   @@index([type])
   @@index([parentId])
@@ -141,7 +143,12 @@ model JournalEntry {
   entryNumber String            @unique
   branch      Branch?           @relation(fields: [branchId], references: [id], onDelete: SetNull)
   branchId    String?
-  period      AccountingPeriod? @relation(fields: [periodId], references: [id])
+  /// `Restrict`, not the default. A posted entry that loses its period does
+  /// not announce itself: it stays in the ledger, stays in the account
+  /// balances, and quietly drops out of every statement that is built by
+  /// period — which is all of them. Deleting a fiscal year with postings under
+  /// it therefore fails rather than silently orphaning the books.
+  period      AccountingPeriod? @relation(fields: [periodId], references: [id], onDelete: Restrict)
   periodId    String?
   entryDate   DateTime          @db.Date
   status      JournalStatus     @default(DRAFT)

@@ -1,4 +1,5 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { markCollectedSchema } from "@/server/validation/payment.schemas";
 import { markCollected } from "@/server/services/payment.service";
@@ -20,6 +21,8 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "payment.collect", entityType: "Payment" },
   },
-  async ({ params, body, auth }) =>
-    ok(await markCollected({ paymentId: params.id, registerSessionId: body?.registerSessionId ?? null, actor: auth })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "payment", params.id, "payments.mark_collected");
+    return ok(await markCollected({ paymentId: params.id, registerSessionId: body?.registerSessionId ?? null, actor: auth }));
+  },
 );

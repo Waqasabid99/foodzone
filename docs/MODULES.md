@@ -475,8 +475,54 @@ one it turns out to be.
 
 Postings need the fiscal calendar. A system with no `FiscalYear` covering a
 date accumulates business events that never reach the books, and
-`POST /admin/journal-entries/backfill` cannot help until the year exists. Create
-the fiscal year before going live, not after the first payroll.
+`POST /admin/journal-entries/backfill` cannot help until the year exists.
+
+`npm run db:seed` therefore opens the year covering today, with one period per
+month — **1 July to 30 June**, Pakistan's financial year. A client whose year
+differs sets `FISCAL_YEAR_START_MONTH` (1-12) *before the first seed*; changing
+it afterwards does not move years that already exist.
+
+### When the year runs out
+
+Nothing creates next year automatically, and that is deliberate: a year's shape
+is a business decision — a short transition year, a changed year end — and an
+auto-created wrong year is worse than none, because periods that have been
+posted into cannot be deleted (`JournalEntry.period` is `onDelete: Restrict`)
+and an overlapping year then blocks the correct one.
+
+Instead:
+
+* **A posting with no period is parked, not failed.** The outbox gives an event
+  eight attempts and then marks it FAILED for good, which would be the wrong
+  answer here — `postMissingEntries` can recover orders, payments, receipts and
+  production runs, but nothing recovers a wastage write-off, a refund, a cash
+  session or an expense. So that one refusal, marked with a reason code in
+  `accounting/posting-errors.js`, moves the event to **BLOCKED**: out of the
+  claim query, attempt count untouched, reason recorded. Creating a fiscal year
+  releases every blocked event, and the daily maintenance cycle sweeps as a
+  safety net. A lapsed calendar is therefore a delay, not a hole.
+* **The people who can open a year are warned.** The maintenance cycle warns at
+  60, 30 and 7 days, once per step rather than every morning, and daily once the
+  calendar has lapsed. It is addressed by the grant the create endpoint itself
+  checks (`accounting_periods.close`) — including super admins, who hold it by
+  flag and may have no role rows at all — and reports its *audience*, because a
+  fan-out that reaches nobody is the quietest way for a warning to fail.
+* **The form offers the next year.** The day after the latest year on file,
+  running twelve months, named from the month it starts in. It follows the books
+  rather than `FISCAL_YEAR_START_MONTH`, so a business that ran an odd year
+  keeps its own calendar, and every field stays editable.
+
+The dashboard carries the same notice, for the same people, because none of this
+has a symptom anywhere else: orders, payments and stock keep working when the
+calendar runs out, and the ledger is the only thing that stops.
+
+The seed never corrects a calendar that is already there. If a period covers
+today it is left alone whatever its shape, and if a year overlaps the one it
+would open but has no period for today, it reports that and creates nothing —
+overlapping years would make "which period does this date belong to" ambiguous,
+and a year with a hole in it is somebody's mistake to look at rather than a
+seed's to paper over. Each year after the first is created from the fiscal
+calendar screen; nothing creates next year automatically.
 
 ### Deferred from Phase 12
 

@@ -3,6 +3,8 @@ import "dotenv/config";
 import { PrismaClient } from "../src/generated/prisma/index.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { pgPoolOptions, warmUpDatabase } from "../src/lib/db-pool.js";
+import { PERMISSION_MODULES } from "../prisma/seeds/permissions.js";
+import { SYSTEM_ROLES } from "../prisma/seeds/roles.js";
 
 const BASE = process.env.E2E_BASE ?? "http://localhost:3100";
 const LOG = process.env.E2E_LOG ?? "/tmp/foodzone-e2e-server.log";
@@ -48,7 +50,50 @@ async function api(path, { method = "GET", body, token, headers = {}, ip } = {})
   return { status: res.status, body: json, headers: res.headers };
 }
 
-/** Codes are hashed in the database, so read them from the console mail driver. */
+/**
+ * Refuse to run against a server that can actually send mail.
+ *
+ * This phase reads verification codes out of the server log, and they are only
+ * there when the mailer falls back to its console driver — which it does when
+ * SMTP_HOST is unset. With real SMTP credentials in `.env` two things happen
+ * at once: the codes become invisible (so the suite fails for a reason that
+ * looks like a bug in authentication), and every run pushes a dozen messages
+ * at the provider under the project's own sending domain. Registrations,
+ * invites and password resets all mail somebody.
+ *
+ * So the suite stops instead. `npm run test:e2e:server` starts a server with
+ * SMTP blanked and exports E2E_MAIL=console; set that variable yourself if you
+ * started the server some other way with the console driver.
+ */
+function assertConsoleMailDriver() {
+  if (process.env.E2E_MAIL === "console") return;
+  if (!process.env.SMTP_HOST) return;
+  console.log(
+    [
+      "FAIL  phase 1 needs the console mail driver",
+      "",
+      `  SMTP_HOST is set to ${JSON.stringify(process.env.SMTP_HOST)} in .env, so the server under test`,
+      "  sends verification codes to the provider instead of printing them.",
+      "  This suite cannot read them, and the run would mail real messages.",
+      "",
+      "  Start the server with:  npm run test:e2e:server",
+      "  Then run the suite with: E2E_MAIL=console node tests/phase1.e2e.mjs",
+    ].join("\n"),
+  );
+  process.exit(1);
+}
+
+/**
+ * Codes are hashed in the database, so read them from the console mail driver.
+ *
+ * The log is JSON per line, so the message body arrives with its newlines
+ * escaped: a code sitting on its own line reads as `...account.\\n\\n915255\\n\\n`
+ * in the raw text. Searching that text for `\\b\\d{6}\\b` finds nothing, because the
+ * `n` of the escape is a word character and kills the boundary — which is why
+ * this used to read verification codes (they are in the subject line, next to
+ * a quote) but never invitation codes (body only). Decode the line first and
+ * search the real string.
+ */
 async function waitForCode(email, { timeoutMs = 8000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -56,14 +101,25 @@ async function waitForCode(email, { timeoutMs = 8000 } = {}) {
     const lines = log.split("\n");
     for (let i = lines.length - 1; i >= 0; i--) {
       if (!lines[i].includes("email (console driver") || !lines[i].includes(email)) continue;
-      const window = lines.slice(i, i + 8).join(" ");
-      const match = window.match(/\b(\d{6})\b/);
+      let entry = null;
+      try { entry = JSON.parse(lines[i]); } catch { entry = null; }
+      // `to` must match exactly: a substring hit on the raw line could have come
+      // from a different recipient mentioned in the same body.
+      if (!entry || entry.to !== email) break;
+      const match = `${entry.subject ?? ""}\n${entry.preview ?? ""}`.match(/\b(\d{6})\b/);
       if (match) return match[1];
       break;
     }
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error(`no emailed code found for ${email}`);
+  const log = fs.existsSync(LOG) ? fs.readFileSync(LOG, "utf8") : "";
+  if (log.includes("email sent")) {
+    throw new Error(
+      `no emailed code found for ${email} — the server logged "email sent", so it is on SMTP, not the console driver. ` +
+        "Restart it with npm run test:e2e:server.",
+    );
+  }
+  throw new Error(`no emailed code found for ${email} (log: ${LOG})`);
 }
 
 async function main() {
@@ -209,12 +265,32 @@ async function main() {
   const denied = await api("/admin/users", { token: custToken });
   check("a customer cannot list users", denied.status === 403 && Array.isArray(denied.body?.error?.details?.required), denied.body?.error);
 
-  const perms = await api("/admin/permissions", { token: adminToken });
-  check("permission catalogue is readable", perms.status === 200 && perms.body?.data?.total === 294, perms.body?.data?.total);
-  check("permissions are grouped by module", perms.body?.data?.modules?.length === 78, perms.body?.data?.modules?.length);
+  // Counted from the seed definition rather than written down here. A literal
+  // goes stale the first time somebody adds a permission, and then fails for a
+  // reason that has nothing to do with authentication.
+  const expectedModules = PERMISSION_MODULES.length;
+  const expectedPermissions = PERMISSION_MODULES.reduce((sum, m) => sum + m.actions.length, 0);
 
+  const perms = await api("/admin/permissions", { token: adminToken });
+  check("permission catalogue is readable", perms.status === 200 && perms.body?.data?.total === expectedPermissions, { got: perms.body?.data?.total, expected: expectedPermissions });
+  check("permissions are grouped by module", perms.body?.data?.modules?.length === expectedModules, { got: perms.body?.data?.modules?.length, expected: expectedModules });
+
+  // The two above compare the endpoint to the seed *file*. This one compares
+  // the database to it, so a catalogue that was edited without re-seeding is
+  // named as such instead of surfacing as a mystery count.
+  const seededPermissions = await prisma.permission.count();
+  check("the seeded catalogue matches the seed file", seededPermissions === expectedPermissions, { database: seededPermissions, seedFile: expectedPermissions, hint: "run npm run db:seed" });
+
+  // Counted from the seed, and admin-created roles are allowed on top. The
+  // literal 20 went stale the moment somebody made a role of their own, and
+  // then failed for a reason that has nothing to do with authentication.
   const roles = await api("/admin/roles", { token: adminToken });
-  check("roles list returns the 20 seeded roles", roles.status === 200 && roles.body.data.length === 20, roles.body?.data?.length);
+  const seededRoles = roles.body?.data?.filter((row) => row.isSystem !== false) ?? [];
+  check("roles list returns every seeded role", roles.status === 200 && seededRoles.length === SYSTEM_ROLES.length, {
+    seeded: seededRoles.length,
+    expected: SYSTEM_ROLES.length,
+    total: roles.body?.data?.length,
+  });
 
   const sysRole = roles.body.data.find((r) => r.key === "cashier");
   const editSystem = await api(`/admin/roles/${sysRole.id}`, { method: "PATCH", token: adminToken, body: { name: "Hacked" } });
@@ -387,10 +463,25 @@ async function cleanup() {
   await prisma.userPermissionOverride.deleteMany({ where: { userId: { in: ids } } });
   await prisma.userRoleAssignment.deleteMany({ where: { userId: { in: ids } } });
   await prisma.user.deleteMany({ where: { id: { in: ids } } });
+  // Audited against the role's id, not the actor's, so the user-keyed sweep
+  // above leaves it behind and the run reports itself dirty.
+  await prisma.auditLog.deleteMany({ where: { entityType: "Role", entityId: { in: [...createdRoleIds] } } });
   await prisma.rolePermission.deleteMany({ where: { roleId: { in: [...createdRoleIds] } } });
   await prisma.role.deleteMany({ where: { OR: [{ id: { in: [...createdRoleIds] } }, { key: { startsWith: "e2e-" } }] } });
 
-  const leftovers = {
+  return census();
+}
+
+/**
+ * What the suite must leave exactly as it found it.
+ *
+ * Measured rather than assumed: this phase used to assert zero users and
+ * twenty roles, which only held on a freshly reset database and turned every
+ * run against a working one into a spurious failure. The question worth asking
+ * is not "is the database empty" but "did this suite put it back".
+ */
+async function census() {
+  return {
     users: await prisma.user.count(),
     roles: await prisma.role.count(),
     audit: await prisma.auditLog.count(),
@@ -398,14 +489,51 @@ async function cleanup() {
     addresses: await prisma.address.count(),
     credentialTokens: await prisma.credentialToken.count(),
   };
-  console.log("\nDatabase after cleanup:", JSON.stringify(leftovers));
-  return leftovers;
 }
+
+/**
+ * What this suite left behind, counted by its own markers.
+ *
+ * Not a diff of global counts. This database is shared with a running
+ * application: the first version of this check compared totals before and
+ * after, and duly reported a leak when somebody moved a real order through
+ * its statuses while the suite happened to be running. A suite can only be
+ * held to the rows it could itself have created, so each count here is
+ * keyed to this run's own stamp.
+ */
+async function ownFootprint() {
+  const roleIds = [...createdRoleIds];
+  const userIds = [...createdUserIds];
+  const emailLike = `e2e-${stamp}-`;
+
+  return {
+    users: await prisma.user.count({ where: { email: { contains: emailLike } } }),
+    roles: await prisma.role.count({ where: { key: { startsWith: "e2e-" } } }),
+    addresses: await prisma.address.count({ where: { userId: { in: userIds } } }),
+    tokens: await prisma.refreshToken.count({ where: { userId: { in: userIds } } }),
+    credentialTokens: await prisma.credentialToken.count({ where: { userId: { in: userIds } } }),
+    audit: await prisma.auditLog.count({
+      where: {
+        OR: [
+          { actorId: { in: userIds } },
+          { entityId: { in: userIds } },
+          ...(roleIds.length ? [{ entityType: "Role", entityId: { in: roleIds } }] : []),
+        ],
+      },
+    }),
+  };
+}
+
+assertConsoleMailDriver();
+
+let baseline = null;
 
 try {
   // Wake the database before the first assertion, so a suspended compute
   // fails here rather than as a mystery timeout mid-suite.
   await warmUpDatabase(prisma);
+  baseline = await census();
+  console.log("Database before:", JSON.stringify(baseline));
   await main();
 } catch (error) {
   console.log("SUITE ERROR:", error.message, "\n", error.stack?.split("\n").slice(0, 4).join("\n"));
@@ -413,7 +541,12 @@ try {
 } finally {
   const leftovers = await cleanup();
   await prisma.$disconnect();
-  const clean = leftovers.users === 0 && leftovers.roles === 20 && leftovers.audit === 0 && leftovers.addresses === 0;
-  if (!clean) console.log("WARNING: database not back to baseline");
+  console.log("Database after cleanup:", JSON.stringify(leftovers));
+  const mine = await ownFootprint().catch(() => null);
+  const changes = mine
+    ? Object.entries(mine).filter(([, value]) => value > 0).map(([key, value]) => `${key}: ${value}`)
+    : ["could not measure what was left behind"];
+  const clean = changes.length === 0;
+  if (!clean) console.log("WARNING: this suite left rows behind:", changes.join(", "));
   process.exit(failures.length === 0 && clean ? 0 : 1);
 }

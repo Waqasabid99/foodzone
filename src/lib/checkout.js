@@ -193,7 +193,7 @@ export function parseTip(input) {
  * checking out from the app. Sending it back would only create a chance to send
  * a stale one.
  */
-export function checkoutPayload({ cart, signedIn, addressId, guest, guestCount, note, tipAmount }) {
+export function checkoutPayload({ cart, signedIn, addressId, guest, guestCount, note, tipAmount, tableId = null, payWith = null }) {
   const { needsAddress, needsContact, wantsGuestCount, acceptsTip } = checkoutRequirements({
     type: cart?.type,
     signedIn,
@@ -206,8 +206,14 @@ export function checkoutPayload({ cart, signedIn, addressId, guest, guestCount, 
     ...(cart?.type ? { type: cart.type } : {}),
     ...(needsAddress && addressId ? { addressId } : {}),
     ...(wantsGuestCount && guestCount ? { guestCount } : {}),
+    // Only on a dine-in order, and only from a scanned table code. Sending a
+    // stale table on a delivery would label it for a seat nobody is in.
+    ...(wantsGuestCount && tableId ? { tableId } : {}),
     ...(trimmedNote ? { customerNote: trimmedNote } : {}),
     tipAmount: acceptsTip ? (tipAmount ?? 0) : 0,
+    // Absent means settle in person, which stays the default. Only sent when
+    // the customer actually picked a gateway.
+    ...(payWith ? { payWith } : {}),
     ...(needsContact
       ? {
           guest: {

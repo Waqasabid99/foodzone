@@ -31,7 +31,13 @@ export async function createStation(data) {
   const clash = await prisma.kitchenStation.findUnique({ where: { code: data.code }, select: { id: true } });
   if (clash) throw ApiError.conflict(`A station with code "${data.code}" already exists`);
 
-  return prisma.kitchenStation.create({ data, select: SELECT });
+  // New stations go to the end of the list unless placed, rather than jumping
+  // above ones someone has already arranged.
+  const last = data.sortOrder === undefined ? await prisma.kitchenStation.aggregate({ _max: { sortOrder: true } }) : null;
+  return prisma.kitchenStation.create({
+    data: { ...data, sortOrder: data.sortOrder ?? (last._max.sortOrder ?? -1) + 1 },
+    select: SELECT,
+  });
 }
 
 export async function updateStation(id, data) {
@@ -47,6 +53,19 @@ export async function updateStation(id, data) {
   }
 
   return prisma.kitchenStation.update({ where: { id }, data, select: SELECT });
+}
+
+export async function reorderStations({ items }) {
+  const ids = items.map((item) => item.id);
+  const found = await prisma.kitchenStation.count({ where: { id: { in: ids } } });
+  if (found !== new Set(ids).size || found !== ids.length) {
+    throw ApiError.validation("One or more stations were not found");
+  }
+
+  await prisma.$transaction(
+    items.map((item) => prisma.kitchenStation.update({ where: { id: item.id }, data: { sortOrder: item.sortOrder } })),
+  );
+  return { updated: items.length };
 }
 
 /**

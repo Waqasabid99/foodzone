@@ -1,7 +1,7 @@
-import { apiHandler, can, ok, RateLimits } from "@/lib/api";
+import { apiHandler, ApiError, can, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { updateRecipeSchema } from "@/server/validation/production.schemas";
-import { deleteRecipe, getRecipe, updateRecipe } from "@/server/services/recipe.service";
+import { deleteRecipe, getRecipe, updateRecipe, withoutCosts } from "@/server/services/recipe.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "recipes.read", params: idParamSchema },
@@ -23,7 +23,14 @@ export const PATCH = apiHandler(
     body: updateRecipeSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => ok(await updateRecipe(params.id, body, auth)),
+  async ({ params, body, auth }) => {
+    // Labour and overhead are money: a writer who cannot see costs cannot set them.
+    if (!can(auth, "recipes.view_cost") && (body.laborCost != null || body.overheadCost != null)) {
+      throw ApiError.forbidden("You cannot set a recipe's costs", { required: ["recipes.view_cost"] });
+    }
+    const recipe = await updateRecipe(params.id, body, auth);
+    return ok(can(auth, "recipes.view_cost") ? recipe : withoutCosts(recipe));
+  },
 );
 
 export const DELETE = apiHandler(

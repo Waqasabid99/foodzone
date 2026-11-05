@@ -1,4 +1,5 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { assertAccountAccess, assertAccountBranch } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { updateAccountSchema } from "@/server/validation/finance.schemas";
 import { getAccount, updateAccount } from "@/server/services/account.service";
@@ -21,5 +22,10 @@ export const PATCH = apiHandler(
     body: updateAccountSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => ok(await updateAccount(params.id, body, auth)),
+  async ({ params, body, auth }) => {
+    await assertAccountAccess(auth, params.id, "accounts.update");
+    // Moving an account to a branch is itself a change at that branch.
+    if (body.branchId !== undefined) assertAccountBranch(auth, body.branchId, "accounts.update");
+    return ok(await updateAccount(params.id, body, auth));
+  },
 );

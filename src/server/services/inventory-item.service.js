@@ -3,6 +3,7 @@ import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { slugify } from "@/lib/slug";
+import { branchFilter, scopeWhere } from "@/server/inventory/access";
 
 /**
  * Inventory items — the things a restaurant physically holds.
@@ -46,12 +47,52 @@ const SELECT = {
   uom: { select: { id: true, code: true, name: true, type: true, precision: true } },
 };
 
-export async function listItems({ search, type, categoryId, isActive, lowStock, branchId, limit = 20, cursor } = {}) {
+/**
+ * Items that are low somewhere in view: none of it held at all, or any one
+ * location at or below the reorder level — the same per-location rule the
+ * Stock page and the reorder report use, so the three never disagree.
+ *
+ * Resolved to ids in SQL before paging. Filtering the page afterwards hands
+ * back a page of three rows with a cursor to more, which reads as "that is all
+ * of them" to anyone who does not click Next.
+ */
+async function lowItemIds({ branchId, scope }) {
+  const filter = branchFilter(scope);
+  const branchSql = [
+    branchId ? Prisma.sql`AND s."branchId" = ${branchId}` : Prisma.empty,
+    filter?.in ? Prisma.sql`AND s."branchId" = ANY(${filter.in}::text[])` : Prisma.empty,
+    filter?.notIn ? Prisma.sql`AND NOT (s."branchId" = ANY(${filter.notIn}::text[]))` : Prisma.empty,
+  ];
+
+  const rows = await prisma.$queryRaw(Prisma.sql`
+    SELECT i.id
+    FROM "InventoryItem" i
+    LEFT JOIN (
+      "StockLevel" l JOIN "StockLocation" s ON s.id = l."locationId" ${branchSql[0]} ${branchSql[1]} ${branchSql[2]}
+    ) ON l."itemId" = i.id
+    WHERE i."reorderLevel" IS NOT NULL
+    GROUP BY i.id, i."reorderLevel"
+    HAVING COUNT(l.id) = 0 OR BOOL_OR(l.quantity <= i."reorderLevel")
+  `);
+  return rows.map((row) => row.id);
+}
+
+/** Stock levels limited to the branches in view. */
+function levelWhere({ branchId, scope }) {
+  const filter = branchFilter(scope);
+  if (!branchId && !filter) return {};
+  return { location: { branchId: { ...(branchId ? { equals: branchId } : {}), ...filter } } };
+}
+
+export async function listItems({ search, type, categoryId, isActive, lowStock, branchId, scope = null, limit = 20, cursor } = {}) {
+  const lowIds = lowStock ? await lowItemIds({ branchId, scope }) : null;
+
   const rows = await prisma.inventoryItem.findMany({
     where: {
       ...(type ? { type } : {}),
       ...(categoryId ? { categoryId } : {}),
       ...(isActive !== undefined ? { isActive } : {}),
+      ...(lowIds ? { id: { in: lowIds } } : {}),
       ...(search
         ? {
             OR: [
@@ -65,11 +106,11 @@ export async function listItems({ search, type, categoryId, isActive, lowStock, 
     select: {
       ...SELECT,
       stockLevels: {
-        where: branchId ? { location: { branchId } } : {},
+        where: levelWhere({ branchId, scope }),
         select: { quantity: true, reservedQuantity: true, locationId: true },
       },
     },
-    orderBy: { name: "asc" },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
     ...cursorArgs(cursor, limit),
   });
 
@@ -77,48 +118,67 @@ export async function listItems({ search, type, categoryId, isActive, lowStock, 
 
   const items = page.items.map(({ stockLevels, ...item }) => {
     const onHand = stockLevels.reduce((total, level) => total.plus(D(level.quantity)), D(0));
-    return {
-      ...item,
-      onHand,
-      // Answered here rather than filtered in SQL, because "low" is a
-      // comparison between two columns across a join.
-      isLow: item.reorderLevel != null && onHand.lessThanOrEqualTo(D(item.reorderLevel)),
-    };
+    return { ...item, onHand, isLow: isLowSomewhere(item.reorderLevel, stockLevels) };
   });
 
-  return { ...page, items: lowStock ? items.filter((item) => item.isLow) : items };
+  return { ...page, items };
 }
 
-export async function getItem(id) {
+/**
+ * One item, with its stock where the caller can see it.
+ *
+ * The item itself is company-wide; the quantities are not. A manager at one
+ * outlet sees their own shelves, not how much the other branches are holding.
+ */
+export async function getItem(id, { scope = null } = {}) {
+  const inScope = scopeWhere(scope, (branchId) => ({ location: { branchId } }));
   const item = await prisma.inventoryItem.findUnique({
     where: { id },
     select: {
       ...SELECT,
       stockLevels: {
+        where: inScope,
         select: {
           quantity: true,
           reservedQuantity: true,
-          location: { select: { id: true, name: true, code: true, branchId: true } },
+          updatedAt: true,
+          location: { select: { id: true, name: true, code: true, branchId: true, branch: { select: { name: true } } } },
         },
+        orderBy: { location: { name: "asc" } },
       },
       batches: {
-        where: { status: "ACTIVE" },
+        where: { status: { in: ["ACTIVE", "QUARANTINED", "EXPIRED"] }, remainingQuantity: { gt: 0 }, ...inScope },
         select: {
           id: true,
           batchNumber: true,
           remainingQuantity: true,
           unitCost: true,
           expiryDate: true,
+          status: true,
           locationId: true,
+          location: { select: { name: true } },
         },
-        orderBy: { expiryDate: "asc" },
+        orderBy: [{ expiryDate: "asc" }, { receivedAt: "asc" }],
       },
+      _count: { select: { movements: true, recipeIngredients: true } },
     },
   });
   if (!item) throw ApiError.notFound("Inventory item not found");
 
   const onHand = item.stockLevels.reduce((total, level) => total.plus(D(level.quantity)), D(0));
-  return { ...item, onHand, stockValue: onHand.times(D(item.averageCost)) };
+  return {
+    ...item,
+    onHand,
+    isLow: isLowSomewhere(item.reorderLevel, item.stockLevels),
+    stockValue: onHand.times(D(item.averageCost)),
+  };
+}
+
+/** See `lowItemIds`: none held, or any location at or below the level. */
+export function isLowSomewhere(reorderLevel, levels) {
+  if (reorderLevel == null) return false;
+  if (!levels.length) return true;
+  return levels.some((level) => D(level.quantity).lessThanOrEqualTo(D(reorderLevel)));
 }
 
 async function assertReferencesExist({ uomId, categoryId, taxGroupId }) {
@@ -248,9 +308,13 @@ const LOCATION_SELECT = {
   isActive: true,
 };
 
-export async function listLocations({ branchId, isActive } = {}) {
+export async function listLocations({ branchId, isActive, scope = null } = {}) {
   return prisma.stockLocation.findMany({
-    where: { ...(branchId ? { branchId } : {}), ...(isActive !== undefined ? { isActive } : {}) },
+    where: {
+      ...(branchId ? { branchId } : {}),
+      ...(isActive !== undefined ? { isActive } : {}),
+      ...(branchFilter(scope) ? { AND: [{ branchId: branchFilter(scope) }] } : {}),
+    },
     select: { ...LOCATION_SELECT, _count: { select: { levels: true } } },
     orderBy: [{ branchId: "asc" }, { name: "asc" }],
   });

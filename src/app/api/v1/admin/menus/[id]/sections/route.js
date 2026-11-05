@@ -2,6 +2,7 @@ import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { createSectionSchema } from "@/server/validation/catalog.schemas";
 import { assertMenuAccess, createSection, listSections } from "@/server/services/menu.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 export const GET = apiHandler(
   { auth: true, permissions: "menus.read", params: idParamSchema },
@@ -19,6 +20,7 @@ export const POST = apiHandler(
     body: createSectionSchema,
     rateLimit: RateLimits.write,
     audit: { action: "menu_section.create", entityType: "MenuSection" },
+    invalidates: [CacheTag.MENUS],
   },
   async ({ auth, params, body }) => {
     await assertMenuAccess(auth, params.id, "menus.update");

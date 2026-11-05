@@ -1,5 +1,6 @@
 import Link from "next/link";
-import FoodImage from "@/components/ui/FoodImage";
+import HeroCarousel from "@/components/home/HeroCarousel";
+import HeroBackdrop, { HERO_BODY, HERO_FRAME } from "@/components/home/HeroBackdrop";
 
 /**
  * The hero.
@@ -7,23 +8,26 @@ import FoodImage from "@/components/ui/FoodImage";
  * Text sits on top of photography, so it carries its own scrim rather than
  * trusting the image: the gradient guarantees the contrast the headline needs
  * whatever product photo ends up behind it, including a bright one.
+ *
+ * Two versions of the same shape. With banners scheduled, it is the shop's
+ * front window and the words are whatever marketing wrote. With none, it falls
+ * back to the standard opening below — which is the honest default, because a
+ * shop with no campaign running should say what it is rather than advertise an
+ * offer that does not exist.
+ *
+ * **Server-rendered either way.** This is the largest contentful paint on the
+ * site, and the home page is statically cached; loading the banner in the
+ * browser would trade the one measurement that matters for a feature that does
+ * not need it.
  */
-export default function Hero({ imageUrl = null }) {
-  return (
-    <section className="relative isolate overflow-hidden rounded-banner">
-      <div className="absolute inset-0 -z-10">
-        <FoodImage
-          src={imageUrl}
-          alt=""
-          priority
-          sizes="(max-width: 1280px) 100vw, 1280px"
-          className="size-full"
-        />
-        {/* Left-weighted so the copy stays legible while the food stays visible. */}
-        <div className="absolute inset-0 bg-gradient-to-r from-black/85 via-black/60 to-black/20" />
-      </div>
+export default function Hero({ slides = [], imageUrl = null }) {
+  if (slides.length) return <HeroCarousel slides={slides} />;
 
-      <div className="max-w-xl px-6 py-20 sm:px-10 md:py-28">
+  return (
+    <section className={HERO_FRAME}>
+      <HeroBackdrop src={imageUrl} priority />
+
+      <div className={HERO_BODY}>
         <h1 className="font-display text-headline-lg-mobile leading-none md:text-display-lg">
           <span className="block text-primary-container">SIZZLE</span>
           <span className="block text-white">&amp; SNAP</span>

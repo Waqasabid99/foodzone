@@ -13,8 +13,17 @@
  */
 export const cashProvider = {
   name: "cash",
+  /** What a person should see. The registry key is an identifier, not a name. */
+  label: "Cash",
   supportsOnline: false,
   methods: ["CASH", "CASH_ON_DELIVERY", "CARD", "BANK_TRANSFER", "AGGREGATOR", "OTHER"],
+
+  /**
+   * Nothing to authenticate against, so nothing to configure. Declared as an
+   * empty list rather than left off, because "this gateway needs no setup" and
+   * "somebody forgot to declare its fields" must not look the same.
+   */
+  credentials: [],
 
   /**
    * There is nothing to create. The payment row is the record; it stays PENDING

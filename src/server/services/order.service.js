@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, assertBranchAccess, can, cursorArgs, toPage } from "@/lib/api";
 import { withTransaction } from "@/server/utils/db";
 import { enqueue } from "@/server/jobs/outbox";
+import { branchFilter } from "@/server/access/scope";
 
 /**
  * The order lifecycle.
@@ -102,6 +103,10 @@ const ITEM_SELECT = {
   status: true,
   stationId: true,
   parentItemId: true,
+  // Which round of the meal, so a bill reads as the meal it was rather than
+  // one flat list with the coffee at the bottom.
+  course: true,
+  firedAt: true,
   preparedAt: true,
   cancelledAt: true,
   cancelReason: true,
@@ -141,6 +146,11 @@ const ORDER_SELECT = {
   customerNote: true,
   kitchenNote: true,
   cancelReason: true,
+  setAsideAt: true,
+  setAsideById: true,
+  setAsideReason: true,
+  billRequestedAt: true,
+  billRequestedById: true,
   externalRef: true,
   placedAt: true,
   confirmedAt: true,
@@ -154,14 +164,14 @@ const ORDER_SELECT = {
 
 const DETAIL_SELECT = {
   ...ORDER_SELECT,
-  items: { select: ITEM_SELECT, orderBy: { id: "asc" } },
+  items: { select: ITEM_SELECT, orderBy: [{ course: "asc" }, { id: "asc" }] },
   taxLines: { select: { id: true, name: true, rate: true, taxableAmount: true, amount: true } },
   discounts: { select: { id: true, source: true, label: true, amount: true, reason: true } },
   statusHistory: {
     select: { id: true, fromStatus: true, toStatus: true, note: true, changedById: true, createdAt: true },
     orderBy: { createdAt: "asc" },
   },
-  invoice: { select: { id: true, invoiceNumber: true, issuedAt: true, isVoid: true, totalAmount: true } },
+  invoice: { select: { id: true, invoiceNumber: true, issuedAt: true, isVoid: true, voidReason: true, totalAmount: true } },
 };
 
 /**
@@ -204,11 +214,19 @@ export async function listOrders({
   search,
   from,
   to,
+  scope = null,
   limit = 20,
   cursor,
 } = {}) {
+  // Without this an unfiltered request hands every branch's customers — names,
+  // phone numbers and what they spent — to anyone holding `orders.read`
+  // anywhere. `orders.read_all_branches` is the opt-in; see
+  // src/server/ordering/access.js.
+  const filter = branchFilter(scope);
+
   const rows = await prisma.order.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(userId ? { userId } : {}),
       ...(status ? { status: Array.isArray(status) ? { in: status } : status } : {}),
@@ -307,17 +325,17 @@ export async function trackOrder({ orderNumber, userId = null, phone = null }) {
 }
 
 /** Order id in, branch permission check done, branch id out. */
+/**
+ * Whether the caller may touch one order.
+ *
+ * Delegates so the rule lives in one place: out of scope answers not-found
+ * rather than forbidden, because confirming that an order exists at another
+ * outlet — with a real customer behind it — is itself a disclosure. The
+ * `orders.read_all_branches` bypass is honoured there.
+ */
 export async function assertOrderAccess(principal, orderId, permissionKey) {
-  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { branchId: true } });
-  if (!order) throw ApiError.notFound("Order not found");
-
-  // A regional manager with `orders.read_all_branches` is not pinned to one.
-  if (permissionKey === "orders.read" && can(principal, "orders.read_all_branches")) {
-    return order.branchId;
-  }
-
-  assertBranchAccess(principal, order.branchId, permissionKey);
-  return order.branchId;
+  const { assertOrderAccess: check } = await import("@/server/ordering/access");
+  return check(principal, orderId, permissionKey);
 }
 
 // --- transitions ------------------------------------------------------------
@@ -452,6 +470,95 @@ export async function updateOrderNotes({ orderId, kitchenNote, customerNote }) {
   });
 
   return getOrder(orderId);
+}
+
+/**
+ * The table has asked for the bill.
+ *
+ * A waiter does not take the money here: they tell the till that table six is
+ * ready to pay, and whoever is on the register settles it. That is the shape
+ * most restaurants with a central till actually run, and it is the reason the
+ * waiter role holds `orders.request_bill` and not `payments.capture` — the
+ * person carrying plates is not the person the cash is counted against.
+ *
+ * Not a status, for the same reason setting a ticket aside is not: nothing
+ * about the order changes. The kitchen is unaffected, the food is unaffected,
+ * the total is unaffected. The only new fact is that somebody is sitting there
+ * waiting, and that fact belongs in front of the till rather than in the state
+ * machine.
+ *
+ * Idempotent on purpose. A waiter walking past a table twice taps it twice,
+ * and the second tap must not move the queue position of a table that has
+ * already been waiting ten minutes.
+ */
+export async function requestBill({ orderId, actorId = null, at = new Date() }) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, status: true, paymentState: true, billRequestedAt: true, orderNumber: true },
+  });
+  if (!order) throw ApiError.notFound("Order not found");
+  if (TERMINAL_STATUSES.includes(order.status)) {
+    throw ApiError.conflict("That order is already closed");
+  }
+  if (order.paymentState === "PAID") {
+    throw ApiError.conflict("That bill is already settled");
+  }
+  if (order.billRequestedAt) return getOrder(orderId);
+
+  await prisma.order.update({
+    where: { id: orderId },
+    data: { billRequestedAt: at, billRequestedById: actorId },
+  });
+
+  // The till may not be looking at the screen. This is the event that makes a
+  // waiter's tap reach a person.
+  await enqueue({ eventType: "order.bill_requested", payload: { orderId } });
+
+  return getOrder(orderId);
+}
+
+/** Takes a table back off the till's list — asked by mistake, or settled. */
+export async function clearBillRequest({ orderId }) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, billRequestedAt: true },
+  });
+  if (!order) throw ApiError.notFound("Order not found");
+  if (!order.billRequestedAt) return getOrder(orderId);
+
+  await prisma.order.update({
+    where: { id: orderId },
+    data: { billRequestedAt: null, billRequestedById: null },
+  });
+
+  return getOrder(orderId);
+}
+
+/**
+ * Tables waiting to pay, oldest first.
+ *
+ * Oldest first because that is the queue: a table that asked eight minutes ago
+ * is a table watching the room for somebody to catch the eye of.
+ */
+export async function billRequests({ branchId, scope = null, limit = 50 }) {
+  const filter = branchFilter(scope);
+
+  return prisma.order.findMany({
+    where: {
+      ...(branchId ? { branchId } : {}),
+      billRequestedAt: { not: null },
+      status: { notIn: TERMINAL_STATUSES },
+      paymentState: { not: "PAID" },
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
+    },
+    select: {
+      id: true, orderNumber: true, type: true, status: true, grandTotal: true,
+      currency: true, billRequestedAt: true, billRequestedById: true,
+      table: { select: { name: true } },
+    },
+    orderBy: [{ billRequestedAt: "asc" }],
+    take: limit,
+  });
 }
 
 export { ORDER_SELECT, DETAIL_SELECT, shapeOrder, nestComboLines };

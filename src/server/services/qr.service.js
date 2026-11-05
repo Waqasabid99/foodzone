@@ -1,9 +1,11 @@
 import QRCode from "qrcode";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 import { ApiError, assertBranchAccess, cursorArgs, toPage } from "@/lib/api";
 import { shortCode } from "@/server/utils/crypto";
 import { env } from "@/lib/env";
 import { getBranchMenu } from "@/server/services/menu.service";
+import { branchFilter } from "@/server/access/scope";
 
 /**
  * Printable QR codes and what happens when one is scanned.
@@ -63,13 +65,10 @@ function shape(row) {
   return { ...row, url: qrUrl(row.code) };
 }
 
-/** QR id in, branch permission check done, branch id out. */
+/** A code at a branch the caller cannot work at answers not-found, not forbidden. */
 export async function assertQrAccess(principal, qrCodeId, permissionKey) {
-  const qr = await prisma.qrCode.findUnique({ where: { id: qrCodeId }, select: { branchId: true } });
-  if (!qr) throw ApiError.notFound("QR code not found");
-
-  assertBranchAccess(principal, qr.branchId, permissionKey);
-  return qr.branchId;
+  const { assertRecordAccess } = await import("@/server/ordering/access");
+  return assertRecordAccess(principal, "qrCode", qrCodeId, permissionKey);
 }
 
 /**
@@ -179,9 +178,12 @@ async function resolveTarget({ branchId, targetType, menuId, tableId, categoryId
 
 // --- CRUD -------------------------------------------------------------------
 
-export async function listQrCodes({ branchId, targetType, tableId, isActive, limit = 50, cursor } = {}) {
+export async function listQrCodes({ branchId, targetType, tableId, isActive, scope = null, limit = 50, cursor } = {}) {
+  const filter = branchFilter(scope);
+
   const rows = await prisma.qrCode.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(targetType ? { targetType } : {}),
       ...(tableId ? { tableId } : {}),
@@ -446,8 +448,21 @@ export async function qrAnalytics({ qrCodeId, from, to }) {
     ...(to ? { lte: to } : {}),
   };
   const where = { qrCodeId, ...(from || to ? { scannedAt: window } : {}) };
-  // The raw query below binds these directly, and Prisma rejects `undefined`
-  // in a parameter position — an absent bound is an explicit NULL.
+  /*
+   * The raw query below binds these directly, and Prisma rejects `undefined`
+   * in a parameter position — an absent bound is an explicit NULL.
+   *
+   * The `::timestamptz` casts are safe on a non-UTC server, which is worth
+   * recording because they do not look it. `scannedAt` is `timestamp without
+   * time zone` holding UTC, so Postgres reinterprets it in the session's zone
+   * to make the comparison — but it reinterprets the bound parameter exactly
+   * the same way, and the two shifts cancel. Checked on a database running
+   * Asia/Karachi: the chart agrees with the headline, which phase 4 asserts.
+   *
+   * What is *not* safe is comparing this column against `now()`, which is a
+   * real absolute instant and so shifts only one side of the comparison. See
+   * the outbox claim query for where that bit.
+   */
   const fromParam = from ?? null;
   const toParam = to ?? null;
 
@@ -456,14 +471,14 @@ export async function qrAnalytics({ qrCodeId, from, to }) {
     prisma.qrScan.findMany({ where: { ...where, sessionId: { not: null } }, distinct: ["sessionId"], select: { sessionId: true } }),
     // Grouped in SQL rather than pulled into memory: a busy code accumulates
     // tens of thousands of scans and the chart only needs one row per day.
-    prisma.$queryRaw`
+    prisma.$queryRaw(Prisma.sql`
       SELECT date_trunc('day', "scannedAt")::date AS day, count(*)::int AS scans
       FROM "QrScan"
       WHERE "qrCodeId" = ${qrCodeId}
         AND (${fromParam}::timestamptz IS NULL OR "scannedAt" >= ${fromParam}::timestamptz)
         AND (${toParam}::timestamptz IS NULL OR "scannedAt" <= ${toParam}::timestamptz)
       GROUP BY 1 ORDER BY 1 ASC
-    `,
+    `),
     prisma.qrScan.findMany({
       where,
       select: { id: true, sessionId: true, userId: true, scannedAt: true },

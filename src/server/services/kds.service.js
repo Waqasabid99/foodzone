@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/api";
 import { withTransaction } from "@/server/utils/db";
 import { changeOrderStatus } from "@/server/services/order.service";
+import { recordAudit } from "@/server/utils/audit";
 
 /**
  * The kitchen display.
@@ -45,6 +46,10 @@ export async function stationQueue({ branchId, stationId = null, includeReady = 
     where: {
       branchId,
       status: { in: includeReady ? ACTIVE_ORDER_STATUSES : ["CONFIRMED", "PREPARING"] },
+      // A ticket the kitchen has set aside is off their board until somebody
+      // decides what happens to it. The order is untouched and still owed —
+      // this is a view, not a state.
+      setAsideAt: null,
     },
     select: {
       id: true,
@@ -72,6 +77,10 @@ export async function stationQueue({ branchId, stationId = null, includeReady = 
           notes: true,
           status: true,
           stationId: true,
+          course: true,
+          firedAt: true,
+          // Named, so a line on the unfiltered board says where it is made.
+          station: { select: { name: true } },
           preparedAt: true,
           modifiers: { select: { groupNameSnapshot: true, nameSnapshot: true, quantity: true } },
           children: { select: { id: true, nameSnapshot: true, quantity: true, status: true } },
@@ -87,16 +96,149 @@ export async function stationQueue({ branchId, stationId = null, includeReady = 
   const now = Date.now();
 
   return orders
-    .map((order) => ({
-      ...order,
+    .flatMap((order) =>
       // An unrouted item (no station) shows everywhere rather than nowhere.
-      items: stationId
-        ? order.items.filter((item) => item.stationId === stationId || item.stationId === null)
-        : order.items,
-      waitingMinutes: Math.floor((now - new Date(order.placedAt).getTime()) / 60_000),
-      isLate: order.promisedAt ? new Date(order.promisedAt).getTime() < now : false,
+      asTickets(
+        order,
+        stationId
+          ? order.items.filter((item) => item.stationId === stationId || item.stationId === null)
+          : order.items,
+        now,
+      ),
+    )
+    .filter((ticket) => ticket.items.length > 0)
+    // Oldest first again, across courses: a second round fired ten minutes ago
+    // belongs behind the ticket that has been up for twenty, not behind every
+    // line of the order it happens to share a bill with.
+    .sort((a, b) => a.firedAt - b.firedAt);
+}
+
+/**
+ * One ticket per course.
+ *
+ * A round ordered later is its own piece of work with its own clock. Hanging
+ * it on the original ticket would reopen something the kitchen had finished
+ * and paint it with that ticket's age — so a table ordering two coffees after
+ * an hour-long meal would appear as an hour-late ticket, and the one signal a
+ * kitchen screen exists to give is destroyed by the most ordinary thing a
+ * customer does.
+ *
+ * The later course inherits the *window* the order was promised, not its
+ * deadline: whatever prep time the kitchen was given at the start, it gets
+ * again from the moment the round is fired.
+ */
+function asTickets(order, items, now) {
+  const byCourse = new Map();
+  for (const item of items) {
+    const course = item.course ?? 1;
+    if (!byCourse.has(course)) byCourse.set(course, []);
+    byCourse.get(course).push(item);
+  }
+
+  const placed = new Date(order.placedAt).getTime();
+  const window = order.promisedAt ? new Date(order.promisedAt).getTime() - placed : null;
+
+  return [...byCourse.entries()].map(([course, courseItems]) => {
+    const firedAt = course === 1 ? placed : firedFor(courseItems, placed);
+    const promisedAt = course === 1 ? order.promisedAt : window != null ? new Date(firedAt + window) : null;
+
+    return {
+      ...order,
+      // Unique per ticket rather than per order, so the board can key on it and
+      // a bump names the round it meant.
+      ticketId: `${order.id}:${course}`,
+      course,
+      items: courseItems,
+      firedAt,
+      promisedAt,
+      waitingMinutes: Math.floor((now - firedAt) / 60_000),
+      isLate: promisedAt ? new Date(promisedAt).getTime() < now : false,
+    };
+  });
+}
+
+/** When a later round went up — the earliest of its lines, or the order itself. */
+function firedFor(items, fallback) {
+  const times = items.map((item) => (item.firedAt ? new Date(item.firedAt).getTime() : fallback));
+  return times.length ? Math.min(...times) : fallback;
+}
+
+/**
+ * What is cooked and waiting to be carried out, by table.
+ *
+ * The pass, not the stove. A waiter's question is the opposite of a cook's:
+ * not "what do I make next" but "what is standing under the heat lamp and
+ * whose table does it belong to". The board answers the first and was being
+ * handed to waiters for want of anything else, which is why they were being
+ * shown station filters and a "Start it" button for a fryer they do not work.
+ *
+ * Oldest first, because food that has been ready longest is the food going
+ * cold.
+ */
+export async function readyToRun({ branchId, limit = 50 }) {
+  const items = await prisma.orderItem.findMany({
+    where: {
+      status: "READY",
+      parentItemId: null,
+      order: {
+        branchId,
+        status: { in: ACTIVE_ORDER_STATUSES },
+        setAsideAt: null,
+      },
+    },
+    select: {
+      id: true,
+      nameSnapshot: true,
+      quantity: true,
+      notes: true,
+      course: true,
+      preparedAt: true,
+      modifiers: { select: { nameSnapshot: true } },
+      children: { select: { id: true, nameSnapshot: true, quantity: true } },
+      order: {
+        select: {
+          id: true,
+          orderNumber: true,
+          type: true,
+          placedAt: true,
+          table: { select: { id: true, name: true, area: true } },
+        },
+      },
+    },
+    orderBy: [{ preparedAt: "asc" }],
+    take: limit,
+  });
+
+  const now = Date.now();
+  const runs = new Map();
+
+  for (const item of items) {
+    // Grouped by round, not by order: a starter standing on the pass and a
+    // dessert that has just come up are two trips, and merging them would have
+    // the waiter carry the cold one.
+    const key = `${item.order.id}:${item.course ?? 1}`;
+    if (!runs.has(key)) {
+      runs.set(key, {
+        ticketId: key,
+        course: item.course ?? 1,
+        order: item.order,
+        items: [],
+        readyAt: item.preparedAt,
+      });
+    }
+
+    const run = runs.get(key);
+    run.items.push(item);
+    // The oldest plate on the tray is what the clock should show.
+    if (item.preparedAt && (!run.readyAt || item.preparedAt < run.readyAt)) run.readyAt = item.preparedAt;
+  }
+
+  return [...runs.values()]
+    .map((run) => ({
+      ...run,
+      waitingMinutes: run.readyAt ? Math.floor((now - new Date(run.readyAt).getTime()) / 60_000) : 0,
     }))
-    .filter((order) => order.items.length > 0);
+    .sort((a, b) => b.waitingMinutes - a.waitingMinutes);
 }
 
 /**
@@ -194,10 +336,42 @@ async function advanceOrderFromItems({ orderId, actorId }) {
   return order.status;
 }
 
-/** Bumps a whole ticket at once — the button a chef actually presses. */
-export async function bumpOrder({ orderId, status = "READY", actorId = null }) {
+/**
+ * Bumps a ticket at once — the button a chef actually presses.
+ *
+ * `stationId` narrows it to that station's lines, and the board always sends
+ * the station it is filtered to. It has to: a cook looking at the grill's
+ * board sees the grill's lines, and a button on that screen can only honestly
+ * mean the lines on that screen. Without the narrowing, the grill finishing a
+ * burger marked the pizza ready too and sent the whole order out to be run.
+ *
+ * `course` narrows it the same way and for the same reason: the board draws
+ * one ticket per round, so the button on a round can only mean that round's
+ * lines. Without it a cook clearing a table's coffees would mark the main
+ * course ready as well — food that has not been made.
+ *
+ * The order's own status still follows the items rather than the button —
+ * `setItemStatus` moves it to READY only once nothing is outstanding — so a
+ * station bumping its own lines leaves the order preparing until the last
+ * station bumps theirs, which is what "ready" is supposed to mean.
+ */
+export async function bumpOrder({ orderId, status = "READY", stationId = null, course = null, actorId = null }) {
   const items = await prisma.orderItem.findMany({
-    where: { orderId, parentItemId: null, status: { in: ACTIVE_ITEM_STATUSES } },
+    where: {
+      orderId,
+      parentItemId: null,
+      // Only the lines that can actually reach the target. Handing a tray to a
+      // table means the READY lines on it; starting or finishing a round means
+      // the ones still outstanding. Asking for the outstanding set either way
+      // meant the pass's "hand it over" button matched nothing at all.
+      status: { in: status === "SERVED" ? ["READY"] : ACTIVE_ITEM_STATUSES },
+      // The same set the station's board draws: its own lines, plus anything
+      // unrouted, which shows on every board rather than on none. Matching the
+      // screen exactly is the point — a button that covers a different set
+      // from the one in front of you is how this went wrong in the first place.
+      ...(stationId ? { OR: [{ stationId }, { stationId: null }] } : {}),
+      ...(course ? { course } : {}),
+    },
     select: { id: true, status: true },
   });
 
@@ -209,6 +383,96 @@ export async function bumpOrder({ orderId, status = "READY", actorId = null }) {
 
   const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
   return { orderId, bumped: items.length, orderStatus: order?.status ?? null };
+}
+
+/**
+ * Takes a stuck ticket off the kitchen's board.
+ *
+ * Deliberately not a status change and deliberately not automatic. A clock
+ * cannot tell an abandoned order from a kitchen that is three hours behind,
+ * and the hours when tickets get oldest are exactly the hours when hiding
+ * work is most dangerous — so a person decides, and that person has to say
+ * why. The order stays live, stays owed, and tells the customer nothing.
+ *
+ * What it is NOT allowed to do is disappear. Setting a ticket aside hands it
+ * to whoever runs the till: the reason is on the order, the count is on their
+ * overview, and either they send it back or they cancel the sale.
+ */
+export async function setAsideTicket({ orderId, reason, actorId = null }) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, branchId: true, status: true, orderNumber: true, setAsideAt: true },
+  });
+  if (!order) throw ApiError.notFound("Order not found");
+  if (order.setAsideAt) return { orderId, alreadySetAside: true };
+
+  if (!ACTIVE_ORDER_STATUSES.includes(order.status)) {
+    throw ApiError.conflict(`A ${order.status.toLowerCase()} order is not on the board`, { status: order.status });
+  }
+
+  const updated = await prisma.order.update({
+    where: { id: orderId },
+    data: { setAsideAt: new Date(), setAsideById: actorId, setAsideReason: reason },
+    select: { id: true, setAsideAt: true, setAsideReason: true },
+  });
+
+  await recordAudit({
+    actorId,
+    branchId: order.branchId,
+    action: "kds.set_aside",
+    entityType: "Order",
+    entityId: orderId,
+    changes: { reason },
+  });
+
+  return { orderId, setAsideAt: updated.setAsideAt, reason: updated.setAsideReason };
+}
+
+/** Puts it back on the board. The counterpart every kitchen display has. */
+export async function recallTicket({ orderId, actorId = null }) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, branchId: true, setAsideAt: true },
+  });
+  if (!order) throw ApiError.notFound("Order not found");
+  if (!order.setAsideAt) return { orderId, recalled: false };
+
+  await prisma.order.update({
+    where: { id: orderId },
+    data: { setAsideAt: null, setAsideById: null, setAsideReason: null },
+  });
+
+  await recordAudit({
+    actorId,
+    branchId: order.branchId,
+    action: "kds.recall",
+    entityType: "Order",
+    entityId: orderId,
+  });
+
+  return { orderId, recalled: true };
+}
+
+/** Tickets waiting on somebody at the till, newest first. */
+export async function setAsideTickets({ branchId, limit = 50 }) {
+  return prisma.order.findMany({
+    where: { branchId, setAsideAt: { not: null }, status: { in: ACTIVE_ORDER_STATUSES } },
+    select: {
+      id: true,
+      orderNumber: true,
+      type: true,
+      status: true,
+      placedAt: true,
+      grandTotal: true,
+      currency: true,
+      setAsideAt: true,
+      setAsideById: true,
+      setAsideReason: true,
+      table: { select: { name: true } },
+    },
+    orderBy: { setAsideAt: "desc" },
+    take: limit,
+  });
 }
 
 /** How the kitchen is doing right now — the number on the wall. */

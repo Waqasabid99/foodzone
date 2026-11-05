@@ -1,4 +1,5 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { reconcileSessionSchema } from "@/server/validation/payment.schemas";
 import { reconcileSession } from "@/server/services/register.service";
@@ -17,6 +18,8 @@ export const POST = apiHandler(
     body: reconcileSessionSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) =>
-    ok(await reconcileSession({ sessionId: params.id, notes: body?.notes ?? null, actor: auth })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "registerSession", params.id, "cash_registers.reconcile");
+    return ok(await reconcileSession({ sessionId: params.id, notes: body?.notes ?? null, actor: auth }));
+  },
 );

@@ -2,6 +2,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { writeOffBatchSchema } from "@/server/validation/inventory.schemas";
 import { writeOffBatch } from "@/server/services/stock.service";
+import { assertRecordAccess } from "@/server/inventory/access";
 
 /**
  * Writes a batch off entirely.
@@ -19,5 +20,8 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "stock_batch.write_off", entityType: "StockBatch" },
   },
-  async ({ params, body, auth }) => ok(await writeOffBatch({ batchId: params.id, ...body, actor: auth })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "batch", params.id, "stock_batches.write_off");
+    return ok(await writeOffBatch({ batchId: params.id, ...body, actor: auth }));
+  },
 );

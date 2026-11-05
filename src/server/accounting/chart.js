@@ -28,6 +28,7 @@ export const ACCOUNTS = {
   BANK: "1200",
   CARD_CLEARING: "1250",
   ACCOUNTS_RECEIVABLE: "1300",
+  EMPLOYEE_ADVANCES: "1350",
   INVENTORY: "1400",
   WORK_IN_PROGRESS: "1450",
 
@@ -35,12 +36,14 @@ export const ACCOUNTS = {
   ACCOUNTS_PAYABLE: "2100",
   TAX_PAYABLE: "2200",
   SALARIES_PAYABLE: "2300",
+  EMPLOYEE_DEDUCTIONS_PAYABLE: "2320",
   TIPS_PAYABLE: "2350",
   DRIVER_PAYABLE: "2400",
   GOODS_RECEIVED_NOT_INVOICED: "2450",
   CUSTOMER_CREDIT: "2500",
 
   // --- equity --------------------------------------------------------------
+  OPENING_BALANCE_EQUITY: "3050",
   OWNERS_CAPITAL: "3100",
   RETAINED_EARNINGS: "3900",
 
@@ -85,6 +88,15 @@ export const STANDARD_CHART = [
     description: "Money a provider has taken from the customer but not yet settled to the bank",
   },
   { code: "1300", name: "Accounts receivable", type: "ASSET", normalBalance: "DEBIT", subType: "Receivable", parentCode: "1000" },
+  {
+    code: "1350",
+    name: "Employee advances",
+    type: "ASSET",
+    normalBalance: "DEBIT",
+    subType: "Receivable",
+    parentCode: "1000",
+    description: "Money advanced to staff, recovered from later wages",
+  },
   { code: "1400", name: "Inventory", type: "ASSET", normalBalance: "DEBIT", subType: "Inventory", parentCode: "1000" },
   {
     code: "1450",
@@ -101,6 +113,15 @@ export const STANDARD_CHART = [
   { code: "2100", name: "Accounts payable", type: "LIABILITY", normalBalance: "CREDIT", subType: "Payable", parentCode: "2000" },
   { code: "2200", name: "Tax payable", type: "LIABILITY", normalBalance: "CREDIT", subType: "Tax", parentCode: "2000" },
   { code: "2300", name: "Salaries payable", type: "LIABILITY", normalBalance: "CREDIT", subType: "Payable", parentCode: "2000" },
+  {
+    code: "2320",
+    name: "Employee deductions payable",
+    type: "LIABILITY",
+    normalBalance: "CREDIT",
+    subType: "Payable",
+    parentCode: "2000",
+    description: "Withheld from wages and owed to somebody else, where no more specific account is set on the component",
+  },
   {
     code: "2350",
     name: "Tips payable",
@@ -133,6 +154,15 @@ export const STANDARD_CHART = [
 
   // --- equity --------------------------------------------------------------
   { code: "3000", name: "Equity", type: "EQUITY", normalBalance: "CREDIT" },
+  {
+    code: "3050",
+    name: "Opening balance equity",
+    type: "EQUITY",
+    normalBalance: "CREDIT",
+    parentCode: "3000",
+    description:
+      "The other side of balances brought in when the books started, such as opening stock. An accountant clears it into owner's capital once the opening position is complete.",
+  },
   { code: "3100", name: "Owner's capital", type: "EQUITY", normalBalance: "CREDIT", parentCode: "3000" },
   { code: "3900", name: "Retained earnings", type: "EQUITY", normalBalance: "CREDIT", parentCode: "3000" },
 

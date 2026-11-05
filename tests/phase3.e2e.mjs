@@ -549,21 +549,21 @@ async function main() {
   const badWindow = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: "Broken", type: "DINE_IN", startMinute: 900 },
+    body: { branchId, isActive: true, name: "Broken", type: "DINE_IN", startMinute: 900 },
   });
   check("a half-defined time window is rejected", badWindow.status === 400, badWindow.body?.error);
 
   const backwards = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: "Backwards", type: "DINE_IN", startMinute: 900, endMinute: 600 },
+    body: { branchId, isActive: true, name: "Backwards", type: "DINE_IN", startMinute: 900, endMinute: 600 },
   });
   check("a window that ends before it starts is rejected", backwards.status === 400, backwards.body?.error);
 
   const allDay = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: `All day ${stamp}`, type: "DINE_IN", isDefault: true },
+    body: { branchId, isActive: true, name: `All day ${stamp}`, type: "DINE_IN", isDefault: true },
   });
   check("a menu is created", allDay.status === 201 && allDay.body.data.isDefault === true, allDay.body);
   const allDayId = allDay.body.data.id;
@@ -571,7 +571,7 @@ async function main() {
   const secondDefault = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: `Also default ${stamp}`, type: "DINE_IN", isDefault: true },
+    body: { branchId, isActive: true, name: `Also default ${stamp}`, type: "DINE_IN", isDefault: true },
   });
   const secondDefaultId = secondDefault.body.data.id;
   const firstAfter = await api(`/admin/menus/${allDayId}`, { token: adminToken });
@@ -580,7 +580,7 @@ async function main() {
   const deliveryMenu = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: `Delivery ${stamp}`, type: "DELIVERY", isDefault: true },
+    body: { branchId, isActive: true, name: `Delivery ${stamp}`, type: "DELIVERY", isDefault: true },
   });
   const deliveryId = deliveryMenu.body.data.id;
   check("a menu of another type keeps its own default", deliveryMenu.body?.data?.isDefault === true, deliveryMenu.body);
@@ -757,6 +757,7 @@ async function main() {
     token: adminToken,
     body: {
       branchId,
+      isActive: true,
       name: `Lunch ${stamp}`,
       type: "DINE_IN",
       startMinute: Math.max(0, local.minutes - 30),

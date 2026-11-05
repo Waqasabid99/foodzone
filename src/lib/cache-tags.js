@@ -24,4 +24,6 @@ export const CacheTag = {
   MENUS: "menus",
   /// The outlet list — names, addresses, opening hours.
   BRANCHES: "branches",
+  /// About, Contact and the legal pages — prose the owner edits.
+  CONTENT_PAGES: "content-pages",
 };

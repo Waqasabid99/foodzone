@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { assertTaxAccess } from "@/server/finance/access";
 import { createTaxGroupSchema } from "@/server/validation/pricing.schemas";
 import { createTaxGroup, listTaxGroups } from "@/server/services/tax.service";
 
@@ -18,5 +19,8 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "tax_group.create", entityType: "TaxGroup", entityId: ({ result }) => result?.id ?? null },
   },
-  async ({ body }) => created(await createTaxGroup(body)),
+  async ({ body, auth }) => {
+    assertTaxAccess(auth);
+    return created(await createTaxGroup(body));
+  },
 );

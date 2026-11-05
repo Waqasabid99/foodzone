@@ -72,8 +72,11 @@ export function canSelectMore(group, selections, optionId) {
  * charged — this exists so the button can show a number before the round trip,
  * not so the browser can decide what anything costs.
  */
-export function previewTotal({ basePrice, groups, selectionsByGroup, quantity = 1 }) {
-  let unit = Number(basePrice) || 0;
+export function previewTotal({ basePrice, groups, selectionsByGroup, quantity = 1, extra = 0 }) {
+  // `extra` is anything priced outside the modifier groups — today the combo
+  // slots. Taken per unit, before the quantity multiplies, because that is
+  // what it is: part of what one of these costs.
+  let unit = (Number(basePrice) || 0) + (Number(extra) || 0);
 
   for (const group of groups) {
     const selections = selectionsByGroup[group.id] ?? {};

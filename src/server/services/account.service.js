@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { recordAudit } from "@/server/utils/audit";
@@ -280,8 +281,15 @@ export async function setAccountActive(id, isActive, actor = null) {
  * The drill-down behind every figure in a statement: a number in a report is
  * only trustworthy if you can click it and see the entries that make it up.
  */
-export async function accountLedger({ id, from = null, to = null, limit = 100 }) {
+export async function accountLedger({ id, from = null, to = null, limit = 100, scope = null }) {
   const account = await loadAccount(id);
+
+  // The drill-down behind a statement figure, so it is cut the same way the
+  // statement was. Without this a manager who can only see their own outlet's
+  // P&L could open the account behind any line on it and read every branch's
+  // movements, which is the same disclosure by a longer route.
+  const filter = branchFilter(scope);
+  const branches = filter ? { branchId: filter } : {};
 
   const window =
     from || to
@@ -290,17 +298,17 @@ export async function accountLedger({ id, from = null, to = null, limit = 100 })
 
   const [aggregate, opening, lines] = await Promise.all([
     prisma.journalLine.aggregate({
-      where: { accountId: id, entry: { status: "POSTED", ...window } },
+      where: { accountId: id, entry: { status: "POSTED", ...branches, ...window } },
       _sum: { debit: true, credit: true },
     }),
     from
       ? prisma.journalLine.aggregate({
-          where: { accountId: id, entry: { status: "POSTED", entryDate: { lt: new Date(from) } } },
+          where: { accountId: id, entry: { status: "POSTED", ...branches, entryDate: { lt: new Date(from) } } },
           _sum: { debit: true, credit: true },
         })
       : Promise.resolve({ _sum: { debit: 0, credit: 0 } }),
     prisma.journalLine.findMany({
-      where: { accountId: id, entry: { status: "POSTED", ...window } },
+      where: { accountId: id, entry: { status: "POSTED", ...branches, ...window } },
       select: {
         id: true,
         debit: true,

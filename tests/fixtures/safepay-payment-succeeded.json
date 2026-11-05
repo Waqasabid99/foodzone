@@ -1,0 +1,8 @@
+{
+  "note": "A REAL Safepay sandbox payment callback (PKR 150.00 paid by card), captured 2026-11-03, with the merchant key, payer email and endpoint host scrubbed, then re-signed with the throwaway secret below. This is the v2.0.0 envelope a genuine payment produces, and it differs completely from the event the dashboard's test button sends: top-level evt_ token, dotted type, state TRACKER_ENDED, and amounts as INTEGERS IN MINOR UNITS (15000 = PKR 150.00). The signature covers the whole payload, not just `data`.",
+  "secret": "fixture-webhook-secret-not-real",
+  "signatureHeader": "x-sfpy-signature",
+  "signature": "94468be4df9d909ce4404e005ee16d5c82ef1719bcc4feb9330b03593b1808fc5c86c28144b69598f71e6b2410b4c9fc00863cf2fbc6507346c4a20b8b54993d",
+  "contentType": "application/json",
+  "bodyText": "{\"token\":\"evt_d83ef6a9-3ca6-4f5d-a29d-2584eb89ba76\",\"version\":\"2.0.0\",\"merchant_api_key\":\"sec_00000000-0000-4000-8000-000000000000\",\"type\":\"payment.succeeded\",\"endpoint\":\"https://example.test/api/v1/webhooks/payments/safepay/br_fixture\",\"data\":{\"tracker\":\"track_22610780-f2ec-442c-b6f7-d9b9c9f397a0\",\"intent\":\"CYBERSOURCE\",\"state\":\"TRACKER_ENDED\",\"net\":14050,\"fee\":950,\"customer_email\":\"payer@example.com\",\"amount\":15000,\"currency\":\"PKR\",\"metadata\":{\"order_id\":\"FZ-LIVE-TEST-001\",\"source\":\"foodzone\"},\"charged_at\":{\"seconds\":1793722553,\"nanos\":612012968}},\"created_at\":{\"seconds\":1793722553,\"nanos\":922718268}}"
+}

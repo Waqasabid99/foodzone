@@ -5,7 +5,7 @@ import { deleteRule, getRule, updateRule } from "@/server/services/creator-commi
 
 export const GET = apiHandler(
   { auth: true, permissions: "creator_commission_rules.read", params: idParamSchema },
-  async ({ params }) => ok(await getRule(params.id)),
+  async ({ params, auth }) => ok(await getRule(params.id, { principal: auth })),
 );
 
 /** Safe to edit after it has paid: earnings snapshot what they were paid under. */

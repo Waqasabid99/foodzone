@@ -1,6 +1,7 @@
 import { apiHandler, created, RateLimits } from "@/lib/api";
 import { manualPunchSchema } from "@/server/validation/hr.schemas";
 import { addManualPunch } from "@/server/services/punch.service";
+import { assertRecordAccess } from "@/server/hr/access";
 
 /**
  * A punch typed by a supervisor.
@@ -16,5 +17,8 @@ export const POST = apiHandler(
     body: manualPunchSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ body, auth }) => created(await addManualPunch({ ...body, actor: auth })),
+  async ({ body, auth }) => {
+    await assertRecordAccess(auth, "employee", body.employeeId, "attendance_punches.create_manual");
+    return created(await addManualPunch({ ...body, actor: auth }));
+  },
 );

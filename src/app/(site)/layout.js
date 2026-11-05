@@ -12,7 +12,7 @@ import { getFooterCategories } from "@/server/content/categories";
  * prerendered underneath it.
  */
 export default async function SiteLayout({ children }) {
-  const [{ storeName, tagline, socials }, branches, categories] = await Promise.all([
+  const [{ storeName, tagline, socials, currency }, branches, categories] = await Promise.all([
     getSiteIdentity(),
     getPublicBranches(),
     getFooterCategories(),
@@ -20,7 +20,7 @@ export default async function SiteLayout({ children }) {
 
   return (
     <div className="flex min-h-full flex-col">
-      <Header storeName={storeName} branches={branches} />
+      <Header storeName={storeName} branches={branches} currency={currency} />
       <main className="flex-1">{children}</main>
       <Footer
         storeName={storeName}

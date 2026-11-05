@@ -51,7 +51,27 @@ export const comboSelectionSchema = z.object({
   groupId: cuidSchema,
   productId: cuidSchema,
   variantId: cuidSchema.nullish(),
-  quantity: z.number().int().min(1).max(20).default(1),
+  /**
+   * How many portions this choice is worth, when the client is overriding.
+   *
+   * Deliberately optional rather than `.default(1)`. The catalog already says
+   * what one of these is — a "2 burgers" slot option carries `quantity: 2` —
+   * and a default here silently replaced that with 1 before the service ever
+   * saw it, so a two-portion option could never satisfy the two-portion slot
+   * it was built for. It failed as `Choose at least 2 from "Burgers"`, which
+   * reads like a customer mistake rather than a dropped field.
+   */
+  quantity: z.number().int().min(1).max(20).optional(),
+  /**
+   * How the chosen item is made — "no onions" on the burger inside a meal.
+   *
+   * The same shape a line's own modifiers take, because a combo choice is a
+   * product and is resolved against its own attached groups. Undeclared, this
+   * field was silently dropped before it reached the service, which is the
+   * quiet kind of failure: the order looks accepted and the kitchen never
+   * hears about it.
+   */
+  modifiers: z.array(modifierSelectionSchema).max(30).default([]),
 });
 
 // --- cart -------------------------------------------------------------------
@@ -66,6 +86,18 @@ export const addCartItemSchema = z.object({
   /** Adding from a branch page sets the cart's context in the same call. */
   branchId: cuidSchema.optional(),
   type: orderTypeSchema.optional(),
+  /**
+   * Where this add-to-cart came from, when it came from a creator's video.
+   *
+   * Pressing add-to-cart on a video is the *only* thing that creates an
+   * attribution — watching one never does — so without these the creator
+   * programme earns nothing from the website or the app at all. The service
+   * has always handled them; they were missing here, and an undeclared field
+   * is stripped before it ever arrives, which made that branch unreachable.
+   */
+  creatorVideoId: cuidSchema.optional(),
+  creatorSurface: z.enum(["PRODUCT_PAGE", "VIDEO_FEED", "SHARE_LINK", "SEARCH", "HOME", "QR_MENU"]).optional(),
+  creatorShareLinkId: cuidSchema.optional(),
 });
 
 export const updateCartItemSchema = z
@@ -106,6 +138,15 @@ export const checkoutSchema = z.object({
    * what it is worth is computed server-side from the live rules.
    */
   couponCode: couponCodeSchema.optional(),
+  /**
+   * Which gateway the customer chose to pay with, now.
+   *
+   * Absent means "settle in person" — at the counter or at the door — which
+   * stays the default. Only the gateway's *name* is accepted, and the service
+   * checks it against the ones this branch actually switched on, so a name a
+   * customer invents cannot conjure a payment route.
+   */
+  payWith: z.string().trim().min(2).max(40).optional(),
 });
 
 export const quoteSchema = z.object({
@@ -211,8 +252,49 @@ export const itemStatusSchema = z.object({
   reason: z.string().trim().max(300).nullish(),
 });
 
+/**
+ * Bumping a ticket.
+ *
+ * `stationId` scopes it to one station's lines. Without it the grill, looking
+ * at a board filtered to the grill and showing a single burger, marked the
+ * pizza still in the oven ready as well — and took the whole order to READY
+ * with it. The button said "All ready" and meant every line on the order, not
+ * every line on the screen.
+ */
 export const bumpSchema = z.object({
-  status: z.enum(["PREPARING", "READY"]).default("READY"),
+  /**
+   * SERVED is here because the pass bumps too. A waiter carrying a tray out is
+   * doing to a round exactly what a cook does when they finish it — clearing
+   * every line on one ticket in one tap — and giving that its own endpoint
+   * would be two implementations of one idea.
+   */
+  status: z.enum(["PREPARING", "READY", "SERVED"]).default("READY"),
+  stationId: cuidSchema.nullish(),
+  /** Which round of the meal. Absent means the whole order, as it always did. */
+  course: z.number().int().min(1).max(50).nullish(),
+});
+
+/**
+ * A second round, added to an order that is already on a table.
+ *
+ * The same line shape the counter sends when it takes the order in the first
+ * place — a round added later is not a different kind of sale, and giving it
+ * its own shape would be two parsers for one thing to keep in step.
+ */
+export const addCourseSchema = z.object({
+  items: quoteSchema.shape.items,
+});
+
+/**
+ * Setting a ticket aside.
+ *
+ * The reason is required and has a floor, because the whole value of this is
+ * that the next person knows what they are looking at. "Walked off" and
+ * "duplicate of 0042" lead to different decisions; an empty string leads to a
+ * phone call.
+ */
+export const setAsideSchema = z.object({
+  reason: z.string().trim().min(3, "Say what is wrong with it").max(300),
 });
 
 export const branchQuerySchema = z.object({ branchId: cuidSchema });
@@ -252,6 +334,8 @@ export const moderateReviewSchema = z.object({
 export const reviewQuerySchema = z.object({
   status: z.enum(["PENDING", "PUBLISHED", "REJECTED"]).optional(),
   productId: cuidSchema.optional(),
+  branchId: cuidSchema.optional(),
+  search: z.string().trim().min(1).max(100).optional(),
   rating: z.coerce.number().int().min(1).max(5).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   cursor: z.string().min(1).optional(),

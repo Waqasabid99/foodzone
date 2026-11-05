@@ -171,7 +171,7 @@ async function main() {
     token: adminToken,
     // DINE_IN is the menu type both DELIVERY and PICKUP fall back to when a
     // branch publishes only one menu, which is what most restaurants do.
-    body: { branchId, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
+    body: { branchId, isActive: true, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
   });
   const menuId = menu.body.data.id;
   await api(`/admin/menus/${menuId}/items`, { method: "POST", token: adminToken, body: { productId: burgerId } });

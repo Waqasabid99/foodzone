@@ -2,6 +2,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { closePurchaseOrderSchema } from "@/server/validation/inventory.schemas";
 import { cancelPurchaseOrder } from "@/server/services/purchase-order.service";
+import { assertRecordAccess } from "@/server/purchasing/access";
 
 /**
  * Cancels an order.
@@ -18,6 +19,8 @@ export const POST = apiHandler(
     body: closePurchaseOrderSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) =>
-    ok(await cancelPurchaseOrder(params.id, { reason: body?.reason ?? null, actor: auth })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "purchaseOrder", params.id, "purchase_orders.cancel");
+    return ok(await cancelPurchaseOrder(params.id, { reason: body?.reason ?? null, actor: auth }));
+  },
 );

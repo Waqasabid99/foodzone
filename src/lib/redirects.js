@@ -1,3 +1,5 @@
+import { DASHBOARD_NAV, navItemCount } from "@/lib/dashboard-nav";
+
 /**
  * Where to send someone after they sign in.
  *
@@ -48,4 +50,27 @@ export function loginHref(next) {
 export function registerHref(next) {
   const target = safeRedirect(next);
   return target === "/" ? "/register" : `/register?next=${encodeURIComponent(target)}`;
+}
+
+/**
+ * Where somebody lands the moment they sign in.
+ *
+ * Email verification is a customer gate: it exists because an unverified
+ * account cannot check out, so sending them to finish verifying beats letting
+ * them fill a basket and be stopped at the last step. A member of staff has no
+ * basket. Routing on `emailVerified` alone sent every cashier, chef and rider
+ * to a consumer page headed "unlock secret menu items", asking for a code
+ * posted to an address the restaurant invented for them — and the dashboard
+ * they were hired to use was reachable only by typing the URL.
+ *
+ * So the question asked here is the one the workspace layout already asks: is
+ * there a single staff page this person may open?
+ */
+export function signInDestination(user, next, { staffHome = "/dashboard" } = {}) {
+  const staff = navItemCount(DASHBOARD_NAV, user?.permissions ?? []) > 0;
+  if (staff) {
+    const target = safeRedirect(next, staffHome);
+    return target === "/" ? staffHome : target;
+  }
+  return user?.emailVerified ? safeRedirect(next) : "/verify-email";
 }

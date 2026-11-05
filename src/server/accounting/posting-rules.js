@@ -304,6 +304,24 @@ export function inventoryVarianceLines({ amount, reference }) {
 }
 
 /**
+ * Opening stock: Dr Inventory, Cr Opening balance equity.
+ *
+ * Not a variance. The stock was already the business's before the books
+ * started, so it is part of the opening position, not a gain in the period it
+ * happened to be typed in. Booking it through inventory variance would show a
+ * first month's profit that never happened.
+ */
+export function openingStockLines({ amount, reference }) {
+  const value = money(amount);
+  if (value.lessThanOrEqualTo(0)) return [];
+
+  return compact([
+    debitLine(ACCOUNTS.INVENTORY, value, { description: reference ?? "Opening stock" }),
+    creditLine(ACCOUNTS.OPENING_BALANCE_EQUITY, value, { description: reference ?? "Opening stock" }),
+  ]);
+}
+
+/**
  * A driver payout.
  *
  *   Dr Delivery expense    what the driver earned
@@ -313,6 +331,13 @@ export function inventoryVarianceLines({ amount, reference }) {
  * Cash on delivery makes this two-sided: a driver holding takings settles part
  * of their own earnings out of money that is already the restaurant's. Posting
  * only the payable would leave that cash on the books twice.
+ *
+ * The balance goes both ways, so it is signed. A rider who hands in less than
+ * they collected has kept more than they earned, and that period ends with the
+ * driver owing the restaurant — a debit against the same account, not a credit
+ * of minus something. A negative amount on a line is rejected outright, so the
+ * unsigned version did not post at all: the entry failed in the background
+ * while the payout screen showed it paid.
  */
 export function driverPayoutLines({ grossAmount, codDeducted = 0, driverId, payoutNumber }) {
   const cod = D(codDeducted);
@@ -322,7 +347,11 @@ export function driverPayoutLines({ grossAmount, codDeducted = 0, driverId, payo
   return compact([
     debitLine(ACCOUNTS.DELIVERY_EXPENSE, grossAmount, { description: `Payout ${payoutNumber}`, ...party }),
     creditLine(ACCOUNTS.CASH, cod, { description: `Cash retained against ${payoutNumber}`, ...party }),
-    creditLine(ACCOUNTS.DRIVER_PAYABLE, net, { description: `Owed on ${payoutNumber}`, ...party }),
+    signedLine(ACCOUNTS.DRIVER_PAYABLE, net, {
+      debitWhenPositive: false,
+      description: net.isNegative() ? `Owed by the driver on ${payoutNumber}` : `Owed on ${payoutNumber}`,
+      ...party,
+    }),
   ]);
 }
 
@@ -358,15 +387,24 @@ export function cashVarianceLines({ variance, sessionNumber }) {
  * of employing people by exactly the amount deducted, and leaves the eventual
  * remittance of that money with nothing to clear against.
  */
-export function payrollLines({ grossAmount, deductionAmount = 0, netAmount, periodName }) {
-  const deductions = D(deductionAmount);
+export function payrollLines({ grossAmount, netAmount, deductions = [], periodName }) {
+  // One credit per account, not per component: a payslip with three things
+  // pointing at the same fund should produce one line, not three saying the
+  // same thing. Anything the component did not name falls to
+  // `EMPLOYEE_DEDUCTIONS_PAYABLE` — withheld and owed to somebody, account not
+  // yet decided — rather than to tax, which is a claim about what the money is.
+  const byAccount = new Map();
+  for (const deduction of deductions) {
+    const code = deduction.accountCode ?? ACCOUNTS.EMPLOYEE_DEDUCTIONS_PAYABLE;
+    byAccount.set(code, D(byAccount.get(code)).plus(D(deduction.amount)));
+  }
 
   return compact([
     debitLine(ACCOUNTS.SALARIES, grossAmount, { description: `Payroll ${periodName}` }),
     creditLine(ACCOUNTS.SALARIES_PAYABLE, netAmount, { description: `Net pay ${periodName}` }),
-    // Withheld and owed to somebody else — a provident fund, a tax authority —
-    // until it is remitted.
-    creditLine(ACCOUNTS.TAX_PAYABLE, deductions, { description: `Withheld on ${periodName}` }),
+    ...[...byAccount].map(([code, amount]) =>
+      creditLine(code, amount, { description: `Withheld on ${periodName}` }),
+    ),
   ]);
 }
 

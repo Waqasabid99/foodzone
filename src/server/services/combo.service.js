@@ -23,7 +23,9 @@ const OPTION_SELECT = {
   sortOrder: true,
   productId: true,
   variantId: true,
-  product: { select: { id: true, name: true, slug: true, imageUrl: true, isActive: true, type: true } },
+  // `deletedAt` and the variant's `isActive` are what the admin screen needs to
+  // warn that a choice can no longer be sold.
+  product: { select: { id: true, name: true, slug: true, imageUrl: true, isActive: true, deletedAt: true, type: true } },
   variant: { select: { id: true, name: true, price: true, isActive: true } },
 };
 
@@ -60,6 +62,18 @@ function assertGroupRules({ minSelect, maxSelect, optionCount }) {
   if (optionCount > 0 && minSelect > optionCount) {
     throw ApiError.validation("This group asks for more choices than it offers", {
       minSelect: [`Only ${optionCount} option(s) available`],
+    });
+  }
+}
+
+/**
+ * A slot cannot pre-select more choices than a customer is allowed to pick.
+ * The storefront would open the combo already over the limit.
+ */
+function assertDefaultsFit({ maxSelect, defaults }) {
+  if (defaults > maxSelect) {
+    throw ApiError.validation(`This slot allows ${maxSelect} pick${maxSelect === 1 ? "" : "s"}, so it can pre-select at most that many`, {
+      isDefault: ["Clear another default first"],
     });
   }
 }
@@ -124,6 +138,7 @@ export async function createComboGroup(comboProductId, data) {
 
   const { options = [], ...group } = data;
   assertGroupRules({ ...group, optionCount: options.length });
+  assertDefaultsFit({ maxSelect: group.maxSelect, defaults: options.filter((option) => option.isDefault).length });
 
   const resolved = [];
   for (const option of options) resolved.push(await resolveOption({ comboProductId, option }));
@@ -152,11 +167,18 @@ export async function createComboGroup(comboProductId, data) {
 export async function updateComboGroup({ comboProductId, groupId, data }) {
   const group = await prisma.comboGroup.findFirst({
     where: { id: groupId, comboProductId },
-    select: { id: true, minSelect: true, maxSelect: true, _count: { select: { options: true } } },
+    select: {
+      id: true,
+      minSelect: true,
+      maxSelect: true,
+      _count: { select: { options: true } },
+      options: { where: { isDefault: true }, select: { id: true } },
+    },
   });
   if (!group) throw ApiError.notFound("Combo group not found");
 
   assertGroupRules({ ...group, ...data, optionCount: group._count.options });
+  assertDefaultsFit({ maxSelect: data.maxSelect ?? group.maxSelect, defaults: group.options.length });
 
   return prisma.comboGroup.update({ where: { id: groupId }, data, select: GROUP_SELECT });
 }
@@ -172,10 +194,13 @@ export async function deleteComboGroup({ comboProductId, groupId }) {
 export async function addComboOption({ comboProductId, groupId, option }) {
   const group = await prisma.comboGroup.findFirst({
     where: { id: groupId, comboProductId },
-    select: { id: true, options: { select: { productId: true, variantId: true } } },
+    select: { id: true, maxSelect: true, options: { select: { productId: true, variantId: true, isDefault: true } } },
   });
   if (!group) throw ApiError.notFound("Combo group not found");
 
+  if (option.isDefault) {
+    assertDefaultsFit({ maxSelect: group.maxSelect, defaults: group.options.filter((row) => row.isDefault).length + 1 });
+  }
   const resolved = await resolveOption({ comboProductId, option });
   const duplicate = group.options.some(
     (row) => row.productId === resolved.productId && row.variantId === resolved.variantId,
@@ -191,15 +216,35 @@ export async function addComboOption({ comboProductId, groupId, option }) {
 export async function updateComboOption({ comboProductId, groupId, optionId, data }) {
   const option = await prisma.comboGroupOption.findFirst({
     where: { id: optionId, groupId, group: { comboProductId } },
-    select: { id: true, productId: true },
+    select: {
+      id: true,
+      productId: true,
+      isDefault: true,
+      group: { select: { maxSelect: true, options: { select: { id: true, productId: true, variantId: true, isDefault: true } } } },
+    },
   });
   if (!option) throw ApiError.notFound("Combo option not found");
 
   // Only the variant can be re-pointed; swapping the product is a delete plus
-  // an add, which keeps the duplicate check in one place.
+  // an add.
   const resolved = data.variantId
     ? await resolveOption({ comboProductId, option: { productId: option.productId, variantId: data.variantId } })
     : null;
+
+  // Re-pointing to a size the slot already offers would list the same choice
+  // twice — the check `addComboOption` makes, which this path used to skip.
+  if (resolved) {
+    const duplicate = option.group.options.some(
+      (row) => row.id !== optionId && row.productId === option.productId && row.variantId === resolved.variantId,
+    );
+    if (duplicate) throw ApiError.conflict("That size is already a choice in this slot");
+  }
+  if (data.isDefault && !option.isDefault) {
+    assertDefaultsFit({
+      maxSelect: option.group.maxSelect,
+      defaults: option.group.options.filter((row) => row.isDefault).length + 1,
+    });
+  }
 
   return prisma.comboGroupOption.update({
     where: { id: optionId },
@@ -225,4 +270,21 @@ export async function deleteComboOption({ comboProductId, groupId, optionId }) {
   await prisma.comboGroupOption.delete({ where: { id: optionId } });
 
   return { deleted: true, id: optionId };
+}
+
+/**
+ * Slots for many combos in one query, keyed by combo id — what a list of combos
+ * needs to show each one's health without a query per row.
+ */
+export async function comboGroupsFor(comboProductIds) {
+  const byCombo = new Map(comboProductIds.map((id) => [id, []]));
+  if (!comboProductIds.length) return byCombo;
+
+  const rows = await prisma.comboGroup.findMany({
+    where: { comboProductId: { in: comboProductIds } },
+    select: GROUP_SELECT,
+    orderBy: { sortOrder: "asc" },
+  });
+  for (const row of rows) byCombo.get(row.comboProductId)?.push(row);
+  return byCombo;
 }

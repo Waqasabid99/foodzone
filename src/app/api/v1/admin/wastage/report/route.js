@@ -1,4 +1,4 @@
-import { apiHandler, ok } from "@/lib/api";
+import { apiHandler, branchScope, ok } from "@/lib/api";
 import { reportRangeSchema } from "@/server/validation/inventory.schemas";
 import { wastageReport } from "@/server/services/stock-adjustment.service";
 
@@ -10,5 +10,5 @@ import { wastageReport } from "@/server/services/stock-adjustment.service";
  */
 export const GET = apiHandler(
   { auth: true, permissions: "wastage.read", query: reportRangeSchema, branch: "query" },
-  async ({ query }) => ok(await wastageReport(query)),
+  async ({ query, auth }) => ok(await wastageReport({ ...query, scope: branchScope(auth, "wastage.read") })),
 );

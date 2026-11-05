@@ -2,6 +2,7 @@ import { z } from "zod";
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { createModifierGroupSchema } from "@/server/validation/catalog.schemas";
 import { createModifierGroup, listModifierGroups } from "@/server/services/modifier.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 const querySchema = z.object({
   search: z.string().trim().min(1).max(100).optional(),
@@ -20,6 +21,7 @@ export const POST = apiHandler(
     body: createModifierGroupSchema,
     rateLimit: RateLimits.write,
     audit: { action: "modifier_group.create", entityType: "ModifierGroup", entityId: ({ result }) => result?.id ?? null },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ body }) => created(await createModifierGroup(body)),
 );

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
@@ -194,7 +195,7 @@ export async function postJournal({
       // `$executeRaw`, not `$queryRaw`: the lock function returns `void`, and
       // asking Prisma to deserialize a void column fails the whole statement —
       // which silently stopped every business event from reaching the ledger.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+      await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
 
       const existing = await tx.journalEntry.findFirst({
         where: { source, sourceId, status: { not: "VOID" } },
@@ -370,9 +371,13 @@ export async function reverseJournalEntry(id, { reason = null, entryDate = null,
       tx,
     });
 
+    // The link is read back rather than discarded: `created` was captured
+    // before this update, so returning it would answer `reversalOfId: null`
+    // for an entry that is, in fact, a reversal — and a client acting on that
+    // response cannot tell what it is looking at.
     await tx.journalEntry.update({ where: { id: created.id }, data: { reversalOfId: entry.id } });
 
-    return created;
+    return { ...created, reversalOfId: entry.id };
   });
 
   await recordAudit({
@@ -423,11 +428,20 @@ export async function listJournalEntries({
   accountId,
   from,
   to,
+  scope = null,
   limit = 20,
   cursor,
 } = {}) {
+  // Company-level entries — an opening balance, a transfer between outlets —
+  // carry no branch, and they are kept in a scoped reader's list on purpose.
+  // `assertRecordAccess` lets anyone holding the permission open one, so
+  // hiding them here would produce rows that are invisible in the list and
+  // still reachable by URL. A list and its detail view must agree about what
+  // exists.
+  const filter = branchFilter(scope);
   const rows = await prisma.journalEntry.findMany({
     where: {
+      ...(filter ? { AND: [{ OR: [{ branchId: filter }, { branchId: null }] }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(source ? { source } : {}),
       ...(status ? { status } : {}),
@@ -466,12 +480,19 @@ export async function listJournalEntries({
  * Grouped in the database rather than by walking entries, because a year of a
  * busy restaurant is a lot of lines and every statement needs this.
  */
-export async function accountBalances({ branchId = null, from = null, to = null, accountIds = null } = {}) {
+export async function accountBalances({ branchId = null, from = null, to = null, accountIds = null, scope = null } = {}) {
+  // Unlike the entry list, a scoped *statement* excludes company-level
+  // entries. `?branchId=X` has always meant "this outlet's figures" and has
+  // always left them out; a statement across several branches has to mean the
+  // same thing, or the same P&L read two ways would not agree, and company
+  // overheads would be counted once per branch when they are added up.
+  const filter = branchFilter(scope);
   const grouped = await prisma.journalLine.groupBy({
     by: ["accountId"],
     where: {
       entry: {
         status: "POSTED",
+        ...(filter ? { AND: [{ branchId: filter }] } : {}),
         ...(branchId ? { branchId } : {}),
         ...(from || to
           ? { entryDate: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
@@ -507,8 +528,8 @@ export async function accountBalances({ branchId = null, from = null, to = null,
     .filter(Boolean);
 }
 
-export async function trialBalanceReport({ branchId, from, to } = {}) {
-  const rows = await accountBalances({ branchId, from, to });
+export async function trialBalanceReport({ branchId, from, to, scope = null } = {}) {
+  const rows = await accountBalances({ branchId, from, to, scope });
   const balances = rows.map((row) => ({
     ...row,
     balance: row.normalBalance === "DEBIT" ? D(row.debit).minus(D(row.credit)) : D(row.credit).minus(D(row.debit)),
@@ -525,10 +546,14 @@ export async function trialBalanceReport({ branchId, from, to } = {}) {
  * means something wrote to `JournalLine` without going through `postJournal`,
  * and the entries it names are where to look.
  */
-export async function auditLedger({ from = null, to = null } = {}) {
+export async function auditLedger({ from = null, to = null, scope = null } = {}) {
+  // A subset made of whole entries still balances, so a scoped audit is a
+  // meaningful answer rather than a broken one.
+  const filter = branchFilter(scope);
   const entries = await prisma.journalEntry.findMany({
     where: {
       status: "POSTED",
+      ...(filter ? { AND: [{ OR: [{ branchId: filter }, { branchId: null }] }] } : {}),
       ...(from || to
         ? { entryDate: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
         : {}),

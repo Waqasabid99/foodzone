@@ -1,6 +1,7 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { dispatchTransfer } from "@/server/services/stock-transfer.service";
+import { assertTransferEnd } from "@/server/inventory/access";
 
 /**
  * Stock leaves the source and is in transit.
@@ -17,5 +18,8 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "stock_transfer.dispatch", entityType: "StockTransfer" },
   },
-  async ({ params, auth }) => ok(await dispatchTransfer(params.id, auth)),
+  async ({ params, auth }) => {
+    await assertTransferEnd(auth, params.id, "from", "stock_transfers.approve");
+    return ok(await dispatchTransfer(params.id, auth));
+  },
 );

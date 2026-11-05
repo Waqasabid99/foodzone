@@ -1,6 +1,7 @@
 import { apiHandler, ok } from "@/lib/api";
 import { ageingSchema } from "@/server/validation/finance.schemas";
 import { payablesAgeing } from "@/server/services/supplier-bill.service";
+import { branchScope } from "@/lib/api/permissions";
 
 /**
  * What is owed, to whom, and how late.
@@ -11,5 +12,5 @@ import { payablesAgeing } from "@/server/services/supplier-bill.service";
  */
 export const GET = apiHandler(
   { auth: true, permissions: "supplier_bills.read", query: ageingSchema, branch: "query" },
-  async ({ query }) => ok(await payablesAgeing(query)),
+  async ({ query, auth }) => ok(await payablesAgeing({ ...query, scope: branchScope(auth, "supplier_bills.read") })),
 );

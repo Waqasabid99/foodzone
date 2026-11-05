@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
@@ -48,7 +49,7 @@ const SELECT = {
  * same named drawer makes the variance meaningless, because neither is
  * accountable for it.
  */
-export async function openSession({ branchId, registerName = "main", openingFloat = 0, actor }) {
+export async function openSession({ branchId, registerName = "main", openingFloat = 0, notes = null, actor }) {
   const branch = await prisma.branch.findUnique({ where: { id: branchId }, select: { id: true, isActive: true } });
   if (!branch) throw ApiError.notFound("Branch not found");
 
@@ -70,6 +71,7 @@ export async function openSession({ branchId, registerName = "main", openingFloa
       openingFloat: money(openingFloat),
       openedById: actor.userId,
       status: "OPEN",
+      ...(notes ? { notes } : {}),
     },
     select: SELECT,
   });
@@ -252,9 +254,14 @@ export async function reconcileSession({ sessionId, notes = null, actor }) {
 
 // --- reads ------------------------------------------------------------------
 
-export async function listSessions({ branchId, status, limit = 20, cursor } = {}) {
+export async function listSessions({ branchId, status, scope = null, limit = 20, cursor } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.cashRegisterSession.findMany({
-    where: { ...(branchId ? { branchId } : {}), ...(status ? { status } : {}) },
+    where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
+      ...(branchId ? { branchId } : {}),
+      ...(status ? { status } : {}),
+    },
     select: { ...SELECT, _count: { select: { payments: true, movements: true } } },
     orderBy: { openedAt: "desc" },
     ...cursorArgs(cursor, limit),

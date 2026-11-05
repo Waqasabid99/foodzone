@@ -25,6 +25,11 @@ export function factorOf(uom) {
   return uom.baseUnitId ? D(uom.factor) : D(1);
 }
 
+/** The base unit a unit converts through: its own id when it is a base. */
+export function rootOf(uom) {
+  return uom.baseUnitId ?? uom.id;
+}
+
 /**
  * Converts a quantity between two units of the same type.
  *
@@ -38,6 +43,15 @@ export function convertQuantity({ quantity, from, to }) {
   if (from.type !== to.type) {
     throw ApiError.validation(`Cannot convert ${from.code} to ${to.code}`, {
       uomId: [`${from.code} measures ${from.type.toLowerCase()}, ${to.code} measures ${to.type.toLowerCase()}`],
+    });
+  }
+
+  // Same type is not enough: two separate bases of one type — "pc" and a
+  // "box" nobody linked to it — have no factor between them, and treating
+  // them as 1:1 would book a box of 24 as one piece.
+  if (rootOf(from) !== rootOf(to)) {
+    throw ApiError.validation(`Cannot convert ${from.code} to ${to.code}`, {
+      uomId: [`${from.code} and ${to.code} are not linked by a conversion`],
     });
   }
 

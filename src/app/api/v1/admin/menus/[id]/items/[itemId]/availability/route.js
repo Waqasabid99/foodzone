@@ -1,6 +1,7 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { availabilitySchema, itemParamSchema } from "@/server/validation/catalog.schemas";
 import { assertMenuAccess, setMenuItemAvailability } from "@/server/services/menu.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 /**
  * The 86 switch — the most-used endpoint during service.
@@ -16,6 +17,7 @@ export const PUT = apiHandler(
     body: availabilitySchema,
     rateLimit: RateLimits.write,
     audit: { action: "menu_item.availability", entityType: "MenuItem", entityId: ({ params }) => params.itemId },
+    invalidates: [CacheTag.MENUS],
   },
   async ({ auth, params, body }) => {
     await assertMenuAccess(auth, params.id, "menu_items.toggle_availability");

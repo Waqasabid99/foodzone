@@ -138,7 +138,7 @@ async function main() {
   const menu = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
+    body: { branchId, isActive: true, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
   });
   await api(`/admin/menus/${menu.body.data.id}/items`, {
     method: "POST",
@@ -215,6 +215,79 @@ async function main() {
 
   const sessionAfterSale = await api(`/admin/registers/${sessionId}`, { token: adminToken });
   check("the sale lands in the drawer", num(sessionAfterSale.body.data.expectedCash) === 6000, sessionAfterSale.body?.data);
+
+  // ================= CASH CANNOT GO ROUND THE DRAWER =================
+  // `collect` is the endpoint that attaches cash to a session. `capture` is the
+  // one for gateway money, and it used to accept cash too — same permission set
+  // on the Cashier role, one route along. The order read PAID, the notes were in
+  // the till, and no movement was written, so the drawer closed short by the
+  // sale and the cashier wore it.
+  const bypassOrderId = await placeOrder(1);
+  const bypassPayment = await api("/admin/payments", {
+    method: "POST",
+    token: adminToken,
+    body: { orderId: bypassOrderId, method: "CASH" },
+  });
+  const bypassId = bypassPayment.body.data.payment.id;
+
+  const bypass = await api(`/admin/payments/${bypassId}/capture`, {
+    method: "POST",
+    token: adminToken,
+    body: {},
+  });
+  check("cash cannot be captured around the till", bypass.status === 409, { status: bypass.status, body: bypass.body?.error });
+
+  const stillPending = await api(`/admin/payments/${bypassId}`, { token: adminToken });
+  check("and the refused capture took no money", stillPending.body?.data?.status === "PENDING", stillPending.body?.data?.status);
+
+  const drawerUnmoved = await api(`/admin/registers/${sessionId}`, { token: adminToken });
+  check("so the drawer is untouched by it", num(drawerUnmoved.body.data.expectedCash) === 6000, drawerUnmoved.body?.data);
+
+  const properly = await api(`/admin/payments/${bypassId}/collect`, {
+    method: "POST",
+    token: adminToken,
+    body: { registerSessionId: sessionId },
+  });
+  check("the same cash goes through collect instead", properly.body?.data?.payment?.status === "CAPTURED", properly.body);
+
+  const drawerMoved = await api(`/admin/registers/${sessionId}`, { token: adminToken });
+  check("and the drawer counts it", num(drawerMoved.body.data.expectedCash) === 7000, drawerMoved.body?.data);
+
+  // Money that was captured outside a drawer before the refusal existed is
+  // still sitting in real tills. `collect` has to be able to adopt it, or the
+  // only repair is a hand-written adjustment that hides what happened. Forged
+  // here directly, because the endpoint that used to produce this state now
+  // refuses to.
+  const orphanOrderId = await placeOrder(1);
+  const orphanPayment = await api("/admin/payments", {
+    method: "POST",
+    token: adminToken,
+    body: { orderId: orphanOrderId, method: "CASH" },
+  });
+  const orphanId = orphanPayment.body.data.payment.id;
+  await prisma.payment.update({
+    where: { id: orphanId },
+    data: { status: "CAPTURED", capturedAt: new Date(), registerSessionId: null },
+  });
+
+  const adopted = await api(`/admin/payments/${orphanId}/collect`, {
+    method: "POST",
+    token: adminToken,
+    body: { registerSessionId: sessionId },
+  });
+  check("cash captured with no drawer can still be put in one", adopted.status === 200, adopted.body?.error);
+
+  const drawerAdopted = await api(`/admin/registers/${sessionId}`, { token: adminToken });
+  check("and it reaches the count", num(drawerAdopted.body.data.expectedCash) === 8000, drawerAdopted.body?.data);
+
+  const adoptAgain = await api(`/admin/payments/${orphanId}/collect`, {
+    method: "POST",
+    token: adminToken,
+    body: { registerSessionId: sessionId },
+  });
+  await adoptAgain;
+  const drawerTwice = await api(`/admin/registers/${sessionId}`, { token: adminToken });
+  check("adopting twice does not count it twice", num(drawerTwice.body.data.expectedCash) === 8000, drawerTwice.body?.data);
 
   // ================= SPLIT PAYMENT =================
   const splitOrderId = await placeOrder(2); // 2000
@@ -538,11 +611,41 @@ async function main() {
   });
   check("and cannot close the till", cashierClose.status === 403, cashierClose.body?.error);
 
+  // A second drawer, opened after the one the sale was rung on. A cash refund
+  // used to come out of whichever session was opened last at the branch, so the
+  // till that took the money closed over and an unrelated till closed short —
+  // two false variances from one correct refund. The money leaves the drawer
+  // the sale is in.
+  const eveningTill = await api("/admin/registers", {
+    method: "POST",
+    token: adminToken,
+    body: { branchId, registerName: "till-2", openingFloat: 2000 },
+  });
+  check("a second till opens on its own register", eveningTill.status === 201, eveningTill.body?.error);
+  const eveningId = eveningTill.body.data.id;
+
   const managerApprove = await api(`/admin/refunds/${cashierRequest.body.data.id}/approve`, {
     method: "POST",
     token: adminToken,
   });
   check("a manager can approve it", managerApprove.body?.data?.status === "COMPLETED", managerApprove.body);
+
+  const sellingTill = await api(`/admin/registers/${sessionId}`, { token: adminToken });
+  const refundHere = (sellingTill.body.data.movements ?? []).filter((m) => m.type === "REFUND");
+  check("the refund leaves the till that took the money", refundHere.length === 1, {
+    movements: (sellingTill.body.data.movements ?? []).map((m) => m.type),
+  });
+  check("for the amount refunded", refundHere[0] && num(refundHere[0].amount) === -100, refundHere[0]);
+
+  const otherTill = await api(`/admin/registers/${eveningId}`, { token: adminToken });
+  check("and not out of an unrelated drawer", (otherTill.body.data.movements ?? []).length === 0, otherTill.body?.data?.movements);
+  check("which still holds just its float", num(otherTill.body.data.expectedCash) === 2000, otherTill.body?.data);
+
+  await api(`/admin/registers/${eveningId}/close`, {
+    method: "POST",
+    token: adminToken,
+    body: { countedCash: 2000, notes: "Evening till, never used" },
+  });
 
   // ================= CUSTOMER SELF-SERVICE =================
   const custOrder = await api("/admin/orders", {
@@ -597,11 +700,15 @@ async function main() {
 
   const beforeClose = await api(`/admin/registers/${sessionId}`, { token: adminToken });
   const expected = num(beforeClose.body.data.expectedCash);
-  // 5000 float + 1000 + 800 + 1200 + 1000 (idempotency order was never collected)
-  //   + 1000 cashier sale - 100 cashier refund - 500 pay-out
-  check("expected cash is derived from the movements", expected === 5000 + 1000 + 800 + 1200 + 1000 - 100 - 500, {
-    expected,
-  });
+  // 5000 float + 1000 + 1000 (refused `capture`, then collected properly)
+  //   + 1000 (captured with no drawer, then adopted) + 800 + 1200 + 1000
+  //   (idempotency order was never collected) + 1000 cashier sale
+  //   - 100 cashier refund - 500 pay-out
+  check(
+    "expected cash is derived from the movements",
+    expected === 5000 + 1000 + 1000 + 1000 + 800 + 1200 + 1000 - 100 - 500,
+    { expected },
+  );
 
   const closed = await api(`/admin/registers/${sessionId}/close`, {
     method: "POST",
@@ -642,10 +749,21 @@ async function main() {
   });
   check("the customer's card payment captures", captureSelf.body?.data?.payment?.status === "CAPTURED", captureSelf.body);
 
-  const drained = await fetch(`${BASE}/api/internal/jobs/outbox`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${process.env.E2E_CRON_SECRET ?? "phase2-test-secret"}` },
-  });
+  // One cycle claims at most WORKER_BATCH_SIZE events, oldest first, and
+  // handlers enqueue more (`payment.captured` raises `finance.payment_captured`
+  // before it notifies). So drain until the queue stops yielding, rather than
+  // once: a single cycle only reached this capture while the suite happened to
+  // sit under one batch.
+  let drained = null;
+  for (let cycle = 0; cycle < 10; cycle++) {
+    drained = await fetch(`${BASE}/api/internal/jobs/outbox`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${process.env.E2E_CRON_SECRET ?? "phase2-test-secret"}` },
+    });
+    if (drained.status !== 200) break;
+    const body = await drained.clone().json();
+    if ((body?.data?.claimed ?? 0) === 0) break;
+  }
   check("the outbox drains", drained.status === 200, drained.status);
 
   const gotNotification = await waitFor(
@@ -663,7 +781,12 @@ async function main() {
 async function cleanup() {
   const users = await prisma.user.findMany({ where: { email: { contains: tag } }, select: { id: true } });
   const ids = [...new Set([...created.userIds, ...users.map((u) => u.id)])];
-  const branchIds = [...created.branchIds];
+  // Every E2E7 branch, not just this run's: the branch delete at the end of
+  // cleanup is by code prefix, so a run that died mid-way leaves a branch whose
+  // orders nobody clears, and the next run's cleanup dies on the foreign key
+  // instead of tidying up after it.
+  const strays = await prisma.branch.findMany({ where: { code: { startsWith: "E2E7" } }, select: { id: true } });
+  const branchIds = [...new Set([...created.branchIds, ...strays.map((b) => b.id)])];
 
   const orders = await prisma.order.findMany({ where: { branchId: { in: branchIds } }, select: { id: true } });
   const orderIds = orders.map((o) => o.id);

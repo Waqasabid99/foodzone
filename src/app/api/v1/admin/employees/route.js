@@ -1,18 +1,30 @@
-import { apiHandler, can, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, created, ok, RateLimits } from "@/lib/api";
 import { createEmployeeSchema, listEmployeesSchema } from "@/server/validation/hr.schemas";
 import { createEmployee, listEmployees } from "@/server/services/employee.service";
+import { salaryVisible, withoutPay } from "@/server/hr/access";
 
 /**
- * Pay is withheld without `employees.view_salary`.
+ * Staff at the caller's own branches, with pay only where they may see it.
  *
- * A shift supervisor needs to see who works here; they must not see what
- * everybody earns, and one permission for both means whoever builds the roster
- * can read the payroll.
+ * Two separate scopes: `employees.read` decides whose names appear, and
+ * `employees.view_salary` decides whose figures do. A shift supervisor needs
+ * the first and must not have the second — one permission for both means
+ * whoever builds the roster can read the payroll. Asked per row rather than
+ * once, because a list can span branches where only one of the two is held.
  */
 export const GET = apiHandler(
   { auth: true, permissions: "employees.read", query: listEmployeesSchema, branch: "query" },
-  async ({ query, auth }) =>
-    ok(await listEmployees({ ...query, includeSalary: can(auth, "employees.view_salary") })),
+  async ({ query, auth }) => {
+    const page = await listEmployees({
+      ...query,
+      scope: branchScope(auth, "employees.read"),
+      includeSalary: true,
+    });
+    return ok({
+      ...page,
+      items: page.items.map((row) => (salaryVisible(auth, row.branchId) ? row : withoutPay(row))),
+    });
+  },
 );
 
 export const POST = apiHandler(

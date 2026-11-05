@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiHandler, ok } from "@/lib/api";
+import { apiHandler, branchScope, ok } from "@/lib/api";
 import { reviewQueue } from "@/server/services/creator-video.service";
 
 const querySchema = z.object({
@@ -10,5 +10,5 @@ const querySchema = z.object({
 /** Oldest submission first, so nobody waits for ever. */
 export const GET = apiHandler(
   { auth: true, permissions: "creator_videos.review", query: querySchema },
-  async ({ query }) => ok(await reviewQueue(query)),
+  async ({ auth, query }) => ok(await reviewQueue({ ...query, scope: branchScope(auth, "creator_videos.review") })),
 );

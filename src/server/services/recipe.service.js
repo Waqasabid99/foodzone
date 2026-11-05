@@ -6,6 +6,7 @@ import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { convertQuantity } from "@/server/inventory/uom";
 import { MAX_RECIPE_DEPTH } from "@/server/production/explode";
+import { refreshRecipeCosts } from "@/server/services/recipe-cost.service";
 
 /**
  * Recipes — the bill of materials for everything the kitchen makes.
@@ -375,6 +376,8 @@ export async function createRecipe(data, actor = null) {
     changes: { name: recipe.name, version: recipe.version, ingredients: ingredients.length },
   });
 
+  await refreshRecipeCosts(recipe.id, actor);
+
   return recipe;
 }
 
@@ -475,6 +478,8 @@ export async function updateRecipe(id, data, actor = null) {
     changes: { name: updated.name, version: updated.version, ingredientsReplaced: Boolean(ingredients) },
   });
 
+  await refreshRecipeCosts(updated.id, actor);
+
   return updated;
 }
 
@@ -493,9 +498,10 @@ export async function reviseRecipe(id, data = {}, actor = null) {
     yieldQuantity: data.yieldQuantity ?? current.yieldQuantity,
     yieldUomId: data.yieldUomId ?? current.yieldUomId,
     isBatchProduced: data.isBatchProduced ?? current.isBatchProduced,
-    prepTimeMinutes: data.prepTimeMinutes ?? current.prepTimeMinutes,
-    cookTimeMinutes: data.cookTimeMinutes ?? current.cookTimeMinutes,
-    instructions: data.instructions ?? current.instructions,
+    // Omitted carries over; null clears. `??` would make clearing impossible.
+    prepTimeMinutes: data.prepTimeMinutes !== undefined ? data.prepTimeMinutes : current.prepTimeMinutes,
+    cookTimeMinutes: data.cookTimeMinutes !== undefined ? data.cookTimeMinutes : current.cookTimeMinutes,
+    instructions: data.instructions !== undefined ? data.instructions : current.instructions,
     laborCost: data.laborCost ?? current.laborCost,
     overheadCost: data.overheadCost ?? current.overheadCost,
     ingredients:
@@ -564,6 +570,8 @@ export async function reviseRecipe(id, data = {}, actor = null) {
     changes: { from: { id: current.id, version: current.version }, to: revised.version },
   });
 
+  await refreshRecipeCosts(revised.id, actor);
+
   return revised;
 }
 
@@ -593,6 +601,8 @@ export async function activateRecipeVersion(id, actor = null) {
     entityId: id,
     changes: { version: recipe.version },
   });
+
+  await refreshRecipeCosts(activated.id, actor);
 
   return activated;
 }
@@ -640,6 +650,7 @@ export async function listRecipes({
   search,
   variantId,
   outputItemId,
+  output,
   isActive,
   isBatchProduced,
   includeCost = false,
@@ -648,6 +659,8 @@ export async function listRecipes({
 } = {}) {
   const rows = await prisma.recipe.findMany({
     where: {
+      // DISH makes something on the menu; STOCK makes a prep item.
+      ...(output === "DISH" ? { variantId: { not: null } } : output === "STOCK" ? { outputItemId: { not: null } } : {}),
       ...(variantId ? { variantId } : {}),
       ...(outputItemId ? { outputItemId } : {}),
       ...(isActive != null ? { isActive } : {}),
@@ -663,20 +676,21 @@ export async function listRecipes({
       isActive: true,
       isBatchProduced: true,
       yieldQuantity: true,
-      yieldUom: { select: { id: true, code: true } },
-      variant: { select: { id: true, sku: true, name: true } },
+      yieldUom: { select: { id: true, code: true, precision: true } },
+      updatedAt: true,
+      variant: { select: { id: true, sku: true, name: true, price: true, product: { select: { id: true, name: true } } } },
       outputItem: { select: { id: true, sku: true, name: true } },
-      _count: { select: { ingredients: true } },
+      _count: { select: { ingredients: true, productionOrders: true } },
       ...(includeCost ? { computedUnitCost: true, costUpdatedAt: true } : {}),
     },
-    orderBy: [{ name: "asc" }, { version: "desc" }],
+    orderBy: [{ name: "asc" }, { version: "desc" }, { id: "asc" }],
     ...cursorArgs(cursor, limit),
   });
 
   const page = toPage(rows, limit);
   return {
     ...page,
-    items: page.items.map(({ _count, ...row }) => ({ ...row, ingredientCount: _count.ingredients })),
+    items: page.items.map(({ _count, ...row }) => ({ ...row, ingredientCount: _count.ingredients, runCount: _count.productionOrders })),
   };
 }
 

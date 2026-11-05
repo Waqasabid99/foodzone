@@ -15,6 +15,8 @@
 
 # next.js
 /.next/
+# NEXT_DIST_DIR builds — an e2e build kept out of the dev server's way
+/.next-*/
 /out/
 
 # production
@@ -32,6 +34,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...except the template, which is documentation and holds no values. `.env*`
+# had been quietly swallowing it, so the one file that tells a new deployment
+# which variables exist was the one file never in the repo.
+!.env.example
 
 # vercel
 .vercel

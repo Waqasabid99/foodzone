@@ -1,10 +1,11 @@
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { createSupplierBillSchema, listSupplierBillsSchema } from "@/server/validation/finance.schemas";
 import { createSupplierBill, listSupplierBills } from "@/server/services/supplier-bill.service";
+import { branchScope } from "@/lib/api/permissions";
 
 export const GET = apiHandler(
   { auth: true, permissions: "supplier_bills.read", query: listSupplierBillsSchema, branch: "query" },
-  async ({ query }) => ok(await listSupplierBills(query)),
+  async ({ query, auth }) => ok(await listSupplierBills({ ...query, scope: branchScope(auth, "supplier_bills.read") })),
 );
 
 /**

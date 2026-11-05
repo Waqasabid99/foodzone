@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { ExternalLink, Flame } from "lucide-react";
-import NewsletterForm from "@/components/layout/NewsletterForm";
 
 /**
  * The site footer.
@@ -16,20 +15,22 @@ import NewsletterForm from "@/components/layout/NewsletterForm";
  * the planned information architecture, not decoration.
  */
 
-/** Legal and support pages. None of these routes exist yet. */
+/**
+ * The pages behind these are rows in `ContentPage`, edited from the dashboard.
+ *
+ * Only routes that resolve. This list used to carry `/nutrition`, `/careers`
+ * and three `/story/*` pages that were never built — five links on the bottom
+ * of every page in the shop, each one a 404. A link to nothing is worse than a
+ * missing link: somebody follows it, and what they learn is that the site is
+ * broken. They come back when there is a page to point them at.
+ */
 const SUPPORT_LINKS = [
-  { href: "/privacy", label: "Privacy Policy" },
-  { href: "/terms", label: "Terms of Service" },
-  { href: "/nutrition", label: "Nutrition & Allergens" },
-  { href: "/careers", label: "Careers" },
+  { href: "/about", label: "About Us" },
   { href: "/contact", label: "Contact Us" },
-];
-
-/** Brand story pages. Also unbuilt. */
-const STORY_LINKS = [
-  { href: "/story/method", label: "Our 500°F Method" },
-  { href: "/story/sourcing", label: "Locally Sourced" },
-  { href: "/story/sustainability", label: "Sustainability" },
+  { href: "/careers", label: "Careers" },
+  { href: "/terms", label: "Terms & Conditions" },
+  { href: "/terms-of-use", label: "Terms of Use" },
+  { href: "/privacy", label: "Privacy Policy" },
 ];
 
 /**
@@ -58,7 +59,7 @@ export default function Footer({ storeName = "FoodZone", tagline = "", categorie
     // footer from the page above it in the design.
     <footer className="mt-20 border-t-4 border-primary-container bg-inverse-surface text-inverse-on-surface">
       <div className="mx-auto max-w-page px-margin-mobile py-14 md:px-margin-desktop">
-        <div className="flex flex-col gap-10 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex flex-col gap-10">
           <div className="max-w-md">
             <p className="flex items-center gap-3">
               <Flame aria-hidden="true" className="size-7 text-primary-container" />
@@ -72,12 +73,11 @@ export default function Footer({ storeName = "FoodZone", tagline = "", categorie
             ) : null}
           </div>
 
-          <NewsletterForm />
         </div>
 
         <hr className="my-10 border-inverse-on-surface/15" />
 
-        <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
           {categories.length ? (
             <FooterColumn title="Menu">
               {categories.slice(0, 5).map((category) => (
@@ -87,14 +87,6 @@ export default function Footer({ storeName = "FoodZone", tagline = "", categorie
               ))}
             </FooterColumn>
           ) : null}
-
-          <FooterColumn title="Brand & Story">
-            {STORY_LINKS.map((link) => (
-              <FooterLink key={link.href} href={link.href}>
-                {link.label}
-              </FooterLink>
-            ))}
-          </FooterColumn>
 
           <FooterColumn title="Links">
             {SUPPORT_LINKS.map((link) => (

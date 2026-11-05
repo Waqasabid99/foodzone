@@ -10,6 +10,7 @@ import {
   expenseLines,
   goodsReceiptLines,
   inventoryVarianceLines,
+  openingStockLines,
   paymentLines,
   payrollLines,
   payrollPaymentLines,
@@ -367,6 +368,7 @@ export async function postStockAdjustment(adjustmentId, actor = null) {
       id: true,
       adjustmentNumber: true,
       locationId: true,
+      type: true,
       status: true,
       approvedAt: true,
       createdAt: true,
@@ -375,8 +377,11 @@ export async function postStockAdjustment(adjustmentId, actor = null) {
   });
   if (!adjustment) return { skipped: true, reason: "ADJUSTMENT_NOT_FOUND" };
 
+  // "ADJUSTMENT" is what the approval tags its movements with. This once
+  // looked for "STOCK_ADJUSTMENT" — the journal's name for it — found nothing,
+  // and skipped every adjustment as "nothing posted".
   const movements = await prisma.stockMovement.findMany({
-    where: { referenceType: "STOCK_ADJUSTMENT", referenceId: adjustmentId },
+    where: { referenceType: "ADJUSTMENT", referenceId: adjustmentId },
     select: { quantity: true, unitCost: true },
   });
   if (!movements.length) return { skipped: true, reason: "NOTHING_POSTED" };
@@ -388,6 +393,20 @@ export async function postStockAdjustment(adjustmentId, actor = null) {
   );
   if (amount.isZero()) return { skipped: true, reason: "NET_ZERO" };
 
+  // Stock owned before the books started is part of the opening position, not
+  // a gain in whatever month it was typed in.
+  if (adjustment.type === "OPENING_STOCK") {
+    return postJournal({
+      branchId: adjustment.location?.branchId ?? null,
+      entryDate: adjustment.approvedAt ?? adjustment.createdAt,
+      source: "OPENING_BALANCE",
+      sourceId: adjustment.id,
+      memo: `Opening stock ${adjustment.adjustmentNumber}`,
+      lines: openingStockLines({ amount, reference: adjustment.adjustmentNumber }),
+      actor,
+    });
+  }
+
   return postJournal({
     branchId: adjustment.location?.branchId ?? null,
     entryDate: adjustment.approvedAt ?? adjustment.createdAt,
@@ -395,6 +414,42 @@ export async function postStockAdjustment(adjustmentId, actor = null) {
     sourceId: adjustment.id,
     memo: `Stock adjustment ${adjustment.adjustmentNumber}`,
     lines: inventoryVarianceLines({ amount, reference: adjustment.adjustmentNumber }),
+    actor,
+  });
+}
+
+/**
+ * A posted stock count: the corrections it wrote, valued as the ledger valued
+ * them. Same accounts as an adjustment — a count is the adjustment the shelf
+ * forced — under the count's own id, so each posts once.
+ */
+export async function postStockCount(countId, actor = null) {
+  const count = await prisma.stockCount.findUnique({
+    where: { id: countId },
+    select: { id: true, countNumber: true, branchId: true, status: true, completedAt: true, startedAt: true },
+  });
+  if (!count) return { skipped: true, reason: "COUNT_NOT_FOUND" };
+  if (count.status !== "COMPLETED") return { skipped: true, reason: `NOT_POSTED:${count.status}` };
+
+  const movements = await prisma.stockMovement.findMany({
+    where: { referenceType: "COUNT", referenceId: countId },
+    select: { quantity: true, unitCost: true },
+  });
+  if (!movements.length) return { skipped: true, reason: "NO_VARIANCE" };
+
+  const amount = movements.reduce(
+    (sum, movement) => sum.plus(D(movement.quantity).times(D(movement.unitCost))),
+    D(0),
+  );
+  if (amount.isZero()) return { skipped: true, reason: "NET_ZERO" };
+
+  return postJournal({
+    branchId: count.branchId,
+    entryDate: count.completedAt ?? count.startedAt,
+    source: "STOCK_ADJUSTMENT",
+    sourceId: count.id,
+    memo: `Stock count ${count.countNumber}`,
+    lines: inventoryVarianceLines({ amount, reference: count.countNumber }),
     actor,
   });
 }
@@ -617,6 +672,20 @@ export async function postPayroll(payrollPeriodId, actor = null) {
   }
   if (D(period.totalGross).lessThanOrEqualTo(0)) return { skipped: true, reason: "NOTHING_TO_POST" };
 
+  // Read off the payslip lines rather than the period's single deduction total:
+  // a provident fund is not tax and an advance coming back is not a liability,
+  // so each component is credited to the account it was issued against. The
+  // line carries a frozen copy of that account, so re-posting a period cannot
+  // be changed by someone editing a salary component afterwards.
+  const deductionLines = await prisma.payslipLine.findMany({
+    where: { payslip: { periodId: period.id }, isEarning: false },
+    select: { amount: true, account: { select: { code: true } } },
+  });
+  const deductions = deductionLines.map((line) => ({
+    accountCode: line.account?.code ?? null,
+    amount: line.amount,
+  }));
+
   return postJournal({
     branchId: period.branchId,
     entryDate: period.endDate,
@@ -626,8 +695,8 @@ export async function postPayroll(payrollPeriodId, actor = null) {
     memo: `Payroll ${period.name}`,
     lines: payrollLines({
       grossAmount: period.totalGross,
-      deductionAmount: period.totalDeductions,
       netAmount: period.totalNet,
+      deductions,
       periodName: period.name,
     }),
     actor,

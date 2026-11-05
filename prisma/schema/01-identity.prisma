@@ -47,6 +47,11 @@ model User {
   status          UserStatus @default(ACTIVE)
   avatarUrl       String?
   locale          String     @default("en")
+  /// Which workspace page this person opens on: "overview", "kitchen", or
+  /// null for "decide from what I do here". A kitchen display belongs on a
+  /// screen of its own rather than inside a dashboard, so whoever works a
+  /// board is sent to it instead of being shown numbers they cannot use.
+  homePage        String?
   emailVerifiedAt DateTime?
   phoneVerifiedAt DateTime?
   lastLoginAt     DateTime?
@@ -56,6 +61,10 @@ model User {
   /// Optimistic-concurrency / force-logout marker: bump to invalidate all
   /// access tokens issued before this instant.
   tokensValidFrom DateTime   @default(now())
+  /// Set when an administrator issues a temporary password. Until the person
+  /// chooses their own, the account may do nothing but change it — otherwise a
+  /// password someone else has seen would keep working indefinitely.
+  mustChangePassword Boolean @default(false)
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
   deletedAt       DateTime?

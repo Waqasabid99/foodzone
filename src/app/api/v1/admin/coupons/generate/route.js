@@ -1,4 +1,5 @@
 import { apiHandler, created, RateLimits } from "@/lib/api";
+import { assertPromotionAccess } from "@/server/marketing/access";
 import { generateCouponsSchema } from "@/server/validation/pricing.schemas";
 import { generateCoupons } from "@/server/services/coupon.service";
 
@@ -17,5 +18,8 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "coupon.generate_bulk", entityType: "Coupon" },
   },
-  async ({ body, auth }) => created(await generateCoupons(body, auth)),
+  async ({ body, auth }) => {
+    await assertPromotionAccess(auth, body.promotionId, "coupons.generate_bulk");
+    return created(await generateCoupons(body, auth));
+  },
 );

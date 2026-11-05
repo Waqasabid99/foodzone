@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 
 /**
  * Human-facing document numbers: orders, invoices, GRNs, journal entries.
@@ -22,14 +23,14 @@ export async function nextDocumentNumber(
 ) {
   const db = client ?? prisma;
 
-  const rows = await db.$queryRaw`
+  const rows = await db.$queryRaw(Prisma.sql`
     SELECT id, "nextValue", "prefix", "padding"
     FROM "NumberSequence"
     WHERE "documentType" = ${documentType}
       AND "branchId" IS NOT DISTINCT FROM ${branchId}
       AND "periodKey" IS NOT DISTINCT FROM ${periodKey}
     FOR UPDATE
-  `;
+  `);
 
   let value;
   let resolvedPrefix = prefix;

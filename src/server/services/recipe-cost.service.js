@@ -187,15 +187,20 @@ export async function costRecipe({ recipeId, tx = prisma, depth = 0, seen = new 
  * snapshots as COGS at sale time, so a stale one misstates the margin on every
  * sale until the next roll-up.
  */
-export async function recostRecipe({ recipeId, actor = null }) {
-  const costed = await costRecipe({ recipeId });
+export async function recostRecipe({ recipeId, actor = null, memo = new Map() }) {
+  const costed = await costRecipe({ recipeId, memo });
   if (!costed) throw ApiError.notFound("Recipe not found");
+  const { isActive } = await prisma.recipe.findUnique({ where: { id: recipeId }, select: { isActive: true } });
 
   await prisma.$transaction(async (tx) => {
     await tx.recipe.update({
       where: { id: recipeId },
       data: { computedUnitCost: costed.unitCost, costUpdatedAt: new Date() },
     });
+
+    // Only the version in use speaks for the dish. Recosting an old version
+    // to look at it must not hand its cost to every sale from now on.
+    if (!isActive) return;
 
     if (costed.variantId) {
       await tx.productVariant.update({
@@ -233,6 +238,42 @@ export async function recostRecipe({ recipeId, actor = null }) {
 }
 
 /**
+ * Recosts a recipe that has just changed, and every live recipe above it.
+ *
+ * Run after each save, because the cached cost is what a dish's sales are
+ * costed at: a chef's edit that waits for someone to press "recost" is a week
+ * of sales at last week's cost. A sauce change moves the cost of every dish
+ * that uses the sauce, so the walk goes up through the recipes that use it.
+ *
+ * Never throws. The recipe is saved either way; a failed refresh is logged
+ * and the nightly or manual recost puts it right.
+ */
+export async function refreshRecipeCosts(recipeId, actor = null) {
+  const memo = new Map();
+  const done = new Set();
+  let frontier = [recipeId];
+
+  try {
+    for (let depth = 0; frontier.length && depth <= MAX_RECIPE_DEPTH; depth += 1) {
+      for (const id of frontier) {
+        if (done.has(id)) continue;
+        done.add(id);
+        // A fresh walk per level: the child's new cost has to be read, not a
+        // memo from before it changed.
+        await recostRecipe({ recipeId: id, actor, memo: depth === 0 ? memo : new Map() });
+      }
+      const parents = await prisma.recipeIngredient.findMany({
+        where: { subRecipeId: { in: frontier }, recipe: { isActive: true } },
+        select: { recipeId: true },
+      });
+      frontier = [...new Set(parents.map((row) => row.recipeId))].filter((id) => !done.has(id));
+    }
+  } catch (error) {
+    logger.warn("recipe cost refresh failed", { recipeId, error: error.message });
+  }
+}
+
+/**
  * Recosts every active recipe.
  *
  * Run after a delivery changes ingredient costs, or nightly. Sub-recipes are
@@ -242,7 +283,7 @@ export async function recostRecipe({ recipeId, actor = null }) {
 export async function recostAllRecipes({ onlyActive = true } = {}) {
   const recipes = await prisma.recipe.findMany({
     where: { ...(onlyActive ? { isActive: true } : {}) },
-    select: { id: true },
+    select: { id: true, isActive: true },
     orderBy: { createdAt: "asc" },
   });
 
@@ -259,7 +300,7 @@ export async function recostAllRecipes({ onlyActive = true } = {}) {
       data: { computedUnitCost: costed.unitCost, costUpdatedAt: new Date() },
     });
 
-    if (costed.variantId) {
+    if (costed.variantId && recipe.isActive) {
       await prisma.productVariant.update({
         where: { id: costed.variantId },
         data: { standardCost: tc(costed.unitCost) },

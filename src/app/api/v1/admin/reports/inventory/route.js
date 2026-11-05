@@ -1,4 +1,5 @@
 import { apiHandler, ok } from "@/lib/api";
+import { branchScope } from "@/lib/api/permissions";
 import { inventoryReportSchema } from "@/server/validation/finance.schemas";
 import { inventoryReport } from "@/server/services/operational-report.service";
 
@@ -9,5 +10,5 @@ import { inventoryReport } from "@/server/services/operational-report.service";
  */
 export const GET = apiHandler(
   { auth: true, permissions: "reports.view_inventory", query: inventoryReportSchema, branch: "query" },
-  async ({ query }) => ok(await inventoryReport(query)),
+  async ({ query, auth }) => ok(await inventoryReport({ ...query, scope: branchScope(auth, "reports.view_inventory") })),
 );

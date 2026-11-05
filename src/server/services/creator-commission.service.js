@@ -6,6 +6,7 @@ import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { money } from "@/server/accounting/balance";
 import { resolveCommission, specificityOf } from "@/server/creator/rules";
+import { assertRuleAccess, assertRuleReach, ruleScopeWhere } from "@/server/creator/access";
 
 /**
  * Commission rules.
@@ -64,7 +65,12 @@ function shape(rule) {
 }
 
 /** Refuses a rule that could never pay anything. */
-function assertCoherent(data) {
+/**
+ * Exported so the admin form can be held to exactly these rules by a unit
+ * test. A form that accepts what this refuses teaches people to distrust the
+ * form; one that refuses what this accepts silently removes a feature.
+ */
+export function assertRuleIsCoherent(data) {
   if (data.rewardType === "PERCENTAGE" && (D(data.rewardValue).lessThanOrEqualTo(0) || D(data.rewardValue).greaterThan(100))) {
     throw ApiError.validation("A percentage reward is between 0 and 100", {
       rewardValue: [`${data.rewardValue} is not a percentage`],
@@ -97,7 +103,10 @@ function assertCoherent(data) {
 }
 
 export async function createRule(data, actor) {
-  assertCoherent(data);
+  assertRuleIsCoherent(data);
+  // Before anything else: a rule spends money at the branches it names, and
+  // an empty list names every one of them.
+  assertRuleReach(actor, data.branchIds, "creator_commission_rules.create");
 
   if (data.creatorId) {
     const creator = await prisma.creatorProfile.findUnique({ where: { id: data.creatorId }, select: { id: true } });
@@ -158,7 +167,8 @@ async function loadRule(id) {
   return rule;
 }
 
-export async function getRule(id) {
+export async function getRule(id, { principal = null } = {}) {
+  if (principal) await assertRuleAccess(principal, id, "creator_commission_rules.read");
   return shape(await loadRule(id));
 }
 
@@ -171,7 +181,13 @@ export async function getRule(id) {
  */
 export async function updateRule(id, data, actor) {
   const rule = await loadRule(id);
-  assertCoherent({ ...rule, ...data });
+  assertRuleIsCoherent({ ...rule, ...data });
+  // Both sides of the edit: the rule as it stands, and the rule it would
+  // become. Checking only the new value would let a branch manager widen
+  // their own rule to the whole chain; checking only the old one would let
+  // them narrow somebody else's.
+  assertRuleReach(actor, rule.branchIds, "creator_commission_rules.update");
+  if (data.branchIds) assertRuleReach(actor, data.branchIds, "creator_commission_rules.update");
 
   const updated = await withTransaction(async (tx) => {
     if (data.targets) {
@@ -237,6 +253,7 @@ export async function updateRule(id, data, actor) {
 /** A rule that has paid is deactivated, never deleted — it explains the money. */
 export async function deleteRule(id, actor) {
   const rule = await loadRule(id);
+  assertRuleReach(actor, rule.branchIds, "creator_commission_rules.delete");
 
   const earnings = await prisma.creatorEarning.count({ where: { ruleId: id } });
   if (earnings > 0) {
@@ -258,9 +275,13 @@ export async function deleteRule(id, actor) {
   return { id, deleted: true };
 }
 
-export async function listRules({ isActive, creatorId, limit = 20, cursor } = {}) {
+export async function listRules({ isActive, creatorId, scope = null, limit = 20, cursor } = {}) {
   const rows = await prisma.creatorCommissionRule.findMany({
-    where: { ...(isActive != null ? { isActive } : {}), ...(creatorId ? { creatorId } : {}) },
+    where: {
+      ...(await ruleScopeWhere(scope)),
+      ...(isActive != null ? { isActive } : {}),
+      ...(creatorId ? { creatorId } : {}),
+    },
     select: SELECT,
     orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
     ...cursorArgs(cursor, limit),

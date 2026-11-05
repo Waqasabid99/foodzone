@@ -32,6 +32,10 @@ const cachedIdentity = unstable_cache(
     return {
       storeName: settings["store.name"] || "FoodZone",
       currency: settings["store.currency"] || "PKR",
+      // Declared in the settings registry since the beginning and read by
+      // nothing until now, which is why every instant on the dashboard was
+      // being dated in UTC.
+      timeZone: settings["store.timezone"] || "UTC",
       tagline: settings["store.tagline"] || "",
       supportEmail: settings["store.support_email"] || "",
       socials,
@@ -64,6 +68,6 @@ export async function getSiteIdentity() {
     logger.error("site identity read failed, falling back to defaults", {
       error: error?.message || String(error),
     });
-    return { storeName: "FoodZone", currency: "PKR", tagline: "", supportEmail: "", socials: {} };
+    return { storeName: "FoodZone", currency: "PKR", timeZone: "UTC", tagline: "", supportEmail: "", socials: {} };
   }
 }

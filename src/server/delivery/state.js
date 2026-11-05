@@ -92,15 +92,3 @@ const DRIVER_ALLOWED = [
 export function driverMayTransition(from, to) {
   return DRIVER_ALLOWED.includes(to) && canTransitionDelivery(from, to);
 }
-
-/**
- * Whether a delivery still needs the handover code.
- *
- * Checked as its own question rather than folded into the transition rules,
- * because whether a code is required is a setting and whether the sequence is
- * legal is not.
- */
-export function requiresHandoverCode({ status, otpHash, codeRequired }) {
-  if (!codeRequired || !otpHash) return false;
-  return status !== "DELIVERED";
-}

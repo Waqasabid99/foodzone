@@ -3,8 +3,10 @@ import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
+import { enqueue } from "@/server/jobs/outbox";
 import { postMovement, rebuildLevels } from "@/server/inventory/ledger";
 import { quantity as q, totalCost as tc } from "@/server/inventory/uom";
+import { branchFilter, scopeWhere } from "@/server/inventory/access";
 
 /**
  * Reading stock: what is on hand, what it is worth, what is about to expire.
@@ -20,13 +22,50 @@ import { quantity as q, totalCost as tc } from "@/server/inventory/uom";
 
 const D = (value) => new Prisma.Decimal(value ?? 0);
 
-export async function stockOnHand({ branchId, locationId, itemId, categoryId, lowOnly = false, limit = 50, cursor } = {}) {
+/** Stock levels at or below their item's reorder level, as ids — see `lowItemIds`. */
+async function lowLevelIds() {
+  const rows = await prisma.$queryRaw(Prisma.sql`
+    SELECT l.id
+    FROM "StockLevel" l
+    JOIN "InventoryItem" i ON i.id = l."itemId"
+    WHERE i."reorderLevel" IS NOT NULL AND l.quantity <= i."reorderLevel"
+  `);
+  return rows.map((row) => row.id);
+}
+
+export async function stockOnHand({
+  branchId,
+  locationId,
+  itemId,
+  categoryId,
+  search,
+  lowOnly = false,
+  scope = null,
+  limit = 50,
+  cursor,
+} = {}) {
+  const lowIds = lowOnly ? await lowLevelIds() : null;
+
   const rows = await prisma.stockLevel.findMany({
     where: {
-      ...(locationId ? { locationId } : {}),
-      ...(branchId ? { location: { branchId } } : {}),
-      ...(itemId ? { itemId } : {}),
-      ...(categoryId ? { item: { categoryId } } : {}),
+      AND: [
+        locationId ? { locationId } : {},
+        branchId ? { location: { branchId } } : {},
+        scopeWhere(scope, (filter) => ({ location: { branchId: filter } })),
+        itemId ? { itemId } : {},
+        categoryId ? { item: { categoryId } } : {},
+        lowIds ? { id: { in: lowIds } } : {},
+        search
+          ? {
+              item: {
+                OR: [
+                  { name: { contains: search, mode: "insensitive" } },
+                  { sku: { contains: search, mode: "insensitive" } },
+                ],
+              },
+            }
+          : {},
+      ],
     },
     select: {
       id: true,
@@ -38,13 +77,15 @@ export async function stockOnHand({ branchId, locationId, itemId, categoryId, lo
           id: true,
           sku: true,
           name: true,
+          isActive: true,
           reorderLevel: true,
           reorderQuantity: true,
           averageCost: true,
+          category: { select: { id: true, name: true } },
           uom: { select: { code: true, precision: true } },
         },
       },
-      location: { select: { id: true, name: true, code: true, branchId: true } },
+      location: { select: { id: true, name: true, code: true, branchId: true, branch: { select: { name: true } } } },
     },
     orderBy: [{ item: { name: "asc" } }, { id: "asc" }],
     ...cursorArgs(cursor, limit),
@@ -53,20 +94,25 @@ export async function stockOnHand({ branchId, locationId, itemId, categoryId, lo
   const page = toPage(rows, limit);
 
   const items = page.items.map((level) => ({
+    id: level.id,
     itemId: level.item.id,
     sku: level.item.sku,
     name: level.item.name,
+    isActive: level.item.isActive,
+    category: level.item.category,
     uom: level.item.uom.code,
+    precision: level.item.uom.precision,
     location: level.location,
     quantity: level.quantity,
     reserved: level.reservedQuantity,
     available: q(D(level.quantity).minus(D(level.reservedQuantity))),
     reorderLevel: level.item.reorderLevel,
+    averageCost: level.item.averageCost,
     isLow: level.item.reorderLevel != null && D(level.quantity).lessThanOrEqualTo(D(level.item.reorderLevel)),
     updatedAt: level.updatedAt,
   }));
 
-  return { ...page, items: lowOnly ? items.filter((item) => item.isLow) : items };
+  return { ...page, items };
 }
 
 /**
@@ -77,11 +123,12 @@ export async function stockOnHand({ branchId, locationId, itemId, categoryId, lo
  * every request would make it unusable. Batch-level value is available per item
  * for the cases that need it.
  */
-export async function stockValuation({ branchId, locationId, categoryId } = {}) {
+export async function stockValuation({ branchId, locationId, categoryId, scope = null } = {}) {
   const levels = await prisma.stockLevel.findMany({
     where: {
       ...(locationId ? { locationId } : {}),
       ...(branchId ? { location: { branchId } } : {}),
+      ...(branchFilter(scope) ? { AND: [{ location: { branchId: branchFilter(scope) } }] } : {}),
       ...(categoryId ? { item: { categoryId } } : {}),
       quantity: { not: 0 },
     },
@@ -139,12 +186,13 @@ export async function stockValuation({ branchId, locationId, categoryId } = {}) 
 }
 
 /** The ledger itself — every movement, newest first. */
-export async function listMovements({ itemId, locationId, branchId, type, from, to, orderId, limit = 50, cursor } = {}) {
+export async function listMovements({ itemId, locationId, branchId, type, from, to, orderId, scope = null, limit = 50, cursor } = {}) {
   const rows = await prisma.stockMovement.findMany({
     where: {
       ...(itemId ? { itemId } : {}),
       ...(locationId ? { locationId } : {}),
       ...(branchId ? { branchId } : {}),
+      ...(branchFilter(scope) ? { AND: [{ branchId: branchFilter(scope) }] } : {}),
       ...(type ? { type } : {}),
       ...(orderId ? { orderId } : {}),
       ...(from || to
@@ -164,9 +212,10 @@ export async function listMovements({ itemId, locationId, branchId, type, from, 
       notes: true,
       performedById: true,
       occurredAt: true,
-      item: { select: { id: true, sku: true, name: true, uom: { select: { code: true } } } },
-      location: { select: { id: true, name: true } },
+      item: { select: { id: true, sku: true, name: true, uom: { select: { code: true, precision: true } } } },
+      location: { select: { id: true, name: true, branch: { select: { name: true } } } },
       batch: { select: { id: true, batchNumber: true } },
+      order: { select: { id: true, orderNumber: true } },
     },
     orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
     ...cursorArgs(cursor, limit),
@@ -251,7 +300,7 @@ const BATCH_SELECT = {
   location: { select: { id: true, name: true, branchId: true } },
 };
 
-export async function listBatches({ itemId, locationId, branchId, status, expiringWithinDays, limit = 50, cursor } = {}) {
+export async function listBatches({ itemId, locationId, branchId, status, expiringWithinDays, scope = null, limit = 50, cursor } = {}) {
   const expiryFilter =
     expiringWithinDays != null
       ? { expiryDate: { not: null, lte: new Date(Date.now() + Number(expiringWithinDays) * 86_400_000) } }
@@ -262,6 +311,7 @@ export async function listBatches({ itemId, locationId, branchId, status, expiri
       ...(itemId ? { itemId } : {}),
       ...(locationId ? { locationId } : {}),
       ...(branchId ? { location: { branchId } } : {}),
+      ...(branchFilter(scope) ? { AND: [{ location: { branchId: branchFilter(scope) } }] } : {}),
       ...(status ? { status } : {}),
       ...expiryFilter,
     },
@@ -279,14 +329,15 @@ export async function listBatches({ itemId, locationId, branchId, status, expiri
  * The number a kitchen acts on daily: use it, discount it, or throw it away
  * before it becomes a health issue rather than a cost one.
  */
-export async function expiryReport({ branchId, withinDays = 7 }) {
+export async function expiryReport({ branchId, withinDays = 7, scope = null }) {
   const horizon = new Date(Date.now() + Number(withinDays) * 86_400_000);
   const now = new Date();
 
   const batches = await prisma.stockBatch.findMany({
     where: {
       ...(branchId ? { location: { branchId } } : {}),
-      status: { in: ["ACTIVE", "QUARANTINED"] },
+      ...(branchFilter(scope) ? { AND: [{ location: { branchId: branchFilter(scope) } }] } : {}),
+      status: { in: ["ACTIVE", "QUARANTINED", "EXPIRED"] },
       remainingQuantity: { gt: 0 },
       expiryDate: { not: null, lte: horizon },
     },
@@ -324,6 +375,11 @@ export async function setBatchStatus({ batchId, status, actor = null, notes = nu
   if (batch.status === "DEPLETED") {
     throw ApiError.conflict("This batch is finished; there is nothing to quarantine or release");
   }
+  // FIFO hands out ACTIVE batches, so "releasing" an expired one would put
+  // food past its date back on the line. It can only be written off.
+  if (batch.status === "EXPIRED" && status === "ACTIVE") {
+    throw ApiError.conflict("This batch has expired. Write it off rather than releasing it.");
+  }
 
   return prisma.stockBatch.update({
     where: { id: batchId },
@@ -359,6 +415,15 @@ export async function writeOffBatch({ batchId, reason = "EXPIRED", notes = null,
   }
 
   return withTransaction(async (tx) => {
+    // Claimed first, so two people pressing "write off" at once post one loss
+    // rather than two. The row lock makes the second wait, and by the time it
+    // re-checks the batch is empty.
+    const claimed = await tx.stockBatch.updateMany({
+      where: { id: batchId, remainingQuantity: { gt: 0 }, status: { not: "DEPLETED" } },
+      data: { status: reason === "EXPIRED" ? "EXPIRED" : "DEPLETED" },
+    });
+    if (claimed.count === 0) throw ApiError.conflict("This batch is already empty");
+
     await postMovement(tx, {
       itemId: batch.itemId,
       locationId: batch.locationId,
@@ -370,9 +435,12 @@ export async function writeOffBatch({ batchId, reason = "EXPIRED", notes = null,
       referenceId: batchId,
       notes: notes ?? `Batch ${batch.batchNumber} written off (${reason})`,
       performedById: actor?.userId ?? null,
+      // The batch is what is in the bin. If the level cache disagrees, the
+      // cache is what is wrong, and refusing would leave spoiled food counted.
+      allowNegative: true,
     });
 
-    await tx.wastage.create({
+    const wastage = await tx.wastage.create({
       data: {
         itemId: batch.itemId,
         locationId: batch.locationId,
@@ -380,11 +448,14 @@ export async function writeOffBatch({ batchId, reason = "EXPIRED", notes = null,
         unitCost: batch.unitCost,
         totalCost: tc(D(batch.remainingQuantity).times(D(batch.unitCost))),
         reason,
-        notes,
+        notes: notes ?? `Batch ${batch.batchNumber} written off`,
         recordedById: actor?.userId ?? null,
         approvedById: actor?.userId ?? null,
       },
+      select: { id: true },
     });
+    // The same expense as any other waste, and it has to reach the books the same way.
+    await enqueue({ eventType: "finance.wastage_recorded", payload: { wastageId: wastage.id }, db: tx });
 
     return tx.stockBatch.update({
       where: { id: batchId },

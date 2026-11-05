@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { couponScopeWhere } from "@/server/marketing/access";
 import { ApiError } from "@/lib/api";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { shortCode } from "@/server/utils/crypto";
@@ -69,9 +70,13 @@ const SELECT = {
   updatedAt: true,
 };
 
-export async function listCoupons({ limit = 20, cursor, promotionId, campaign, isActive, search } = {}) {
+export async function listCoupons({ limit = 20, cursor, promotionId, campaign, isActive, search, scope = null } = {}) {
+  // A code is a bearer token. Unfiltered, this hands every discount in the
+  // company to anyone who can read one outlet's.
+  const reach = await couponScopeWhere(scope);
   const rows = await prisma.coupon.findMany({
     where: {
+      ...(Object.keys(reach).length ? { AND: [reach] } : {}),
       ...(promotionId ? { promotionId } : {}),
       ...(campaign ? { campaign } : {}),
       ...(isActive !== undefined ? { isActive } : {}),
@@ -136,6 +141,11 @@ export async function generateCoupons({ promotionId, count, prefix = "", length 
   const cleanPrefix = normaliseCode(prefix);
   const tag = campaign ?? `batch-${Date.now()}`;
   const created = [];
+  // Every row *this call* inserted. The surplus is removed by id from this
+  // set rather than by campaign tag: a second run under a name already in
+  // use would otherwise delete the first run's live codes, which customers
+  // may be holding.
+  const insertedHere = new Set();
 
   // Bounded retries rather than `while (created.length < count)`: if the code
   // space is too small for the batch, this must fail loudly instead of spinning
@@ -157,14 +167,25 @@ export async function generateCoupons({ promotionId, count, prefix = "", length 
       ...rest,
     }));
 
+    const wantedCodes = rows.map((row) => row.code);
+
+    // Which of these already exist, before anything is written. A code is
+    // globally unique, so a collision may sit in another campaign entirely —
+    // without this, an existing code is found again afterwards and reported
+    // as freshly generated, quietly adopting somebody else's voucher.
+    const taken = new Set(
+      (await prisma.coupon.findMany({ where: { code: { in: wantedCodes } }, select: { code: true } })).map((row) => row.code),
+    );
+
     await prisma.coupon.createMany({ data: rows, skipDuplicates: true });
 
     const inserted = await prisma.coupon.findMany({
-      where: { campaign: tag, code: { in: rows.map((row) => row.code) } },
+      where: { code: { in: wantedCodes.filter((code) => !taken.has(code)) } },
       select: { id: true, code: true },
     });
 
     for (const row of inserted) {
+      insertedHere.add(row.id);
       if (created.length < count && !created.some((existing) => existing.id === row.id)) created.push(row);
     }
   }
@@ -176,9 +197,12 @@ export async function generateCoupons({ promotionId, count, prefix = "", length 
   }
 
   // Anything over-generated is deleted, so the batch is exactly what was asked
-  // for and no unaccounted-for live codes are left behind.
+  // for and no unaccounted-for live codes are left behind. Scoped to the ids
+  // this call created — never to the campaign tag, which is a label anyone
+  // may reuse.
   const keep = new Set(created.map((row) => row.id));
-  await prisma.coupon.deleteMany({ where: { campaign: tag, id: { notIn: [...keep] } } });
+  const surplus = [...insertedHere].filter((id) => !keep.has(id));
+  if (surplus.length) await prisma.coupon.deleteMany({ where: { id: { in: surplus } } });
 
   return { campaign: tag, count: created.length, codes: created.map((row) => row.code) };
 }
@@ -212,8 +236,15 @@ export async function deleteCoupon(id) {
 }
 
 /** Revokes a whole printed run at once — what you reach for when codes leak. */
-export async function revokeCampaign(campaign) {
-  const { count } = await prisma.coupon.updateMany({ where: { campaign }, data: { isActive: false } });
+export async function revokeCampaign(campaign, { scope = null } = {}) {
+  // Revoking by tag is a blunt instrument: it reaches every coupon carrying
+  // that campaign name, and nothing stops two outlets choosing the same one.
+  // Cut to the caller's branches so a manager killing their own batch cannot
+  // also kill somebody else's that happens to share a label.
+  const reach = await couponScopeWhere(scope);
+  const where = { campaign, ...(Object.keys(reach).length ? { AND: [reach] } : {}) };
+
+  const { count } = await prisma.coupon.updateMany({ where, data: { isActive: false } });
   if (!count) throw ApiError.notFound("No coupons found for that campaign");
   return { campaign, revoked: count };
 }

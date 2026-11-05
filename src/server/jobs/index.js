@@ -1,12 +1,13 @@
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
-import { drainOutbox, pruneOutbox } from "@/server/jobs/outbox";
+import { drainOutbox, pruneOutbox, releaseBlockedEvents } from "@/server/jobs/outbox";
 import { registerJobHandlers } from "@/server/jobs/handlers";
 import { clearExpiredAvailability } from "@/server/services/menu.service";
 import { pruneQrScans } from "@/server/services/qr.service";
 import { pruneExpiredCarts } from "@/server/services/cart.service";
 import { pruneTrackPoints } from "@/server/services/driver.service";
 import { flagExpiredBatches } from "@/server/services/stock.service";
+import { warnAboutFiscalRunway } from "@/server/services/fiscal.service";
 import { creditDueEarnings } from "@/server/services/creator-earning.service";
 import { expireAttributions } from "@/server/services/creator-attribution.service";
 import { expireCredit } from "@/server/services/creator-wallet.service";
@@ -56,7 +57,38 @@ export async function runMaintenanceCycle() {
     flagExpiredBatches(),
   ]);
 
-  return { ...outbox, availabilityRestored, qrScansPruned, cartsPruned, trackPointsPruned, batchesExpired };
+  /*
+   * These two are ordered, not raced.
+   *
+   * The warning counts the postings that are waiting, and the release empties
+   * that queue — so running them together let the release win and the warning
+   * report a backlog of zero, every day, for a backlog that was really there.
+   * Warn about what is waiting first, then release it.
+   */
+  const fiscalWarning = await warnAboutFiscalRunway();
+  // Postings that were waiting for an accounting period. Creating a fiscal
+  // year releases them itself; this is the safety net for a year that arrived
+  // another way — the seed, a restored backup, somebody editing the calendar
+  // directly. A release that was not needed costs one drain, and the event
+  // parks again without spending any of its retry budget.
+  const postingsReleased = await releaseBlockedEvents();
+
+  return {
+    ...outbox,
+    availabilityRestored,
+    qrScansPruned,
+    cartsPruned,
+    trackPointsPruned,
+    batchesExpired,
+    postingsReleased,
+    fiscalRunway: {
+      state: fiscalWarning.state,
+      daysLeft: fiscalWarning.daysLeft,
+      warned: fiscalWarning.warned,
+      // Who could act on it. Zero means the warning has nowhere to go.
+      audience: fiscalWarning.audience,
+    },
+  };
 }
 
 /**

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { patchSchema } from "@/server/validation/patch";
 
 /**
  * Request schemas.
@@ -112,6 +113,8 @@ export const updateProfileSchema = z
     phone: phoneSchema.nullable().optional(),
     locale: z.string().trim().min(2).max(10).optional(),
     avatarUrl: z.url("Enter a valid URL").nullable().optional(),
+    /** "" clears it back to "decide from what I do here". */
+    homePage: z.enum(["overview", "kitchen", ""]).nullable().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, "Nothing to update");
 
@@ -132,10 +135,7 @@ export const addressSchema = z.object({
   isDefault: z.boolean().default(false),
 });
 
-export const updateAddressSchema = addressSchema.partial().refine(
-  (data) => Object.keys(data).length > 0,
-  "Nothing to update",
-);
+export const updateAddressSchema = patchSchema(addressSchema, { message: "Nothing to update" });
 
 // --- user administration ---------------------------------------------------
 
@@ -258,9 +258,24 @@ export const createBranchSchema = z.object({
   openedAt: z.coerce.date().nullable().optional(),
 });
 
-export const updateBranchSchema = createBranchSchema
-  .partial()
-  .refine((data) => Object.keys(data).length > 0, "Nothing to update");
+export const updateBranchSchema = patchSchema(createBranchSchema, { message: "Nothing to update" });
+
+/**
+ * A `?flag=true` query parameter, as a real boolean.
+ *
+ * **`.default("false")` after a transform does not do what it looks like.** The
+ * default is the *input* default, so an absent parameter came back as the
+ * string `"false"` — which is truthy, so every one of these flags was
+ * permanently on. It is why `/me/notifications` only ever returned unread ones
+ * and an inbox emptied itself the moment you read it.
+ *
+ * Optional first, transform second: absent becomes `undefined`, and
+ * `undefined === "true"` is `false`, which is a boolean.
+ */
+const booleanFlag = z
+  .enum(["true", "false"])
+  .optional()
+  .transform((value) => value === "true");
 
 export const branchQuerySchema = z.object({
   search: z.string().trim().min(1).max(100).optional(),
@@ -268,10 +283,7 @@ export const branchQuerySchema = z.object({
     .enum(["true", "false"])
     .transform((value) => value === "true")
     .optional(),
-  includeState: z
-    .enum(["true", "false"])
-    .transform((value) => value === "true")
-    .default("false"),
+  includeState: booleanFlag,
   channel: z.enum(["WEB", "MOBILE_APP", "QR", "POS", "PHONE", "AGGREGATOR"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   cursor: z.string().min(1).optional(),
@@ -310,10 +322,7 @@ export const updateSettingsSchema = z.object({
 // --- notifications & devices ------------------------------------------------
 
 export const notificationQuerySchema = z.object({
-  unreadOnly: z
-    .enum(["true", "false"])
-    .transform((value) => value === "true")
-    .default("false"),
+  unreadOnly: booleanFlag,
   limit: z.coerce.number().int().min(1).max(100).default(20),
   cursor: z.string().min(1).optional(),
 });

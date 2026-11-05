@@ -310,7 +310,7 @@ async function main() {
   const menu = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: `Dine in ${stamp}`, type: "DINE_IN", isDefault: true },
+    body: { branchId, isActive: true, name: `Dine in ${stamp}`, type: "DINE_IN", isDefault: true },
   });
   const menuId = menu.body.data.id;
   await api(`/admin/menus/${menuId}/items`, { method: "POST", token: adminToken, body: { productId } });
@@ -325,7 +325,7 @@ async function main() {
   const otherMenu = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId: otherBranchId, name: `Other menu ${stamp}`, type: "DINE_IN" },
+    body: { branchId: otherBranchId, isActive: true, name: `Other menu ${stamp}`, type: "DINE_IN" },
   });
   const otherMenuId = otherMenu.body.data.id;
 
@@ -428,6 +428,33 @@ async function main() {
     { token: adminToken },
   );
   check("a future window reports no scans", windowed.body?.data?.totalScans === 0, windowed.body?.data?.totalScans);
+
+  /*
+   * The chart and the headline must agree about the same window.
+   *
+   * They are built by two different queries — `totalScans` through Prisma,
+   * `byDay` through raw SQL so a busy code's tens of thousands of scans are
+   * grouped in the database — and two queries over one window is exactly the
+   * shape that drifts apart. `scannedAt` is `timestamp without time zone`
+   * holding UTC while the raw query casts its bounds to `timestamptz`, so on a
+   * non-UTC server Postgres reinterprets both the column and the bound in the
+   * session's zone; the shifts cancel and the window holds. This asserts that
+   * rather than trusting it, because the next person to read that SQL will
+   * wonder, and because a one-sided version of the same comparison is a real
+   * bug — it is what made the outbox claim events up to five hours early.
+   *
+   * An hour-wide window, not a day: a skew of a few hours hides inside a day.
+   */
+  const lastHour = await api(
+    `/admin/qr-codes/${menuQrId}/analytics?from=${encodeURIComponent(new Date(Date.now() - 3_600_000).toISOString())}`,
+    { token: adminToken },
+  );
+  const charted = (lastHour.body?.data?.byDay ?? []).reduce((sum, row) => sum + Number(row.scans), 0);
+  check(
+    "the day chart agrees with the headline over the same window",
+    charted === lastHour.body?.data?.totalScans && charted >= 4,
+    { charted, totalScans: lastHour.body?.data?.totalScans, byDay: lastHour.body?.data?.byDay },
+  );
 
   const branchAnalytics = await api(`/admin/qr-codes/analytics?branchId=${branchId}`, { token: adminToken });
   check("branch-level analytics are available", branchAnalytics.status === 200, branchAnalytics.body?.error);

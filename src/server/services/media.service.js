@@ -167,10 +167,44 @@ export async function listAssets({ ownerType, ownerId, mimeType, limit = 20, cur
 }
 
 /**
+ * Everything pointing at this file, by the URL it is stored under.
+ *
+ * Images are referenced as plain URLs on the records that use them rather than
+ * by a foreign key, so there is no constraint to lean on — this asks each
+ * surface that can hold one. Used to refuse a delete that would leave a
+ * product on the live menu with a broken picture.
+ */
+export async function assetUsage(asset) {
+  const url = asset.url;
+  const [products, images, categories, sections, items, qrCodes, users] = await Promise.all([
+    prisma.product.findMany({ where: { imageUrl: url, deletedAt: null }, select: { id: true, name: true }, take: 5 }),
+    prisma.productImage.findMany({ where: { url }, select: { id: true, product: { select: { id: true, name: true } } }, take: 5 }),
+    prisma.category.findMany({ where: { imageUrl: url }, select: { id: true, name: true }, take: 5 }),
+    prisma.menuSection.findMany({ where: { imageUrl: url }, select: { id: true, name: true }, take: 5 }),
+    prisma.inventoryItem.findMany({ where: { imageUrl: url }, select: { id: true, name: true }, take: 5 }),
+    prisma.qrCode.findMany({ where: { imageUrl: url }, select: { id: true, label: true }, take: 5 }),
+    prisma.user.findMany({ where: { avatarUrl: url, deletedAt: null }, select: { id: true, name: true }, take: 5 }),
+  ]);
+
+  return [
+    ...products.map((row) => ({ kind: "Product", id: row.id, name: row.name, href: `/dashboard/products/${row.id}` })),
+    ...images.map((row) => ({ kind: "Product photo", id: row.product.id, name: row.product.name, href: `/dashboard/products/${row.product.id}` })),
+    ...categories.map((row) => ({ kind: "Category", id: row.id, name: row.name, href: `/dashboard/categories` })),
+    ...sections.map((row) => ({ kind: "Menu section", id: row.id, name: row.name, href: `/dashboard/menus` })),
+    ...items.map((row) => ({ kind: "Stock item", id: row.id, name: row.name, href: `/dashboard/inventory-items/${row.id}` })),
+    ...qrCodes.map((row) => ({ kind: "QR code", id: row.id, name: row.label ?? "QR code", href: `/dashboard/qr-codes` })),
+    ...users.map((row) => ({ kind: "Profile photo", id: row.id, name: row.name, href: `/dashboard/users/${row.id}` })),
+  ];
+}
+
+/**
  * Deletes the object and then the row.
  *
  * Object first: a row without its file shows a broken image, while a file
  * without its row is invisible and reclaimable. The first failure mode is worse.
+ *
+ * A file something is still using is refused, naming what to detach first — a
+ * deleted image does not break quietly, it breaks on the storefront.
  */
 export async function deleteAsset({ id, principal }) {
   const asset = await prisma.mediaAsset.findUnique({ where: { id } });
@@ -179,6 +213,14 @@ export async function deleteAsset({ id, principal }) {
   const isUploader = asset.uploadedById === principal.userId;
   if (!isUploader && !can(principal, "media.delete")) {
     throw ApiError.forbidden("You cannot delete this file", { required: ["media.delete"] });
+  }
+
+  const usedBy = await assetUsage(asset);
+  if (usedBy.length) {
+    throw ApiError.conflict(`This file is still used by ${usedBy.map((row) => `${row.kind.toLowerCase()} “${row.name}”`).join(", ")}`, {
+      usedBy,
+      hint: "Replace or remove it there first",
+    });
   }
 
   await (await storage()).deleteObject({ storageKey: asset.storageKey, kind: resolveKind(asset.mimeType) });

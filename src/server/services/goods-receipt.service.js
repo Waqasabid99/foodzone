@@ -2,13 +2,15 @@ import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/api";
 import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
-import { withTransaction } from "@/server/utils/db";
+import { withBulkTransaction, withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { nextDocumentNumber, monthPeriodKey } from "@/server/utils/sequence";
 import { postMovement } from "@/server/inventory/ledger";
 import { enqueue } from "@/server/jobs/outbox";
 import { allocateLandedCost, landedUnitCost } from "@/server/inventory/costing";
 import { convertQuantity, convertUnitCost, quantity as q, totalCost as tc, unitCost as uc } from "@/server/inventory/uom";
+import { branchFilter } from "@/server/access/scope";
+import { poReceivable } from "@/lib/purchasing";
 
 /**
  * Goods receipts — the moment stock and a payable both come into being.
@@ -220,7 +222,7 @@ export async function createGoodsReceipt(data, actor = null) {
   if (data.purchaseOrderId) {
     const order = await prisma.purchaseOrder.findUnique({
       where: { id: data.purchaseOrderId },
-      select: { id: true, status: true, supplierId: true },
+      select: { id: true, poNumber: true, status: true, supplierId: true },
     });
     if (!order) throw ApiError.validation("Purchase order not found", { purchaseOrderId: ["No such order"] });
     if (order.supplierId !== data.supplierId) {
@@ -228,8 +230,21 @@ export async function createGoodsReceipt(data, actor = null) {
         purchaseOrderId: ["Supplier mismatch"],
       });
     }
-    if (["DRAFT", "PENDING_APPROVAL", "CANCELLED"].includes(order.status)) {
-      throw ApiError.conflict("Approve the purchase order before receiving against it", { status: order.status });
+    // Asked as an allow-list, and the same one the order page gates its
+    // Receive button on. The deny-list this replaced named DRAFT,
+    // PENDING_APPROVAL and CANCELLED, so it quietly let CLOSED and RECEIVED
+    // through: a short close says the rest is no longer expected, and a
+    // delivery against it revives an order the business already wrote off,
+    // while a second delivery against a RECEIVED one doubles the stock and
+    // the payable. Any status added later is refused until it is allowed on
+    // purpose, which is the direction an error should fail in.
+    if (!poReceivable(order.status)) {
+      throw ApiError.conflict(
+        ["DRAFT", "PENDING_APPROVAL"].includes(order.status)
+          ? "Approve the purchase order before receiving against it"
+          : `${order.poNumber} is ${order.status.toLowerCase().replace("_", " ")}; nothing more is expected against it`,
+        { status: order.status },
+      );
     }
   }
 
@@ -298,7 +313,9 @@ export async function postGoodsReceipt(id, actor) {
     landedCost: receipt.landedCost,
   });
 
-  const posted = await withTransaction(async (tx) => {
+  // Sized to the number of lines: a week's delivery from one supplier is
+  // routinely dozens of items.
+  const posted = await withBulkTransaction(async (tx) => {
     for (const line of withLanded) {
       const item = line.item;
       const accepted = D(line.quantity).minus(D(line.rejectedQuantity));
@@ -416,7 +433,7 @@ export async function postGoodsReceipt(id, actor) {
     await enqueue({ eventType: "finance.goods_receipt_posted", payload: { goodsReceiptId: id }, db: tx });
 
     return completed;
-  });
+  }, { lines: withLanded.length });
 
   await recordAudit({
     actorId: actor?.userId ?? null,
@@ -469,9 +486,12 @@ export async function cancelGoodsReceipt(id, { reason = null, actor }) {
   });
 }
 
-export async function listGoodsReceipts({ branchId, supplierId, purchaseOrderId, status, limit = 20, cursor } = {}) {
+export async function listGoodsReceipts({ branchId, supplierId, purchaseOrderId, status, scope = null, limit = 20, cursor } = {}) {
+  const filter = branchFilter(scope);
+
   const rows = await prisma.goodsReceipt.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(supplierId ? { supplierId } : {}),
       ...(purchaseOrderId ? { purchaseOrderId } : {}),

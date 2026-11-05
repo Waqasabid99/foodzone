@@ -18,7 +18,11 @@ import { logger } from "@/lib/logger";
 export function invalidate(...tags) {
   for (const tag of tags) {
     try {
-      revalidateTag(tag);
+      // `{ expire: 0 }`, not the recommended "max": "max" serves the stale
+      // copy once more while it refreshes, and the stale copy is the shut
+      // outlet or the withdrawn dish. This is also exactly what the deprecated
+      // one-argument form did, so it is the same behaviour, stated.
+      revalidateTag(tag, { expire: 0 });
     } catch (error) {
       logger.warn("cache revalidation failed", { tag, error: error?.message || String(error) });
     }

@@ -69,6 +69,23 @@ model Product {
   type             ProductType     @default(SIMPLE)
   category         Category        @relation(fields: [categoryId], references: [id])
   categoryId       String
+  /// Which outlet sells this.
+  ///
+  /// Null means the whole chain: the item is on every branch's catalogue, and
+  /// that is the default, so a single-branch restaurant never sets this and
+  /// never sees a branch field anywhere in the dashboard.
+  ///
+  /// Set, and the product belongs to that one outlet — a manager elsewhere
+  /// cannot see it, price it, film it or report on it. Creating a chain-wide
+  /// product therefore takes a company-wide grant, the same test a chain-wide
+  /// promotion gets, because it changes what every outlet sells.
+  ///
+  /// `slug` stays globally unique rather than unique per branch. Postgres
+  /// treats NULLs as distinct in a unique index, so `@@unique([branchId, slug])`
+  /// would let two chain-wide products share a slug and quietly break the
+  /// `/menu/[slug]` lookup, which has no branch in it.
+  branch           Branch?         @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchId         String?
   imageUrl         String?
   dietary          DietaryTag[]
   spiceLevel       Int? // 0-5, null when not applicable
@@ -104,6 +121,7 @@ model Product {
 
   @@index([categoryId])
   @@index([isActive, isFeatured])
+  @@index([branchId, isActive])
 }
 
 model ProductImage {

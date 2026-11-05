@@ -7,6 +7,8 @@ import { recordAudit } from "@/server/utils/audit";
 import { slugify } from "@/lib/slug";
 import { defaultPointsFor, effectiveStatus, isSuspended, standingFor, totalPoints } from "@/server/creator/strikes";
 import { invalidatePrincipal } from "@/lib/api/permissions";
+import { creatorScopeWhere } from "@/server/creator/access";
+import { FULFILLED_STATUSES } from "@/lib/order-status";
 
 /**
  * The creator program: configuration, terms, and who is in it.
@@ -224,8 +226,12 @@ export async function creatorEligibility(userId) {
 
   if (!config.isEnabled) return { eligible: false, reason: "PROGRAM_CLOSED", isEnabled: false };
 
+  // Both fulfilled statuses, not just COMPLETED. A delivery order stops at
+  // DELIVERED until somebody in the back office closes it out, so checking
+  // COMPLETED alone made joining wait on an admin — and told the customer
+  // "once you have had one order delivered", which had just happened.
   const order = await prisma.order.findFirst({
-    where: { userId, status: "COMPLETED" },
+    where: { userId, status: { in: FULFILLED_STATUSES } },
     select: { id: true, orderNumber: true, completedAt: true, placedAt: true },
     orderBy: { placedAt: "desc" },
   });
@@ -446,9 +452,11 @@ export async function publicCreator(handle) {
   return visible;
 }
 
-export async function listCreators({ status, search, limit = 20, cursor } = {}) {
+export async function listCreators({ status, search, scope = null, limit = 20, cursor } = {}) {
   const rows = await prisma.creatorProfile.findMany({
     where: {
+      // Derived from what they have filmed: see creatorScopeWhere.
+      ...creatorScopeWhere(scope),
       ...(status ? { status } : {}),
       ...(search
         ? {

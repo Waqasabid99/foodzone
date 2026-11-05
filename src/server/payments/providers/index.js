@@ -1,6 +1,7 @@
 import { ApiError } from "@/lib/api";
 import { cashProvider } from "@/server/payments/providers/cash";
 import { mockProvider } from "@/server/payments/providers/mock";
+import { safepayProvider } from "@/server/payments/providers/safepay";
 
 /**
  * The payment provider registry.
@@ -20,6 +21,9 @@ import { mockProvider } from "@/server/payments/providers/mock";
  *   capture({ payment, amount })           — take an authorised amount
  *   void({ payment })                      — release an authorisation
  *   refund({ payment, refund })            — send money back
+ *   credentials                            — the fields a branch must configure,
+ *                                            each { key, label, type, secret,
+ *                                            required, schema, hint }
  *   verifySignature({ rawBody, headers })  — decide whether a webhook is genuine
  *   parseEvent({ payload })                — normalise a webhook into { eventId, type, ... }
  *
@@ -31,6 +35,7 @@ import { mockProvider } from "@/server/payments/providers/mock";
 const providers = new Map([
   [cashProvider.name, cashProvider],
   [mockProvider.name, mockProvider],
+  [safepayProvider.name, safepayProvider],
 ]);
 
 /** Registers a provider. Exported so a real gateway is a drop-in, not an edit. */
@@ -54,7 +59,8 @@ export function listProviders() {
     supportsOnline: provider.supportsOnline,
     supportsRefund: typeof provider.refund === "function",
     methods: provider.methods ?? [],
+    credentialKeys: (provider.credentials ?? []).map((field) => field.key),
   }));
 }
 
-export { cashProvider, mockProvider };
+export { cashProvider, mockProvider, safepayProvider };

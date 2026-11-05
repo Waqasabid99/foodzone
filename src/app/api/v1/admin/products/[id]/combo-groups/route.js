@@ -2,6 +2,7 @@ import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { createComboGroupSchema } from "@/server/validation/catalog.schemas";
 import { createComboGroup, listComboGroups } from "@/server/services/combo.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 export const GET = apiHandler(
   { auth: true, permissions: "combos.read", params: idParamSchema },
@@ -17,6 +18,7 @@ export const POST = apiHandler(
     body: createComboGroupSchema,
     rateLimit: RateLimits.write,
     audit: { action: "combo_group.create", entityType: "ComboGroup" },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ params, body }) => created(await createComboGroup(params.id, body)),
 );

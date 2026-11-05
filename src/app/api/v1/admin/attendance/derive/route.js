@@ -1,4 +1,4 @@
-import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, ok, RateLimits } from "@/lib/api";
 import { deriveAttendanceSchema } from "@/server/validation/hr.schemas";
 import { deriveRange } from "@/server/services/attendance.service";
 
@@ -9,6 +9,9 @@ import { deriveRange } from "@/server/services/attendance.service";
  * on demand, and again after a re-sync. Days a supervisor has corrected are
  * skipped unless `force` is set — a correction that evaporates on the next run
  * is worse than none at all.
+ *
+ * Scoped to the caller's own branches even when they name none, because this
+ * rewrites attendance and "everything" must not mean another outlet's.
  */
 export const POST = apiHandler(
   {
@@ -18,5 +21,5 @@ export const POST = apiHandler(
     branch: "body",
     rateLimit: RateLimits.write,
   },
-  async ({ body }) => ok(await deriveRange(body)),
+  async ({ body, auth }) => ok(await deriveRange({ ...body, scope: branchScope(auth, "attendance.edit") })),
 );

@@ -1,4 +1,4 @@
-import { apiHandler, ok } from "@/lib/api";
+import { apiHandler, branchScope, ok } from "@/lib/api";
 import { listPunchesSchema } from "@/server/validation/hr.schemas";
 import { unmatchedPunches } from "@/server/services/punch.service";
 
@@ -11,5 +11,6 @@ import { unmatchedPunches } from "@/server/services/punch.service";
  */
 export const GET = apiHandler(
   { auth: true, permissions: "attendance_punches.read", query: listPunchesSchema, branch: "query" },
-  async ({ query }) => ok(await unmatchedPunches(query)),
+  async ({ query, auth }) =>
+    ok(await unmatchedPunches({ ...query, scope: branchScope(auth, "attendance_punches.read") })),
 );

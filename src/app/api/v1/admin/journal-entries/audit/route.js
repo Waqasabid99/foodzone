@@ -1,4 +1,5 @@
 import { apiHandler, ok } from "@/lib/api";
+import { branchScope } from "@/lib/api/permissions";
 import { periodReportSchema } from "@/server/validation/finance.schemas";
 import { auditLedger } from "@/server/services/journal.service";
 
@@ -12,5 +13,5 @@ import { auditLedger } from "@/server/services/journal.service";
  */
 export const GET = apiHandler(
   { auth: true, permissions: "financial_reports.view_trial_balance", query: periodReportSchema },
-  async ({ query }) => ok(await auditLedger(query)),
+  async ({ query, auth }) => ok(await auditLedger({ ...query, scope: branchScope(auth, "financial_reports.view_trial_balance") })),
 );

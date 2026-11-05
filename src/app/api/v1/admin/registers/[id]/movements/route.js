@@ -1,4 +1,5 @@
 import { apiHandler, created, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { recordMovementSchema } from "@/server/validation/payment.schemas";
 import { recordMovement } from "@/server/services/register.service";
@@ -18,5 +19,8 @@ export const POST = apiHandler(
     body: recordMovementSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => created(await recordMovement({ sessionId: params.id, ...body, actor: auth })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "registerSession", params.id, "cash_registers.record_movement");
+    return created(await recordMovement({ sessionId: params.id, ...body, actor: auth }));
+  },
 );

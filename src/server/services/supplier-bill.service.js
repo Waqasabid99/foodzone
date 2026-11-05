@@ -8,6 +8,7 @@ import { nextDocumentNumber, monthPeriodKey } from "@/server/utils/sequence";
 import { money } from "@/server/accounting/balance";
 import { ageBalances } from "@/server/accounting/reports";
 import { enqueue } from "@/server/jobs/outbox";
+import { branchFilter } from "@/server/access/scope";
 
 /**
  * Accounts payable.
@@ -398,9 +399,12 @@ export async function recordBillPayment(id, data, actor) {
   return { ...result.bill, payment: result.payment, outstanding: money(D(result.bill.grandTotal).minus(D(result.bill.paidAmount))) };
 }
 
-export async function listSupplierBills({ branchId, supplierId, status, overdueOnly, from, to, limit = 20, cursor } = {}) {
+export async function listSupplierBills({ branchId, supplierId, status, overdueOnly, from, to, scope = null, limit = 20, cursor } = {}) {
+  const filter = branchFilter(scope);
+
   const rows = await prisma.supplierBill.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(supplierId ? { supplierId } : {}),
       ...(status ? { status } : {}),
@@ -446,9 +450,12 @@ export async function listSupplierBills({ branchId, supplierId, status, overdueO
  * answers for the same invoices — and quoting one as the other is how a
  * supplier gets chased for something that was not yet due.
  */
-export async function payablesAgeing({ branchId = null, supplierId = null, asOf = new Date() } = {}) {
+export async function payablesAgeing({ branchId = null, supplierId = null, scope = null, asOf = new Date() } = {}) {
+  const filter = branchFilter(scope);
+
   const bills = await prisma.supplierBill.findMany({
     where: {
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(branchId ? { branchId } : {}),
       ...(supplierId ? { supplierId } : {}),
       status: { in: ["APPROVED", "PARTIALLY_PAID", "OVERDUE"] },

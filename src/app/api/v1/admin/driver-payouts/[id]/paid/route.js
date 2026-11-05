@@ -2,6 +2,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { markPaidSchema } from "@/server/validation/delivery.schemas";
 import { markPayoutPaid } from "@/server/services/driver-payout.service";
+import { assertRecordAccess } from "@/server/delivery/access";
 
 /**
  * Marks a payout paid, and clears the COD it deducted.
@@ -19,6 +20,8 @@ export const POST = apiHandler(
     body: markPaidSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) =>
-    ok(await markPayoutPaid({ payoutId: params.id, paymentReference: body?.paymentReference ?? null, actor: auth })),
+  async ({ params, body, auth }) => {
+    await assertRecordAccess(auth, "driverPayout", params.id, "driver_payouts.mark_paid");
+    return ok(await markPayoutPaid({ payoutId: params.id, paymentReference: body?.paymentReference ?? null, actor: auth }));
+  },
 );

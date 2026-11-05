@@ -3,6 +3,7 @@ import { apiHandler, created, RateLimits } from "@/lib/api";
 import { cuidSchema } from "@/server/validation/schemas";
 import { billFromReceiptSchema } from "@/server/validation/finance.schemas";
 import { billFromGoodsReceipt } from "@/server/services/supplier-bill.service";
+import { assertRecordAccess } from "@/server/purchasing/access";
 
 const paramsSchema = z.object({ goodsReceiptId: cuidSchema });
 
@@ -20,5 +21,10 @@ export const POST = apiHandler(
     body: billFromReceiptSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => created(await billFromGoodsReceipt(params.goodsReceiptId, body, auth)),
+  async ({ params, body, auth }) => {
+    // Billing from a receipt names the receipt, so the receipt's branch is
+    // what decides — the bill inherits it.
+    await assertRecordAccess(auth, "goodsReceipt", params.goodsReceiptId, "supplier_bills.create");
+    return created(await billFromGoodsReceipt(params.goodsReceiptId, body, auth));
+  },
 );

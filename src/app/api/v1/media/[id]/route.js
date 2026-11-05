@@ -1,10 +1,15 @@
+import { z } from "zod";
 import { apiHandler, noContent, ok, RateLimits } from "@/lib/api";
 import { attachAssetSchema, idParamSchema } from "@/server/validation/schemas";
-import { attachAsset, deleteAsset, getAsset } from "@/server/services/media.service";
+import { assetUsage, attachAsset, deleteAsset, getAsset } from "@/server/services/media.service";
 
+/** `usage=1` also answers what is pointing at this file, which is what makes a delete refusable. */
 export const GET = apiHandler(
-  { auth: true, permissions: "media.upload", params: idParamSchema },
-  async ({ params }) => ok(await getAsset(params.id)),
+  { auth: true, permissions: "media.upload", params: idParamSchema, query: z.object({ usage: z.stringbool().optional() }) },
+  async ({ params, query }) => {
+    const asset = await getAsset(params.id);
+    return ok(query?.usage ? { ...asset, usedBy: await assetUsage(asset) } : asset);
+  },
 );
 
 /** Links an uploaded file to the record it belongs to, once that record exists. */

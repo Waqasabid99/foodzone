@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, created, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/inventory/access";
 import { cuidSchema } from "@/server/validation/schemas";
-import { createAdjustmentSchema } from "@/server/validation/inventory.schemas";
+import { adjustmentTypeSchema, createAdjustmentSchema } from "@/server/validation/inventory.schemas";
 import { createAdjustment, listAdjustments } from "@/server/services/stock-adjustment.service";
 
 const querySchema = z.object({
@@ -10,11 +11,12 @@ const querySchema = z.object({
   branchId: cuidSchema.optional(),
   locationId: cuidSchema.optional(),
   status: z.enum(["DRAFT", "PENDING_APPROVAL", "APPROVED", "REJECTED", "COMPLETED", "CANCELLED"]).optional(),
+  type: adjustmentTypeSchema.optional(),
 });
 
 export const GET = apiHandler(
   { auth: true, permissions: "stock_adjustments.read", query: querySchema, branch: "query" },
-  async ({ query }) => ok(await listAdjustments(query)),
+  async ({ query, auth }) => ok(await listAdjustments({ ...query, scope: branchScope(auth, "stock_adjustments.read") })),
 );
 
 /**
@@ -30,5 +32,8 @@ export const POST = apiHandler(
     body: createAdjustmentSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ body, auth }) => created(await createAdjustment({ ...body, actor: auth })),
+  async ({ body, auth }) => {
+    await assertRecordAccess(auth, "location", body.locationId, "stock_adjustments.create");
+    return created(await createAdjustment({ ...body, actor: auth }));
+  },
 );

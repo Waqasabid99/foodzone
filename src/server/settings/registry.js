@@ -198,6 +198,12 @@ export const SETTINGS = [
     type: "json",
     default: ["DINE_IN"],
     schema: z.array(z.enum(["DELIVERY", "PICKUP", "DINE_IN"])).max(3),
+    /** The choices a screen offers; the schema above is what actually decides. */
+    options: [
+      { value: "DELIVERY", label: "Delivery" },
+      { value: "PICKUP", label: "Pickup" },
+      { value: "DINE_IN", label: "Dine-in" },
+    ],
     isPublic: true,
     branchOverridable: true,
   },
@@ -207,6 +213,12 @@ export const SETTINGS = [
     type: "json",
     default: ["DELIVERY", "PICKUP"],
     schema: z.array(z.enum(["DELIVERY", "PICKUP", "DINE_IN"])).max(3),
+    /** The choices a screen offers; the schema above is what actually decides. */
+    options: [
+      { value: "DELIVERY", label: "Delivery" },
+      { value: "PICKUP", label: "Pickup" },
+      { value: "DINE_IN", label: "Dine-in" },
+    ],
     isPublic: true,
     branchOverridable: true,
   },
@@ -224,30 +236,6 @@ export const SETTINGS = [
     default: 0,
     schema: z.number().min(0).max(100),
     isPublic: true,
-    branchOverridable: true,
-  },
-  {
-    key: "delivery.require_handover_code",
-    label: "Require a handover code",
-    /**
-     * A four-digit code the customer reads out at the door. It stops
-     * "delivered" being tapped from the end of the street — and it also strands
-     * a driver whose customer is not answering, which is why it is a per-branch
-     * choice rather than a rule.
-     */
-    type: "boolean",
-    default: false,
-    schema: z.boolean(),
-    isPublic: false,
-    branchOverridable: true,
-  },
-  {
-    key: "delivery.require_proof_photo",
-    label: "Require a proof-of-delivery photo",
-    type: "boolean",
-    default: false,
-    schema: z.boolean(),
-    isPublic: false,
     branchOverridable: true,
   },
   {
@@ -293,6 +281,19 @@ export const SETTINGS = [
         "OTHER",
       ]),
     ),
+    options: [
+      { value: "CASH", label: "Cash" },
+      { value: "CASH_ON_DELIVERY", label: "Cash on delivery" },
+      { value: "CARD", label: "Card" },
+      { value: "UPI", label: "UPI" },
+      { value: "NET_BANKING", label: "Net banking" },
+      { value: "WALLET", label: "Wallet" },
+      { value: "BANK_TRANSFER", label: "Bank transfer" },
+      { value: "GIFT_CARD", label: "Gift card" },
+      { value: "STORE_CREDIT", label: "Store credit" },
+      { value: "AGGREGATOR", label: "Aggregator" },
+      { value: "OTHER", label: "Something else" },
+    ],
     isPublic: true,
     branchOverridable: true,
   },
@@ -315,6 +316,12 @@ export const SETTINGS = [
     type: "json",
     default: [],
     schema: z.array(z.enum(["DELIVERY", "PICKUP", "DINE_IN"])),
+    /** The choices a screen offers; the schema above is what actually decides. */
+    options: [
+      { value: "DELIVERY", label: "Delivery" },
+      { value: "PICKUP", label: "Pickup" },
+      { value: "DINE_IN", label: "Dine-in" },
+    ],
     isPublic: true,
     branchOverridable: true,
   },
@@ -383,6 +390,28 @@ export const SETTINGS = [
     type: "boolean",
     default: false,
     schema: z.boolean(),
+  },
+  {
+    key: "payroll.require_separate_approver",
+    label: "Payroll needs a second person to approve it",
+    /**
+     * Whoever ran the payroll cannot be the one who approves it.
+     *
+     * The permissions to run, approve and pay are already separate, but the
+     * seeded HR manager holds all three, so without this the same person can
+     * compute their own pay, approve it and release the money.
+     *
+     * Overridable per branch rather than absolute, because a single outlet may
+     * genuinely have one person who does payroll, and a control that stops
+     * wages going out is a control somebody disables in a hurry. Turning it off
+     * is a deliberate, audited change, and an approval made under it is
+     * recorded as self-approved on the period's audit entry.
+     */
+    type: "boolean",
+    default: true,
+    schema: z.boolean(),
+    isPublic: false,
+    branchOverridable: true,
   },
   {
     key: "maintenance.enabled",

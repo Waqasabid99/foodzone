@@ -110,6 +110,44 @@ export async function notifyRole({ roleKey, branchId = null, ...rest }) {
   return notifyUsers({ userIds: assignments.map((row) => row.userId), ...rest });
 }
 
+/**
+ * Everyone who can actually do the thing being asked — "tell whoever can open
+ * a fiscal year".
+ *
+ * Targeted by permission rather than by role name on purpose. A role key is a
+ * label somebody can rename or replace with their own role; the permission is
+ * the thing the endpoint itself checks, so this cannot drift out of step with
+ * who is allowed to act. A warning sent to people without the grant is worse
+ * than no warning: they cannot fix it and they learn to ignore the next one.
+ */
+export async function usersWithPermission(permissionKey) {
+  const [assignments, superAdmins] = await Promise.all([
+    prisma.userRoleAssignment.findMany({
+      where: {
+        role: { permissions: { some: { permission: { key: permissionKey } } } },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        user: { status: "ACTIVE" },
+      },
+      select: { userId: true },
+    }),
+    /*
+     * Super admins hold every permission by flag and may have no role rows at
+     * all, so a role query alone misses them — and on a small installation the
+     * owner is exactly that: one bootstrap account, no roles, nobody else.
+     * Asking only about roles would have sent every warning to nobody, which
+     * is how `grantedPermissionKeys` resolves it too (`isSuperAdmin` returns
+     * `["*"]` before any role is read).
+     */
+    prisma.user.findMany({ where: { isSuperAdmin: true, status: "ACTIVE" }, select: { id: true } }),
+  ]);
+
+  return [...new Set([...assignments.map((row) => row.userId), ...superAdmins.map((row) => row.id)])].filter(Boolean);
+}
+
+export async function notifyPermission({ permissionKey, ...rest }) {
+  return notifyUsers({ userIds: await usersWithPermission(permissionKey), ...rest });
+}
+
 export async function listNotifications({ userId, unreadOnly = false, limit = 20, cursor }) {
   const rows = await prisma.notification.findMany({
     where: { userId, ...(unreadOnly ? { readAt: null } : {}) },

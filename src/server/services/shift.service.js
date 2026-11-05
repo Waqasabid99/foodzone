@@ -11,6 +11,7 @@ import {
   shiftLengthMinutes,
   startOfDay,
 } from "@/server/attendance/shift";
+import { branchFilter } from "@/server/hr/access";
 
 /**
  * Shifts and the roster.
@@ -37,7 +38,7 @@ const SHIFT_SELECT = {
   halfDayThresholdMinutes: true,
   fullDayThresholdMinutes: true,
   isActive: true,
-  _count: { select: { assignments: true } },
+  _count: { select: { assignments: true, attendanceDays: true } },
 };
 
 function shape(shift) {
@@ -50,6 +51,9 @@ function shape(shift) {
     lengthMinutes: shiftLengthMinutes(row),
     crossesMidnight: crossesMidnight(row),
     assignmentCount: _count?.assignments ?? 0,
+    // Once a day has been derived against these times, retiming would rewrite
+    // history. Reported so a screen can say so before somebody tries.
+    workedDays: _count?.attendanceDays ?? 0,
   };
 }
 
@@ -115,9 +119,14 @@ export async function createShift(data, actor = null) {
   return shape(shift);
 }
 
-export async function listShifts({ branchId, isActive } = {}) {
+export async function listShifts({ branchId, isActive, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.shift.findMany({
-    where: { ...(branchId ? { branchId } : {}), ...(isActive != null ? { isActive } : {}) },
+    where: {
+      ...(branchId ? { branchId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
+      ...(isActive != null ? { isActive } : {}),
+    },
     select: SHIFT_SELECT,
     orderBy: { startMinute: "asc" },
   });
@@ -159,8 +168,12 @@ export async function updateShift(id, data, actor = null) {
     }
   }
 
-  const startMinute = data.startMinute ?? data.startTime ? toMinutes(data.startMinute ?? data.startTime, "startMinute") : shift.startMinute;
-  let endMinute = data.endMinute ?? data.endTime ? toMinutes(data.endMinute ?? data.endTime, "endMinute") : shift.endMinute;
+  // Tested against null rather than for truthiness: midnight is minute 0, and
+  // a falsy check would silently keep the old start on a shift moved to 00:00.
+  const givenStart = data.startMinute ?? data.startTime;
+  const givenEnd = data.endMinute ?? data.endTime;
+  const startMinute = givenStart != null ? toMinutes(givenStart, "startMinute") : shift.startMinute;
+  let endMinute = givenEnd != null ? toMinutes(givenEnd, "endMinute") : shift.endMinute;
   if (endMinute <= startMinute) endMinute += 1440;
 
   const updated = await prisma.shift.update({
@@ -319,14 +332,16 @@ export async function removeAssignment({ employeeId, workDate, actor }) {
 }
 
 /** The roster for a branch over a window — the grid a manager publishes. */
-export async function roster({ branchId, employeeId, from, to }) {
+export async function roster({ branchId, employeeId, from, to, scope = null }) {
   const start = startOfDay(from);
   const end = startOfDay(to ?? from);
+  const filter = branchFilter(scope);
 
   const rows = await prisma.shiftAssignment.findMany({
     where: {
       ...(employeeId ? { employeeId } : {}),
       ...(branchId ? { employee: { branchId } } : {}),
+      ...(filter ? { AND: [{ employee: { branchId: filter } }] } : {}),
       workDate: { gte: start, lte: end },
     },
     select: ASSIGNMENT_SELECT,

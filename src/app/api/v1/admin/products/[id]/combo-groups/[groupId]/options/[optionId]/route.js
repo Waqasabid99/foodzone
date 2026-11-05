@@ -3,6 +3,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { cuidSchema } from "@/server/validation/schemas";
 import { updateComboOptionSchema } from "@/server/validation/catalog.schemas";
 import { deleteComboOption, updateComboOption } from "@/server/services/combo.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 const paramsSchema = z.object({ id: cuidSchema, groupId: cuidSchema, optionId: cuidSchema });
 
@@ -14,6 +15,7 @@ export const PATCH = apiHandler(
     body: updateComboOptionSchema,
     rateLimit: RateLimits.write,
     audit: { action: "combo_option.update", entityType: "ComboGroupOption", entityId: ({ params }) => params.optionId },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ params, body }) =>
     ok(
@@ -33,6 +35,7 @@ export const DELETE = apiHandler(
     params: paramsSchema,
     rateLimit: RateLimits.write,
     audit: { action: "combo_option.delete", entityType: "ComboGroupOption", entityId: ({ params }) => params.optionId },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ params }) =>
     ok(await deleteComboOption({ comboProductId: params.id, groupId: params.groupId, optionId: params.optionId })),

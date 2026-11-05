@@ -22,7 +22,9 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import "dotenv/config";
 import { PERMISSIONS } from "./seeds/permissions.js";
 import { SYSTEM_ROLES, resolvePermissionKeys } from "./seeds/roles.js";
+import { CONTENT_PAGES } from "./seeds/content-pages.js";
 import { STANDARD_CHART } from "../src/server/accounting/chart.js";
+import { fiscalYearFor, fiscalYearStartMonth, monthsBetween } from "../src/server/accounting/fiscal-calendar.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -150,7 +152,105 @@ async function seedAccounts() {
   return { total: STANDARD_CHART.length, created };
 }
 
+/**
+ * Opens the fiscal year covering today, if nothing covers it yet.
+ *
+ * Without this a fresh install cannot keep books at all. `assertPostable`
+ * refuses any date that falls in no accounting period, so on day one every
+ * sale, every bill and every payroll run is rejected, and the forty seeded
+ * accounts sit there unusable. The chart of accounts without a calendar is
+ * half an installation.
+ *
+ * Defaults to Pakistan's financial year, 1 July to 30 June; a client whose
+ * year differs sets FISCAL_YEAR_START_MONTH before the first run.
+ *
+ * Idempotent, and deliberately timid about it:
+ *
+ *   * a period already covering today means the calendar is set up — leave it
+ *     completely alone, whatever its shape. An installation that chose April,
+ *     or entered its years by hand, is not corrected by a seed.
+ *   * a fiscal year that overlaps the computed span but has no period for
+ *     today is reported and not touched. Overlapping years would make "which
+ *     period does this date belong to" ambiguous and every posting after that
+ *     point a coin toss, and a year with a hole in it is somebody's mistake to
+ *     look at, not a seed's to paper over.
+ */
+async function seedFiscalYear(startMonth, today = new Date()) {
+  const year = fiscalYearFor(today, { startMonth });
+
+  // Stored as `@db.Date`, so the comparison is date-only.
+  const day = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+
+  const covering = await prisma.accountingPeriod.findFirst({
+    where: { startDate: { lte: day }, endDate: { gte: day } },
+    select: { name: true },
+  });
+  if (covering) return { action: "present", name: covering.name };
+
+  const overlapping = await prisma.fiscalYear.findFirst({
+    where: { startDate: { lte: year.endDate }, endDate: { gte: year.startDate } },
+    select: { name: true },
+  });
+  if (overlapping) return { action: "conflict", name: overlapping.name, wanted: year.name };
+
+  const months = monthsBetween(year.startDate, year.endDate);
+
+  await prisma.fiscalYear.create({
+    data: {
+      name: year.name,
+      startDate: year.startDate,
+      endDate: year.endDate,
+      periods: { create: months.map((month) => ({ ...month, status: "OPEN" })) },
+    },
+  });
+
+  return { action: "created", name: year.name, periods: months.length, startMonth };
+}
+
+/**
+ * Seeds the public pages, without ever overwriting edited prose.
+ *
+ * A page whose body still matches the seed exactly is refreshed, so improving
+ * the drafts reaches installations that never touched them. A page somebody
+ * has edited is left completely alone — re-running a seed must never be the
+ * thing that deletes an owner's words.
+ */
+async function seedContentPages() {
+  let created = 0;
+  let refreshed = 0;
+  let kept = 0;
+
+  for (const page of CONTENT_PAGES) {
+    const existing = await prisma.contentPage.findUnique({
+      where: { slug: page.slug },
+      select: { id: true, body: true, title: true, summary: true },
+    });
+
+    if (!existing) {
+      await prisma.contentPage.create({ data: page });
+      created += 1;
+      continue;
+    }
+
+    const untouched =
+      existing.body === page.body && existing.title === page.title && existing.summary === page.summary;
+    if (!untouched) {
+      kept += 1;
+      continue;
+    }
+
+    await prisma.contentPage.update({ where: { slug: page.slug }, data: page });
+    refreshed += 1;
+  }
+
+  return { created, refreshed, kept };
+}
+
 async function main() {
+  // Read first and write nothing until it parses: a typo'd
+  // FISCAL_YEAR_START_MONTH should stop the seed, not stop it halfway.
+  const startMonth = fiscalYearStartMonth();
+
   const permissions = await seedPermissions();
   console.log(
     `Permissions: ${permissions.upserted} seeded` +
@@ -162,8 +262,33 @@ async function main() {
   console.log(`System roles: ${roles.length}`);
   console.table(roles);
 
+  const pages = await seedContentPages();
+  console.log(
+    `Public pages: ${pages.created} created, ${pages.refreshed} refreshed` +
+      (pages.kept ? `, ${pages.kept} left as edited` : ""),
+  );
+
   const accounts = await seedAccounts();
   console.log(`Chart of accounts: ${accounts.total} accounts (${accounts.created} new)`);
+
+  const fiscal = await seedFiscalYear(startMonth);
+  if (fiscal.action === "created") {
+    const month = new Intl.DateTimeFormat("en-GB", { month: "long", timeZone: "UTC" }).format(
+      new Date(Date.UTC(2000, fiscal.startMonth - 1, 1)),
+    );
+    console.log(`Fiscal year: opened ${fiscal.name} with ${fiscal.periods} monthly periods (year starts in ${month})`);
+  } else if (fiscal.action === "present") {
+    console.log(`Fiscal year: ${fiscal.name} already covers today, left untouched`);
+  } else {
+    // Two shapes of the same problem: the year exists with a hole where today
+    // should be, or a differently-shaped year is in the way. Either is somebody
+    // else's decision, so the seed reports and stops.
+    const clash =
+      fiscal.name === fiscal.wanted
+        ? `${fiscal.name} exists but has no period covering today`
+        : `${fiscal.wanted} would overlap ${fiscal.name}, which has no period covering today`;
+    console.warn(`Fiscal year: not created — ${clash}. Fix it by hand; nothing can post to the ledger until a period covers today.`);
+  }
 
   const customRoles = await prisma.role.count({ where: { isSystem: false } });
   if (customRoles > 0) console.log(`Left ${customRoles} admin-created role(s) untouched.`);

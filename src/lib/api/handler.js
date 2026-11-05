@@ -8,6 +8,7 @@ import { assertPermission, assertRole } from "@/lib/api/permissions";
 import { assertBranchAccess } from "@/lib/api/auth";
 import { defaultRateLimitKey, enforceRateLimit, rateLimitHeaders, RateLimits } from "@/lib/api/rate-limit";
 import { recordAudit } from "@/server/utils/audit";
+import { invalidate } from "@/lib/revalidate";
 import { logger } from "@/lib/logger";
 
 /**
@@ -43,7 +44,41 @@ import { logger } from "@/lib/logger";
  * bodies, permissions, branch scoping, rate limits — it does; `doc` is for the
  * parts it cannot: `{ summary, description, tag, deprecated, response }`, where
  * `response` is a zod schema for the payload inside `data`.
+ *
+ * `invalidates` names the cache tags a successful call makes stale —
+ * `invalidates: [CacheTag.CATALOG]`. It is declared beside `audit` rather than
+ * called inside the handler body because a write that forgets to clear the
+ * storefront cache fails silently: the save works and the website shows the old
+ * value for minutes. As an option it is visible in review next to the
+ * permission, and it only fires when the call succeeded.
  */
+/**
+ * The handful of calls that still work while a password change is owed:
+ * changing it, seeing who you are, and signing out.
+ *
+ * Methods are named because reading your own profile has to keep working —
+ * the screen that asks for a new password greets you by name — while editing
+ * it does not.
+ */
+const PASSWORD_CHANGE_ALLOWED = [
+  { path: "/api/v1/auth/password/change", methods: ["POST"] },
+  { path: "/api/v1/auth/password/reset", methods: ["POST"] },
+  { path: "/api/v1/auth/logout", methods: ["POST"] },
+  { path: "/api/v1/auth/refresh", methods: ["POST"] },
+  { path: "/api/v1/me", methods: ["GET"] },
+];
+
+function isPasswordChangePath(request) {
+  try {
+    const { pathname } = new URL(request.url);
+    const clean = pathname.replace(/\/$/, "");
+    const method = String(request.method ?? "GET").toUpperCase();
+    return PASSWORD_CHANGE_ALLOWED.some((entry) => entry.path === clean && entry.methods.includes(method));
+  } catch {
+    return false;
+  }
+}
+
 export function apiHandler(options, handler) {
   // apiHandler(fn) — no options.
   if (typeof options === "function") {
@@ -62,6 +97,7 @@ export function apiHandler(options, handler) {
     params: paramsSchema = null,
     rateLimit = null,
     audit = null,
+    invalidates = null,
     maxBodyBytes,
   } = options;
 
@@ -84,6 +120,16 @@ export function apiHandler(options, handler) {
       // --- authenticate --------------------------------------------------
       const principal = auth ? await getAuthContext(request) : null;
       if (auth === true && !principal) throw ApiError.unauthorized();
+
+      // An account holding a temporary password an administrator read out may
+      // do one thing: choose its own. Enforced here rather than in the screens
+      // alone, because the API is what the phone app and any script talk to.
+      if (principal?.mustChangePassword && !isPasswordChangePath(request)) {
+        throw ApiError.forbidden("Choose a new password before carrying on", {
+          code: "PASSWORD_CHANGE_REQUIRED",
+          mustChangePassword: true,
+        });
+      }
 
       // Rate limit again by identity once we know who is calling, so a signed-in
       // caller is not sharing an anonymous IP bucket.
@@ -121,6 +167,11 @@ export function apiHandler(options, handler) {
 
       const response = result instanceof Response ? result : ok(result);
       applyHeaders(response, ctx, limitResult);
+
+      // Before the response returns, not in `after()`: the admin screen
+      // refreshes the moment it gets a 2xx, and a refresh that races the
+      // invalidation reads the value it just replaced.
+      if (invalidates?.length && response.ok) invalidate(...invalidates);
 
       if (audit && principal) {
         // Fire-and-forget after the response is sent — auditing must not add
@@ -210,7 +261,9 @@ function applyHeaders(response, ctx, limitResult) {
 }
 
 function toErrorResponse(error, { request, ctx, limitResult }) {
-  const apiError = error instanceof ApiError ? error : fromPrismaError(error);
+  // The method decides how a dropped connection is described: after a write,
+  // "try again" is advice that creates duplicates.
+  const apiError = error instanceof ApiError ? error : fromPrismaError(error, { method: request.method });
 
   if (apiError) {
     // 4xx are normal traffic; only log the server's own faults loudly.

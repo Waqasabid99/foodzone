@@ -1,4 +1,5 @@
 import { apiHandler, ok } from "@/lib/api";
+import { branchScope } from "@/lib/api/permissions";
 import { productMixSchema } from "@/server/validation/finance.schemas";
 import { productMixReport } from "@/server/services/operational-report.service";
 
@@ -10,5 +11,5 @@ import { productMixReport } from "@/server/services/operational-report.service";
  */
 export const GET = apiHandler(
   { auth: true, permissions: "reports.view_sales", query: productMixSchema, branch: "query" },
-  async ({ query }) => ok(await productMixReport(query)),
+  async ({ query, auth }) => ok(await productMixReport({ ...query, scope: branchScope(auth, "reports.view_sales") })),
 );

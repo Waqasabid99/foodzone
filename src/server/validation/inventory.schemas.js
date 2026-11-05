@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { fitsScale } from "@/lib/money-math";
 import { cuidSchema } from "@/server/validation/schemas";
+import { patchSchema } from "@/server/validation/patch";
 
 /**
  * Inventory and procurement request schemas.
@@ -23,7 +25,7 @@ export const quantitySchema = z
   .finite()
   .min(-999_999_999)
   .max(999_999_999)
-  .refine((value) => Number.isInteger(Math.round(value * 1_000_000)), "Supports at most 6 decimal places");
+  .refine((value) => fitsScale(value, 6), "Supports at most 6 decimal places");
 
 export const positiveQuantitySchema = quantitySchema.refine((value) => value > 0, "Must be greater than zero");
 
@@ -32,7 +34,7 @@ export const costSchema = z
   .finite()
   .min(0)
   .max(999_999_999)
-  .refine((value) => Number.isInteger(Math.round(value * 1_000_000)), "Supports at most 6 decimal places");
+  .refine((value) => fitsScale(value, 6), "Supports at most 6 decimal places");
 
 // --- units ------------------------------------------------------------------
 
@@ -90,9 +92,7 @@ export const createItemSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
-export const updateItemSchema = createItemSchema
-  .partial()
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateItemSchema = patchSchema(createItemSchema);
 
 export const listItemsSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
@@ -125,16 +125,14 @@ export const createLocationSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
-export const updateLocationSchema = createLocationSchema
-  .partial()
-  .omit({ branchId: true })
-  .refine((value) => Object.keys(value).length > 0, "Provide at least one field to update");
+export const updateLocationSchema = patchSchema(createLocationSchema.omit({ branchId: true }));
 
 // --- stock reads ------------------------------------------------------------
 
 export const stockQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   cursor: z.string().min(1).optional(),
+  search: z.string().trim().min(1).max(120).optional(),
   branchId: cuidSchema.optional(),
   locationId: cuidSchema.optional(),
   itemId: cuidSchema.optional(),
@@ -354,6 +352,8 @@ export const listTransfersSchema = z.object({
   fromLocationId: cuidSchema.optional(),
   toLocationId: cuidSchema.optional(),
   status: z.enum(["DRAFT", "PENDING_APPROVAL", "APPROVED", "REJECTED", "COMPLETED", "CANCELLED"]).optional(),
+  /** Where it is in its journey — "approved" alone cannot say whether it has arrived. */
+  stage: z.enum(["DRAFT", "IN_TRANSIT", "RECEIVED", "CANCELLED"]).optional(),
 });
 
 // --- counts -----------------------------------------------------------------
@@ -389,8 +389,12 @@ export const listCountsSchema = z.object({
 
 // --- adjustments and wastage ------------------------------------------------
 
+export const adjustmentTypeSchema = z.enum(["CORRECTION", "OPENING_STOCK"]);
+
 export const createAdjustmentSchema = z.object({
   locationId: cuidSchema,
+  /** OPENING_STOCK only adds, must state its cost, and posts to equity. */
+  type: adjustmentTypeSchema.default("CORRECTION"),
   reason: z.string().trim().min(3, "Say why this adjustment is needed").max(500),
   items: z
     .array(
@@ -400,6 +404,9 @@ export const createAdjustmentSchema = z.object({
         quantity: quantitySchema,
         unitCost: costSchema.optional(),
         note: z.string().trim().max(500).optional(),
+        /** Batch-tracked items coming in. Blank numbers are generated; blank expiry follows shelf life. */
+        batchNumber: z.string().trim().max(60).nullish(),
+        expiryDate: z.coerce.date().nullish(),
       }),
     )
     .min(1)
@@ -431,6 +438,7 @@ export const recordWastageSchema = z.object({
 export const listWastageSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   cursor: z.string().min(1).optional(),
+  reviewed: z.stringbool().optional(),
   branchId: cuidSchema.optional(),
   locationId: cuidSchema.optional(),
   itemId: cuidSchema.optional(),

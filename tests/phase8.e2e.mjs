@@ -12,7 +12,7 @@ import { pgPoolOptions, warmUpDatabase } from "../src/lib/db-pool.js";
  * The sequence rules live in tests/unit.mjs, where the state machine is pure.
  * What this suite proves is everything that only exists once there are drivers,
  * money and a database: that a driver cannot touch another driver's job, that
- * COD becomes a debt the driver carries, that a handover code cannot be
+ * COD becomes a debt the driver carries, that a shift ending cannot be
  * bypassed, that concurrency limits hold, and that a payout counts each drop
  * exactly once.
  */
@@ -118,7 +118,7 @@ async function main() {
   const menu = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
+    body: { branchId, isActive: true, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
   });
   await api(`/admin/menus/${menu.body.data.id}/items`, {
     method: "POST",
@@ -427,50 +427,21 @@ async function main() {
   const sampled = await api(`/admin/deliveries/${deliveryId}/track`, { token: adminToken });
   check("but breadcrumbs are sampled, not one per ping", sampled.body.data.length === 1, sampled.body?.data);
 
-  // ================= HANDOVER =================
-  await api("/admin/settings", {
-    method: "PUT",
-    token: adminToken,
-    body: { branchId, values: { "delivery.require_handover_code": true } },
-  });
-
-  const issued = await api(`/admin/deliveries/${deliveryId}/handover-code`, { method: "POST", token: adminToken });
-  check("a handover code is issued", /^\d{4}$/.test(String(issued.body?.data?.code ?? "")), issued.body?.data);
-  const code = issued.body.data.code;
-
-  const stored = await prisma.delivery.findUnique({ where: { id: deliveryId }, select: { otpHash: true } });
-  check("only its hash is stored", stored.otpHash && !stored.otpHash.includes(code), { hasHash: Boolean(stored.otpHash) });
-
-  const noCode = await api(`/me/driver/deliveries/${deliveryId}/status`, {
-    method: "PUT",
-    token: alice.token,
-    body: { status: "DELIVERED" },
-  });
-  check("delivery without the code is refused", noCode.status === 400, noCode.body?.error);
-
-  const wrongCode = await api(`/me/driver/deliveries/${deliveryId}/status`, {
-    method: "PUT",
-    token: alice.token,
-    body: { status: "DELIVERED", handoverCode: code === "0000" ? "1111" : "0000" },
-  });
-  check("a wrong code is refused", wrongCode.status === 400, wrongCode.body?.error);
-
+  // ================= THE DROP =================
   const overCollect = await api(`/me/driver/deliveries/${deliveryId}/status`, {
     method: "PUT",
     token: alice.token,
-    body: { status: "DELIVERED", handoverCode: code, collectedCod: 99999 },
+    body: { status: "DELIVERED", collectedCod: 99999 },
   });
   check("a driver cannot record collecting more than the bill", overCollect.status === 400, overCollect.body?.error);
 
   const delivered = await api(`/me/driver/deliveries/${deliveryId}/status`, {
     method: "PUT",
     token: alice.token,
-    body: { status: "DELIVERED", handoverCode: code, recipientName: "P8 Customer" },
+    body: { status: "DELIVERED", recipientName: "P8 Customer" },
   });
-  check("the right code completes the delivery", delivered.body?.data?.delivery?.status === "DELIVERED", delivered.body);
-
-  const usedCode = await prisma.delivery.findUnique({ where: { id: deliveryId }, select: { otpHash: true } });
-  check("the code is single-use", usedCode.otpHash === null, usedCode);
+  check("the driver closes the job at the door", delivered.body?.data?.delivery?.status === "DELIVERED", delivered.body);
+  check("and who took it is recorded", delivered.body?.data?.delivery?.recipientName === "P8 Customer", delivered.body?.data?.delivery);
 
   // ================= COD BECOMES A DEBT =================
   const paidOrder = await api(`/admin/orders/${orderId}/payments`, { token: adminToken });

@@ -21,10 +21,14 @@ export async function getWorkspaceViewer() {
   if (!principal) return null;
 
   return {
-    id: principal.id,
+    id: principal.userId,
     name: principal.name,
     email: principal.email,
-    emailVerified: Boolean(principal.emailVerifiedAt),
+    emailVerified: Boolean(principal.emailVerified),
+    homePage: principal.homePage ?? null,
+    // Set while an administrator's temporary password is still in force: the
+    // workspace holds them to choosing their own before anything else.
+    mustChangePassword: Boolean(principal.mustChangePassword),
     // `["*"]` for a super admin: they hold everything by bypass rather than by
     // grant, so there is no list to enumerate.
     permissions: grantedPermissionKeys(principal),

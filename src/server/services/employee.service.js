@@ -5,6 +5,7 @@ import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { money } from "@/server/accounting/balance";
+import { branchFilter } from "@/server/hr/access";
 
 /**
  * Departments, employees and what they are paid.
@@ -74,6 +75,9 @@ const SALARY_SELECT = {
       amount: true,
       percentOfBase: true,
       isTaxable: true,
+      // The account itself, not just its id: the screen prints the code beside
+      // a deduction so somebody can see where it lands without looking it up.
+      account: { select: { id: true, code: true, name: true } },
       effectiveFrom: true,
       effectiveTo: true,
     },
@@ -454,12 +458,18 @@ export async function listEmployees({
   employmentType,
   search,
   includeSalary = false,
+  scope = null,
   limit = 20,
   cursor,
 } = {}) {
+  // The caller's own branches, whether or not they named one. Without this a
+  // supervisor scoped to a single outlet who omits the filter is handed the
+  // whole company's staff list.
+  const filter = branchFilter(scope);
   const rows = await prisma.employee.findMany({
     where: {
       ...(branchId ? { branchId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(departmentId ? { departmentId } : {}),
       ...(status ? { status } : {}),
       ...(employmentType ? { employmentType } : {}),
@@ -523,6 +533,7 @@ export async function addSalaryComponent(employeeId, data, actor) {
       amount: hasAmount ? money(data.amount) : null,
       percentOfBase: hasPercent ? D(data.percentOfBase) : null,
       isTaxable: data.isTaxable ?? true,
+      accountId: data.isEarning === false ? data.accountId ?? null : null,
       effectiveFrom: data.effectiveFrom ? new Date(data.effectiveFrom) : new Date(),
       effectiveTo: data.effectiveTo ? new Date(data.effectiveTo) : null,
     },
@@ -533,6 +544,7 @@ export async function addSalaryComponent(employeeId, data, actor) {
       amount: true,
       percentOfBase: true,
       isTaxable: true,
+      account: { select: { id: true, code: true, name: true } },
       effectiveFrom: true,
       effectiveTo: true,
     },
@@ -543,7 +555,12 @@ export async function addSalaryComponent(employeeId, data, actor) {
     action: "employee.component_added",
     entityType: "Employee",
     entityId: employeeId,
-    changes: { name: component.name, isEarning: component.isEarning, amount: Number(component.amount ?? 0) },
+    changes: {
+      name: component.name,
+      isEarning: component.isEarning,
+      amount: Number(component.amount ?? 0),
+      ...(component.account ? { account: `${component.account.code} ${component.account.name}` } : {}),
+    },
   });
 
   return component;
@@ -594,6 +611,10 @@ export async function activeComponents({ employeeId, periodStart, periodEnd }) {
       amount: true,
       percentOfBase: true,
       isTaxable: true,
+      // Copied onto the payslip line, which is what the payroll entry credits
+      // deductions from. Not selecting it here is the difference between a
+      // deduction reaching its own account and falling to the default one.
+      accountId: true,
       effectiveFrom: true,
       effectiveTo: true,
     },

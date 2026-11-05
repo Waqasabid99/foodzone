@@ -220,6 +220,11 @@ export function buildPayslip({
       quantity: null,
       rate: component.percentOfBase != null ? D(component.percentOfBase) : null,
       amount,
+      // Where this component's money lands in the ledger, frozen onto the line
+      // so a later edit to the component cannot restate a payslip already
+      // issued. Only deductions carry one: earnings are expensed together as
+      // gross pay, so an account on an earning would be read by nothing.
+      accountId: component.isEarning ? null : component.accountId ?? null,
     });
   }
 

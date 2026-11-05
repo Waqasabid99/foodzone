@@ -1,8 +1,9 @@
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 import { ApiError } from "@/lib/api";
 import { withTransaction } from "@/server/utils/db";
 import { getSettings } from "@/server/services/setting.service";
-import { getBranchMenu, isItemAvailable } from "@/server/services/menu.service";
+import { getOrderMenu, isItemAvailable } from "@/server/services/menu.service";
 import { priceOrder } from "@/server/pricing/engine";
 import { resolveOrderDiscounts } from "@/server/services/promotion.service";
 import { validateCoupon } from "@/server/services/coupon.service";
@@ -70,16 +71,32 @@ export async function resolveCart({ userId = null, sessionId = null, create = tr
     });
   }
 
-  const existing = userId
-    ? await prisma.cart.findFirst({ where: { userId }, select: CART_SELECT, orderBy: { updatedAt: "desc" } })
-    : await prisma.cart.findUnique({ where: { sessionId }, select: CART_SELECT });
+  const find = (db) =>
+    userId
+      ? db.cart.findFirst({ where: { userId }, select: CART_SELECT, orderBy: { updatedAt: "desc" } })
+      : db.cart.findUnique({ where: { sessionId }, select: CART_SELECT });
 
+  const existing = await find(prisma);
   if (existing) return existing;
   if (!create) return null;
 
-  return prisma.cart.create({
-    data: { userId, sessionId: userId ? null : sessionId, expiresAt: expiryFrom() },
-    select: CART_SELECT,
+  // A new visitor's first requests arrive together — the page loads the cart
+  // while they tap Add — and each finds no cart. Unserialised, one create won
+  // and the other failed on the unique session id, so the first Add was
+  // refused; for a signed-in customer, with no such constraint, the race
+  // quietly made two carts and split their items between them. Only this path
+  // takes the lock, and a cart exists after its first request, so it is paid
+  // once per visitor.
+  return withTransaction(async (tx) => {
+    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`cart:${userId ? `user:${userId}` : `session:${sessionId}`}`}))`);
+
+    const created = await find(tx);
+    if (created) return created;
+
+    return tx.cart.create({
+      data: { userId, sessionId: userId ? null : sessionId, expiresAt: expiryFrom() },
+      select: CART_SELECT,
+    });
   });
 }
 
@@ -223,6 +240,27 @@ function signature(value) {
  * crafted request order something that is not for sale, or price a burger with
  * another product's discount-priced modifier.
  */
+/** The attached option groups a line is allowed to offer, with their rules. */
+const MODIFIER_GROUPS_SELECT = {
+  select: {
+    isRequired: true,
+    minSelect: true,
+    maxSelect: true,
+    group: {
+      select: {
+        id: true,
+        name: true,
+        selectionType: true,
+        minSelect: true,
+        maxSelect: true,
+        allowQuantity: true,
+        isActive: true,
+        options: { where: { isActive: true }, select: { id: true, name: true, priceDelta: true } },
+      },
+    },
+  },
+};
+
 async function resolveLine({ productId, variantId, quantity, modifiers = [], comboSelections = [], menuIndex }) {
   const product = await prisma.product.findFirst({
     where: { id: productId, isActive: true, deletedAt: null },
@@ -238,31 +276,14 @@ async function resolveLine({ productId, variantId, quantity, modifiers = [], com
       // without a second lookup per basket line.
       categoryId: true,
       stationId: true,
+      station: { select: { isActive: true } },
       taxGroupId: true,
       prepTimeMinutes: true,
       variants: {
         where: { isActive: true },
         select: { id: true, name: true, sku: true, price: true, standardCost: true, isDefault: true },
       },
-      modifierGroups: {
-        select: {
-          isRequired: true,
-          minSelect: true,
-          maxSelect: true,
-          group: {
-            select: {
-              id: true,
-              name: true,
-              selectionType: true,
-              minSelect: true,
-              maxSelect: true,
-              allowQuantity: true,
-              isActive: true,
-              options: { where: { isActive: true }, select: { id: true, name: true, priceDelta: true } },
-            },
-          },
-        },
-      },
+      modifierGroups: MODIFIER_GROUPS_SELECT,
       comboGroups: {
         select: {
           id: true,
@@ -276,8 +297,24 @@ async function resolveLine({ productId, variantId, quantity, modifiers = [], com
               variantId: true,
               quantity: true,
               priceDelta: true,
-              product: { select: { id: true, name: true, isActive: true, deletedAt: true } },
-              variant: { select: { id: true, name: true, sku: true, price: true, standardCost: true } },
+              /*
+               * The chosen item's own options come with it.
+               *
+               * A combo choice is a product, and the thing customers want from
+               * a meal deal is the burger without onions — so the slot carries
+               * the same groups the item would have on its own, resolved by
+               * the same function against the same rules.
+               */
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  isActive: true,
+                  deletedAt: true,
+                  modifierGroups: MODIFIER_GROUPS_SELECT,
+                },
+              },
+              variant: { select: { id: true, name: true, sku: true, price: true, standardCost: true, isActive: true } },
             },
           },
         },
@@ -319,7 +356,10 @@ async function resolveLine({ productId, variantId, quantity, modifiers = [], com
     sku: variant.sku,
     variantName: variant.name,
     categoryId: product.categoryId,
-    stationId: product.stationId,
+    // A switched-off station has no screen watching it. Routing the ticket
+    // nowhere in particular puts it on every kitchen display instead of on one
+    // nobody is looking at.
+    stationId: product.station?.isActive ? product.stationId : null,
     taxGroupId: product.taxGroupId,
     prepTimeMinutes: product.prepTimeMinutes,
     unitPrice: menuEntry.price,
@@ -329,11 +369,20 @@ async function resolveLine({ productId, variantId, quantity, modifiers = [], com
     comboSelections: resolvedCombo,
     // Combo option surcharges ride on the parent line, matching the schema's
     // "the parent carries the combo price".
-    comboSurcharge: resolvedCombo.reduce((total, choice) => total + Number(choice.priceDelta), 0),
+    comboSurcharge: resolvedCombo.reduce(
+      (total, choice) => total + Number(choice.priceDelta) + Number(choice.modifierTotal ?? 0),
+      0,
+    ),
   };
 }
 
-function resolveModifiers({ product, modifiers }) {
+/**
+ * `within` names the combo slot an item sits in, so a refusal reads "Zinger
+ * Burger: \"Sauce\" is required" rather than naming a group the customer was
+ * never shown at the top level.
+ */
+function resolveModifiers({ product, modifiers, within = null }) {
+  const label = (message) => (within ? `${within}: ${message}` : message);
   const attached = product.modifierGroups.filter((row) => row.group.isActive);
   const byOptionId = new Map();
   for (const row of attached) {
@@ -346,7 +395,7 @@ function resolveModifiers({ product, modifiers }) {
   for (const requested of modifiers) {
     const found = byOptionId.get(requested.optionId);
     if (!found) {
-      throw ApiError.validation("That choice is not available for this item", {
+      throw ApiError.validation(label("That choice is not available for this item"), {
         modifiers: [`Unknown option ${requested.optionId}`],
       });
     }
@@ -355,7 +404,7 @@ function resolveModifiers({ product, modifiers }) {
     const quantity = requested.quantity ?? 1;
 
     if (quantity > 1 && !row.group.allowQuantity) {
-      throw ApiError.validation(`"${row.group.name}" does not allow the same choice more than once`, {
+      throw ApiError.validation(label(`"${row.group.name}" does not allow the same choice more than once`), {
         modifiers: [option.name],
       });
     }
@@ -381,15 +430,15 @@ function resolveModifiers({ product, modifiers }) {
     const max = row.maxSelect ?? row.group.maxSelect;
 
     if (row.isRequired && chosen < Math.max(min, 1)) {
-      throw ApiError.validation(`"${row.group.name}" is required`, {
+      throw ApiError.validation(label(`"${row.group.name}" is required`), {
         modifiers: [`Choose at least ${Math.max(min, 1)} from ${row.group.name}`],
       });
     }
     if (chosen > 0 && chosen < min) {
-      throw ApiError.validation(`Choose at least ${min} from "${row.group.name}"`, { modifiers: [row.group.name] });
+      throw ApiError.validation(label(`Choose at least ${min} from "${row.group.name}"`), { modifiers: [row.group.name] });
     }
     if (chosen > max) {
-      throw ApiError.validation(`Choose at most ${max} from "${row.group.name}"`, { modifiers: [row.group.name] });
+      throw ApiError.validation(label(`Choose at most ${max} from "${row.group.name}"`), { modifiers: [row.group.name] });
     }
   }
 
@@ -418,11 +467,37 @@ function resolveComboSelections({ product, comboSelections }) {
         comboSelections: [group.name],
       });
     }
-    if (!option.product.isActive || option.product.deletedAt) {
-      throw ApiError.conflict(`"${option.product.name}" is not available right now`);
+    // The size matters as much as the product: a size someone has stopped
+    // selling must not keep being sold as a combo choice.
+    if (!option.product.isActive || option.product.deletedAt || option.variant?.isActive === false) {
+      const label = option.variant ? `${option.product.name} (${option.variant.name})` : option.product.name;
+      throw ApiError.conflict(`"${label}" is not available right now`);
     }
 
     const quantity = requested.quantity ?? option.quantity ?? 1;
+
+    /*
+     * The same rules, the same function. A combo choice is a product, so "no
+     * onions" on the burger inside a meal is resolved exactly as it would be
+     * on the burger bought alone — including the required groups the client
+     * left out entirely.
+     */
+    const childModifiers = resolveModifiers({
+      product: option.product,
+      modifiers: requested.modifiers ?? [],
+      within: option.product.name,
+    });
+
+    /*
+     * Charged once per choice, not once per portion. A "2 pieces" option that
+     * is made spicy is still one decision; multiplying the surcharge by the
+     * portion count would bill twice for it.
+     */
+    const modifierTotal = childModifiers.reduce(
+      (total, modifier) => total + Number(modifier.priceDelta) * modifier.quantity,
+      0,
+    );
+
     resolved.push({
       groupId: group.id,
       groupName: group.name,
@@ -435,6 +510,8 @@ function resolveComboSelections({ product, comboSelections }) {
       unitCost: option.variant?.standardCost ?? null,
       priceDelta: Number(option.priceDelta) * quantity,
       quantity,
+      modifiers: childModifiers,
+      modifierTotal,
     });
 
     countByGroup.set(group.id, (countByGroup.get(group.id) ?? 0) + quantity);
@@ -464,13 +541,7 @@ function resolveComboSelections({ product, comboSelections }) {
  * otherwise be ten menu resolutions, and the menu read is the expensive one.
  */
 export async function buildMenuIndex({ branchId, type, at = new Date() }) {
-  const menuType = { DELIVERY: "DELIVERY", PICKUP: "TAKEAWAY", DINE_IN: "DINE_IN" }[type] ?? "DINE_IN";
-
-  let resolved = await getBranchMenu({ branchIdOrCode: branchId, type: menuType, at, includeUnavailable: true });
-  // Most restaurants publish one menu; fall back rather than refusing to sell.
-  if (!resolved.menu && menuType !== "DINE_IN") {
-    resolved = await getBranchMenu({ branchIdOrCode: branchId, type: "DINE_IN", at, includeUnavailable: true });
-  }
+  const resolved = await getOrderMenu({ branchIdOrCode: branchId, orderType: type, at, includeUnavailable: true });
 
   const index = new Map();
   for (const section of resolved.sections) {
@@ -827,7 +898,15 @@ export async function addItem({ cart, input, at = new Date() }) {
       groupId: c.groupId,
       productId: c.productId,
       variantId: c.variantId ?? null,
-      quantity: c.quantity ?? 1,
+      /*
+       * Only when the client said so. Writing `1` here would re-introduce the
+       * schema default one layer down: every later read of this cart would
+       * resolve a two-portion option as one portion and refuse the line.
+       */
+      ...(c.quantity ? { quantity: c.quantity } : {}),
+      // Option ids only, like the parent line's: prices are resolved on every
+      // read, never trusted from what was stored.
+      modifiers: (c.modifiers ?? []).map((m) => ({ optionId: m.optionId, quantity: m.quantity ?? 1 })),
     })),
   };
 

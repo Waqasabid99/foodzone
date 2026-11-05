@@ -1,4 +1,4 @@
-import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { apiHandler, assertCompanyWide, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { updateUnitSchema } from "@/server/validation/inventory.schemas";
 import { deleteUnit, getUnit, updateUnit } from "@/server/services/uom.service";
@@ -17,7 +17,10 @@ export const PATCH = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "uom.update", entityType: "UnitOfMeasure" },
   },
-  async ({ params, body }) => ok(await updateUnit(params.id, body)),
+  async ({ params, body, auth }) => {
+    assertCompanyWide(auth, "units.manage");
+    return ok(await updateUnit(params.id, body));
+  },
 );
 
 export const DELETE = apiHandler(
@@ -28,5 +31,8 @@ export const DELETE = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "uom.delete", entityType: "UnitOfMeasure" },
   },
-  async ({ params }) => ok(await deleteUnit(params.id)),
+  async ({ params, auth }) => {
+    assertCompanyWide(auth, "units.manage");
+    return ok(await deleteUnit(params.id));
+  },
 );

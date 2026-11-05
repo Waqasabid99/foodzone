@@ -66,6 +66,11 @@ model QrCode {
 
   @@index([branchId])
   @@index([tableId])
+  // Both of these exist in the database already and were simply missing from
+  // the schema, so every migration wanted to drop them. They are foreign keys
+  // a CATEGORY or PRODUCT sticker is looked up by.
+  @@index([categoryId])
+  @@index([productId])
 }
 
 model QrScan {

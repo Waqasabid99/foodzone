@@ -194,7 +194,7 @@ async function main() {
   const menu = await api("/admin/menus", {
     method: "POST",
     token: adminToken,
-    body: { branchId, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
+    body: { branchId, isActive: true, name: `Main ${stamp}`, type: "DINE_IN", isDefault: true },
   });
   const menuId = menu.body.data.id;
   await api(`/admin/menus/${menuId}/items`, { method: "POST", token: adminToken, body: { productId: pizzaId } });

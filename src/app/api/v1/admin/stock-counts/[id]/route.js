@@ -2,6 +2,7 @@ import { z } from "zod";
 import { apiHandler, ok } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { getCount } from "@/server/services/stock-count.service";
+import { assertRecordAccess } from "@/server/inventory/access";
 
 const querySchema = z.object({ blind: z.stringbool().optional() });
 
@@ -14,5 +15,8 @@ const querySchema = z.object({ blind: z.stringbool().optional() });
  */
 export const GET = apiHandler(
   { auth: true, permissions: "stock_counts.read", params: idParamSchema, query: querySchema },
-  async ({ params, query }) => ok(await getCount(params.id, { blind: query.blind === true })),
+  async ({ params, query, auth }) => {
+    await assertRecordAccess(auth, "count", params.id, "stock_counts.read");
+    return ok(await getCount(params.id, { blind: query.blind === true }));
+  },
 );

@@ -2,6 +2,7 @@ import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { reverseEarningSchema } from "@/server/validation/creator.schemas";
 import { reverseEarning } from "@/server/services/creator-earning.service";
+import { assertEarningAccess } from "@/server/creator/access";
 
 /**
  * Claws an earning back.
@@ -18,5 +19,11 @@ export const POST = apiHandler(
     body: reverseEarningSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, body, auth }) => ok(await reverseEarning(params.id, { reason: body.reason, actor: auth })),
+  async ({ params, body, auth }) => {
+    // Taking money back is a write against one branch's order, so the same
+    // cut applies as to reading it: an id from outside the caller's branches
+    // is a 404, not a 403.
+    await assertEarningAccess(auth, params.id, "creator_earnings.reverse");
+    return ok(await reverseEarning(params.id, { reason: body.reason, actor: auth }));
+  },
 );

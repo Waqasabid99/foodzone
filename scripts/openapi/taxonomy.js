@@ -194,7 +194,7 @@ export const SINGULAR = {
 export const ACTION_SEGMENTS = new Set([
   "accept", "activate", "adjust", "approve", "archive", "assign", "backfill", "bump", "cancel",
   "capture", "clone", "change", "claim", "close", "collect", "complete", "confirm", "consume", "correct",
-  "derive", "dispatch", "feature", "forgot", "freeze", "generate", "handover-code", "invite", "like", "lock",
+  "derive", "dispatch", "feature", "forgot", "freeze", "generate", "invite", "like", "lock",
   "login", "logout", "mark-paid", "open", "pay", "plan", "post", "publish", "read", "rebuild",
   "receive", "recost", "reinstate", "reject", "reconcile", "reopen", "reorder", "replay", "report",
   "resend", "reset", "restore", "reverse", "revert", "revise", "review", "revoke", "rotate-key",
@@ -322,7 +322,6 @@ export const SUMMARY_OVERRIDES = {
   "POST /api/v1/admin/creators/{id}/wallet/adjust": "Adjust a creator wallet by hand",
   "PUT /api/v1/admin/creators/{id}/wallet/freeze": "Freeze or unfreeze a creator wallet",
   "POST /api/v1/admin/creator-videos/{id}/takedown": "Take down a creator video",
-  "POST /api/v1/admin/deliveries/{id}/handover-code": "Issue a handover code for a delivery",
   "GET /api/v1/admin/wastage/report": "Get the wastage report",
 
   // Customer surfaces where the generic phrasing is ambiguous or impersonal.

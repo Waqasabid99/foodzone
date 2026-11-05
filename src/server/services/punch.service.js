@@ -4,8 +4,9 @@ import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { logger } from "@/lib/logger";
-import { startOfDay } from "@/server/attendance/shift";
+import { addDays, workDateForPunch, zonedDateOf } from "@/server/attendance/shift";
 import { recordSync } from "@/server/services/attendance-device.service";
+import { branchFilter } from "@/server/hr/access";
 
 /**
  * Punch ingestion.
@@ -153,10 +154,37 @@ export async function ingestPunches({ device, punches, actor = null }) {
  * punch is somebody vouching for an employee's hours, and that should have a
  * name against it.
  */
+/**
+ * The day a punch will be filed under, asked the way derivation asks it.
+ *
+ * Not the calendar date of the instant. A punch at 02:00 closes the night
+ * shift that began yesterday, and east of Greenwich the instant's UTC date is
+ * not even the branch's date for most of the evening. Anything that reads the
+ * clock instead of the roster is looking at a different day from the one the
+ * punch will land on — which, for the lock check below, means refusing a
+ * correction to an open day or waving one into a day already paid.
+ */
+async function rosteredWorkDate({ employeeId, at, timezone, tx = prisma }) {
+  const local = zonedDateOf(at, timezone);
+
+  const assignments = await tx.shiftAssignment.findMany({
+    where: { employeeId, workDate: { gte: addDays(local, -1), lte: addDays(local, 1) } },
+    select: {
+      workDate: true,
+      isWeeklyOff: true,
+      shift: { select: { id: true, startMinute: true, endMinute: true, graceMinutes: true } },
+    },
+  });
+
+  return workDateForPunch({ punchedAt: at, assignments, timezone }).workDate;
+}
+
 export async function addManualPunch({ employeeId, punchedAt, direction = "UNKNOWN", note = null, actor }) {
   const employee = await prisma.employee.findUnique({
     where: { id: employeeId },
-    select: { id: true, employeeCode: true, branchId: true, status: true },
+    // The branch's timezone, because which day a punch belongs to is a
+    // question about the branch's clock, not the server's.
+    select: { id: true, employeeCode: true, branchId: true, status: true, branch: { select: { timezone: true } } },
   });
   if (!employee) throw ApiError.validation("Employee not found", { employeeId: ["No such employee"] });
 
@@ -165,8 +193,10 @@ export async function addManualPunch({ employeeId, punchedAt, direction = "UNKNO
     throw ApiError.validation("That is not a time", { punchedAt: ["Give a valid date and time"] });
   }
 
+  const workDate = await rosteredWorkDate({ employeeId, at, timezone: employee.branch?.timezone ?? "UTC" });
+
   const locked = await prisma.attendanceDay.findUnique({
-    where: { employeeId_workDate: { employeeId, workDate: startOfDay(at) } },
+    where: { employeeId_workDate: { employeeId, workDate } },
     select: { isLocked: true, workDate: true },
   });
   if (locked?.isLocked) {
@@ -211,12 +241,15 @@ export async function addManualPunch({ employeeId, punchedAt, direction = "UNKNO
  * The queue that HR has to work: every row here is somebody whose attendance is
  * being recorded and not counted.
  */
-export async function unmatchedPunches({ deviceId, branchId, from, to, limit = 50, cursor } = {}) {
+export async function unmatchedPunches({ deviceId, branchId, from, to, scope = null, limit = 50, cursor } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.attendancePunch.findMany({
     where: {
       employeeId: null,
       ...(deviceId ? { deviceId } : {}),
       ...(branchId ? { device: { branchId } } : {}),
+      // No employee to scope by, so the terminal's branch is what places it.
+      ...(filter ? { AND: [{ device: { branchId: filter } }] } : {}),
       ...(from || to
         ? { punchedAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
         : {}),
@@ -285,12 +318,17 @@ export async function claimUnmatchedPunches({ biometricId, employeeId, actor }) 
   return { employeeId, biometricId, claimed: result.count };
 }
 
-export async function listPunches({ employeeId, deviceId, branchId, from, to, limit = 50, cursor } = {}) {
+export async function listPunches({ employeeId, deviceId, branchId, from, to, scope = null, limit = 50, cursor } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.attendancePunch.findMany({
     where: {
       ...(employeeId ? { employeeId } : {}),
       ...(deviceId ? { deviceId } : {}),
       ...(branchId ? { employee: { branchId } } : {}),
+      // An unlinked punch has no employee, so either end may place it.
+      ...(filter
+        ? { AND: [{ OR: [{ employee: { branchId: filter } }, { device: { branchId: filter } }] }] }
+        : {}),
       ...(from || to
         ? { punchedAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
         : {}),

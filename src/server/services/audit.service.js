@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { branchFilter } from "@/server/access/scope";
 import { cursorArgs, toPage } from "@/lib/api";
 
 /**
@@ -17,10 +18,22 @@ export async function listAuditLogs({
   from,
   to,
   search,
+  scope = null,
   limit = 20,
   cursor,
 }) {
+  // An audit entry names a person and what they did to which record at which
+  // outlet. Unfiltered, it is a log of every branch's activity handed to
+  // whoever can read one branch's.
+  //
+  // Company-level entries carry no branch — a role edited, a global setting
+  // changed — and stay visible, matching how the journal and every other
+  // company-wide record is treated: holding the permission anywhere is
+  // enough for something that belongs to no outlet.
+  const filter = branchFilter(scope);
+
   const where = {
+    ...(filter ? { AND: [{ OR: [{ branchId: filter }, { branchId: null }] }] } : {}),
     ...(actorId ? { actorId } : {}),
     // Prefix match, so "order." returns every order action.
     ...(action ? { action: { startsWith: action } } : {}),
@@ -55,8 +68,13 @@ export async function listAuditLogs({
 }
 
 /** The distinct action names present, for populating a filter dropdown. */
-export async function listAuditActions() {
+export async function listAuditActions({ scope = null } = {}) {
+  // Scoped for the same reason the list is: the set of actions present is
+  // itself a readout of what the other branches have been doing.
+  const filter = branchFilter(scope);
+
   const rows = await prisma.auditLog.findMany({
+    where: filter ? { OR: [{ branchId: filter }, { branchId: null }] } : {},
     distinct: ["action"],
     select: { action: true },
     orderBy: { action: "asc" },

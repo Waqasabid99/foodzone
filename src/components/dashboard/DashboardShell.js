@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { ChevronLeft, ChevronRight, Flame, LogOut, Menu, X } from "lucide-react";
 import Sidebar from "@/components/dashboard/Sidebar";
 import ThemeToggle from "@/components/theme/ThemeToggle";
+import NotificationBell from "@/components/layout/NotificationBell";
 import { useSidebarCollapsed, toggleSidebarCollapsed } from "@/hooks/useSidebarCollapsed";
 import { logoutSession } from "@/hooks/useSession";
 import { initials } from "@/lib/format";
@@ -84,10 +85,15 @@ export default function DashboardShell({ nav, user, storeName = "FoodZone", home
     </Link>
   );
 
+  // `min-h-dvh`, not `min-h-full`: a percentage min-height resolves to nothing
+  // when the parent's height is auto, as <body> here is, so the shell was only
+  // ever as tall as its content and the sidebar's border stopped partway down
+  // any short page — which the account area, with its small pages, showed up.
   return (
-    <div className="flex min-h-full">
+    <div className="flex min-h-dvh">
       {/* --- desktop rail ------------------------------------------------- */}
       <aside
+        data-print="hide"
         className={`hidden shrink-0 border-r border-outline-variant bg-surface-container-lowest lg:flex lg:flex-col ${
           collapsed ? "lg:w-20" : "lg:w-72"
         }`}
@@ -158,7 +164,10 @@ export default function DashboardShell({ nav, user, storeName = "FoodZone", home
 
       {/* --- page --------------------------------------------------------- */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-outline-variant bg-surface-container-lowest/95 px-4 backdrop-blur md:px-6">
+        <header
+          data-print="hide"
+          className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-outline-variant bg-surface-container-lowest/95 px-4 backdrop-blur md:px-6"
+        >
           <button
             ref={triggerRef}
             type="button"
@@ -171,6 +180,10 @@ export default function DashboardShell({ nav, user, storeName = "FoodZone", home
           </button>
 
           <div className="min-w-0 flex-1" />
+
+          {/* Staff have a workspace inbox rather than an account one — a low
+              stock warning is not something to read on the storefront. */}
+          <NotificationBell href="/dashboard/notifications" />
 
           <ThemeToggle />
 
@@ -189,17 +202,24 @@ export default function DashboardShell({ nav, user, storeName = "FoodZone", home
 
         {/* `min-w-0` all the way down, or one wide table makes the whole page
             scroll sideways instead of scrolling inside its own container. */}
-        <main className="min-w-0 flex-1 px-4 py-6 md:px-6 md:py-8">{children}</main>
+        <main data-print="page" className="min-w-0 flex-1 px-4 py-6 md:px-6 md:py-8">
+          {children}
+        </main>
       </div>
     </div>
   );
 }
 
-function UserChip({ user }) {
+/** Your own name, and the way to your own account. */
+function UserChip({ user, href = null }) {
   if (!user) return null;
 
+  const Tag = href ? Link : "span";
+
   return (
-    <span className="flex items-center gap-2">
+    <Tag
+      {...(href ? { href, className: "flex items-center gap-2 rounded-field p-1 hover:bg-surface-container-high focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" } : { className: "flex items-center gap-2" })}
+    >
       <span
         aria-hidden="true"
         className="grid size-9 place-items-center rounded-full bg-primary-container font-display text-label-bold text-on-primary-container"
@@ -212,14 +232,14 @@ function UserChip({ user }) {
           <span className="text-label-bold font-normal text-on-surface-variant">{user.roleLabel}</span>
         ) : null}
       </span>
-    </span>
+    </Tag>
   );
 }
 
 function UserPanel({ user, onSignOut }) {
   return (
     <div className="flex items-center justify-between gap-3 border-t border-outline-variant p-3">
-      <UserChip user={user} />
+      <UserChip user={user} href="/dashboard/account" />
       <button
         type="button"
         onClick={onSignOut}

@@ -27,6 +27,14 @@ const emailOf = (name) => `${tag}-${name}@example.test`;
 const BRANCH_CODE = `E2ED${String(stamp).slice(-5)}`;
 const created = { userIds: new Set(), branchIds: new Set() };
 
+/**
+ * The programme config as it was before the suite tuned it.
+ *
+ * Captured so cleanup can put it back. This row is the operator's real
+ * configuration, not test data.
+ */
+let configBefore = null;
+
 let passed = 0;
 const failures = [];
 function check(name, condition, detail) {
@@ -73,12 +81,32 @@ function addedToCart(response) {
   return response;
 }
 
-async function drainOutbox() {
-  const res = await fetch(`${BASE}/api/internal/jobs/outbox`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${CRON}` },
-  });
-  return res.status;
+/**
+ * Drains the outbox until it stops producing work.
+ *
+ * Handlers enqueue further events, so this is a cascade rather than a queue:
+ * completing an order raises `order.status_changed`, whose handler raises the
+ * creator earnings event, whose handler raises `creator.appreciation`. A
+ * fixed number of drains therefore tests how well the author counted the
+ * levels, and adding a level silently stops testing the last one — which is
+ * exactly what happened to the "a sale that earned nothing still reaches the
+ * appreciation feed" case.
+ */
+async function drainOutbox(maxRounds = 6) {
+  let status = 0;
+  for (let round = 0; round < maxRounds; round++) {
+    const res = await fetch(`${BASE}/api/internal/jobs/outbox`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${CRON}` },
+    });
+    status = res.status;
+    if (!res.ok) return status;
+    const body = await res.json().catch(() => null);
+    const data = body?.data;
+    // Nothing claimed this round and nothing waiting: the cascade is spent.
+    if (!data || (data.claimed === 0 && (data.stats?.pending ?? 0) === 0)) return status;
+  }
+  return status;
 }
 
 const num = (value) => Number(value ?? 0);
@@ -115,6 +143,8 @@ async function completeOrder(orderId, adminToken, type = "DINE_IN") {
 }
 
 async function main() {
+  configBefore = await prisma.creatorProgramConfig.findUnique({ where: { id: "default" } });
+
   // ================= SETUP =================
   const adminReg = await api("/auth/register", {
     method: "POST",
@@ -430,9 +460,38 @@ async function main() {
   check("the first approval is recognised", Boolean(firstVideoPraise), firstVideoPraise);
 
   // ================= THE PUBLIC FEED =================
-  const onProduct = await api(`/products/${productSlug}/videos`);
-  check("the video is on the product page", onProduct.body.data.some((row) => row.id === videoId), onProduct.body?.data);
+  const onProduct = await api(`/products/${productSlug}/videos?branchId=${branchId}`);
+  check("the video is on the product page", onProduct.body?.data?.some((row) => row.id === videoId), onProduct.body?.data);
   check("with the creator attached", Boolean(onProduct.body.data[0]?.creator?.handle), onProduct.body?.data?.[0]);
+
+  /*
+   * And nowhere else. A video is one person's meal at one outlet: it used to
+   * be served to every branch in the company, including ones in other cities
+   * and ones that do not put the item on their menu at all.
+   */
+  const otherBranch = await api("/admin/branches", {
+    method: "POST",
+    token: adminToken,
+    body: { code: `${BRANCH_CODE}X`, name: "P13 Branch", city: "Lahore", timezone: "Asia/Karachi" },
+  });
+  const elsewhereId = otherBranch.body?.data?.id;
+  if (elsewhereId) created.branchIds.add(elsewhereId);
+  check("a second outlet exists to test against", Boolean(elsewhereId), otherBranch.body);
+
+  const atElsewhere = await api(`/products/${productSlug}/videos?branchId=${elsewhereId}`);
+  check(
+    "but not on another outlet's page",
+    Array.isArray(atElsewhere.body?.data) && !atElsewhere.body.data.some((row) => row.id === videoId),
+    atElsewhere.body?.data,
+  );
+
+  // With no outlet chosen at all, an empty shelf rather than the whole company.
+  const noBranch = await api(`/products/${productSlug}/videos`);
+  check(
+    "and nothing at all when no outlet is chosen",
+    Array.isArray(noBranch.body?.data) && noBranch.body.data.length === 0,
+    noBranch.body?.data,
+  );
 
   const publicPage = await api(`/creators/${handle}`);
   check("the creator has a public page", publicPage.body?.data?.creator?.handle === handle, publicPage.body);
@@ -883,7 +942,13 @@ async function cleanup() {
 
   const creators = await prisma.creatorProfile.findMany({ where: { userId: { in: ids } }, select: { id: true } });
   const creatorIds = creators.map((c) => c.id);
-  const orders = await prisma.order.findMany({ where: { branchId: { in: branchIds } }, select: { id: true } });
+  // By branch *or* by who placed it. Gathering only by branch leaves an
+  // order belonging to a test user behind, and it then blocks the user
+  // delete with a foreign key error that names nothing useful.
+  const orders = await prisma.order.findMany({
+    where: { OR: [{ branchId: { in: branchIds } }, { userId: { in: ids } }] },
+    select: { id: true },
+  });
   const orderIds = orders.map((o) => o.id);
 
   await prisma.creatorWalletTransaction.deleteMany({ where: { wallet: { creatorId: { in: creatorIds } } } });
@@ -900,7 +965,6 @@ async function cleanup() {
   await prisma.creatorVideoLike.deleteMany({ where: { video: { creatorId: { in: creatorIds } } } });
   await prisma.creatorVideoView.deleteMany({ where: { video: { creatorId: { in: creatorIds } } } });
   await prisma.creatorVideoDailyStat.deleteMany({ where: { video: { creatorId: { in: creatorIds } } } });
-  await prisma.creatorVideoReport.deleteMany({ where: { video: { creatorId: { in: creatorIds } } } });
   await prisma.creatorVideoReview.deleteMany({ where: { video: { creatorId: { in: creatorIds } } } });
   await prisma.creatorVideoAsset.deleteMany({ where: { video: { creatorId: { in: creatorIds } } } });
   await prisma.creatorVideo.deleteMany({ where: { creatorId: { in: creatorIds } } });
@@ -909,10 +973,26 @@ async function cleanup() {
   await prisma.creatorTermsAcceptance.deleteMany({ where: { creatorId: { in: creatorIds } } });
   await prisma.creatorProfile.deleteMany({ where: { id: { in: creatorIds } } });
   await prisma.creatorTerms.deleteMany({ where: { version: { contains: String(stamp) } } });
-  await prisma.creatorProgramConfig.deleteMany({});
+  // Restored, not deleted. This is one admin-owned row holding the real
+  // programme settings — hold days, attempt limits, strike thresholds — which
+  // the suite edits at the start. Deleting it threw the operator's
+  // configuration away every run.
+  if (configBefore) {
+    await prisma.creatorProgramConfig.upsert({
+      where: { id: configBefore.id },
+      update: configBefore,
+      create: configBefore,
+    });
+  } else {
+    await prisma.creatorProgramConfig.deleteMany({ where: { id: "default" } });
+  }
 
-  await prisma.journalLine.deleteMany({ where: { entry: { branchId: { in: branchIds } } } });
-  await prisma.journalEntry.deleteMany({ where: { branchId: { in: branchIds } } });
+  // By branch *or* by the order behind it. Completing an order posts a
+  // journal entry, and one whose branch is not in this set survives a
+  // branch-only sweep and then blocks the order delete.
+  const journalWhere = { OR: [{ branchId: { in: branchIds } }, { orderId: { in: orderIds } }] };
+  await prisma.journalLine.deleteMany({ where: { entry: journalWhere } });
+  await prisma.journalEntry.deleteMany({ where: journalWhere });
   await prisma.stockMovement.deleteMany({ where: { branchId: { in: branchIds } } });
   await prisma.orderStatusEvent.deleteMany({ where: { orderId: { in: orderIds } } });
   await prisma.orderItemModifier.deleteMany({ where: { orderItem: { orderId: { in: orderIds } } } });
@@ -931,7 +1011,9 @@ async function cleanup() {
   await prisma.product.deleteMany({ where: { slug: { contains: String(stamp) } } });
   await prisma.category.deleteMany({ where: { slug: { contains: String(stamp) } } });
 
-  await prisma.outboxEvent.deleteMany({});
+  // Finished rows only. An unfiltered delete here throws away pending work
+  // that belongs to the application, not to this suite.
+  await prisma.outboxEvent.deleteMany({ where: { status: { in: ["DONE", "FAILED"] } } });
   await prisma.numberSequence.deleteMany({ where: { branchId: { in: branchIds } } });
   await prisma.address.deleteMany({ where: { userId: { in: ids } } });
   await prisma.auditLog.deleteMany({ where: { actorId: { in: ids } } });
@@ -940,8 +1022,11 @@ async function cleanup() {
   await prisma.userRoleAssignment.deleteMany({ where: { userId: { in: ids } } });
   await prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await prisma.user.deleteMany({ where: { id: { in: ids } } });
-  await prisma.branch.deleteMany({ where: { code: { startsWith: "E2ED" } } });
-  await prisma.setting.deleteMany({});
+  // This run's branches only. Matching the `E2ED` prefix swept up branches
+  // left behind by *other* runs whose rows this cleanup never gathered, so
+  // the delete failed on their foreign keys and took the whole teardown —
+  // and the run's summary — down with it.
+  await prisma.branch.deleteMany({ where: { id: { in: branchIds } } });
 
   const leftovers = {
     users: await prisma.user.count(),
@@ -965,10 +1050,33 @@ async function cleanup() {
   return leftovers;
 }
 
+/** The counts this suite is accountable for putting back. */
+async function census() {
+  return {
+    users: await prisma.user.count(),
+    branches: await prisma.branch.count(),
+    creators: await prisma.creatorProfile.count(),
+    videos: await prisma.creatorVideo.count(),
+    attributions: await prisma.creatorAttribution.count(),
+    orderAttributions: await prisma.creatorOrderAttribution.count(),
+    rules: await prisma.creatorCommissionRule.count(),
+    earnings: await prisma.creatorEarning.count(),
+    wallets: await prisma.creatorWallet.count(),
+    walletTxns: await prisma.creatorWalletTransaction.count(),
+    terms: await prisma.creatorTerms.count(),
+    orders: await prisma.order.count(),
+    products: await prisma.product.count(),
+  };
+}
+
+let before = null;
+
 try {
   // Wake the database before the first assertion, so a suspended compute
   // fails here rather than as a mystery timeout mid-suite.
   await warmUpDatabase(prisma);
+  before = await census();
+  console.log("Database before:", JSON.stringify(before));
   await main();
 } catch (error) {
   // A driver error can arrive with an empty `message` — a dropped pooler
@@ -980,15 +1088,29 @@ try {
   console.log("SUITE ERROR:", detail, "\n", error.stack?.split("\n").slice(0, 6).join("\n"));
   failures.push("suite crashed: " + detail);
 } finally {
-  const leftovers = await cleanup();
+  // A cleanup failure must not swallow the results: it used to throw out of
+  // the finally block, so a run that passed everything printed no summary at
+  // all and exited non-zero with only a stack trace.
+  const leftovers = await cleanup().catch((error) => {
+    console.log("CLEANUP ERROR:", error?.code ?? error?.name, error?.message);
+    failures.push("cleanup failed: " + (error?.message || error?.code));
+    return before ?? {};
+  });
   await prisma.$disconnect();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));
 
-  const ignore = ["roles", "accounts"];
-  const dirty = Object.entries(leftovers).filter(([key, value]) => !ignore.includes(key) && value > 0);
-  if (dirty.length) console.log("WARNING: database not clean:", JSON.stringify(dirty));
+  // Measured against what was here before, not against zero. Asserting an
+  // empty database only holds on a freshly reset one and turns every run
+  // against a working database into a spurious failure — the question worth
+  // asking is whether *this suite* put things back.
+  const dirty = before
+    ? Object.entries(before)
+        .filter(([key, value]) => leftovers[key] !== value)
+        .map(([key, value]) => `${key} ${value} -> ${leftovers[key]}`)
+    : ["baseline never taken"];
+  if (dirty.length) console.log("WARNING: database not back to how the suite found it:", dirty.join(", "));
 
   process.exit(failures.length || dirty.length ? 1 : 0);
 }

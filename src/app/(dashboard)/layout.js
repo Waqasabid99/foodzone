@@ -1,3 +1,4 @@
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import DashboardShell from "@/components/dashboard/DashboardShell";
 import { getWorkspaceViewer } from "@/server/auth/workspace";
@@ -25,9 +26,24 @@ export const metadata = {
  * cannot see is refused by the page, not merely un-linked here.
  */
 export default async function DashboardLayout({ children }) {
-  const [viewer, { storeName }] = await Promise.all([getWorkspaceViewer(), getSiteIdentity()]);
+  const [viewer, { storeName }, requestHeaders] = await Promise.all([
+    getWorkspaceViewer(),
+    getSiteIdentity(),
+    headers(),
+  ]);
 
-  if (!viewer) redirect(loginHref("/dashboard"));
+  // The page the browser actually asked for, so somebody sent to the login
+  // screen comes back to it rather than to the dashboard home. The layout runs
+  // before the page, so the page's own `loginHref` never gets the chance. The
+  // proxy sets this; without it the fallback is what this line used to be.
+  const asked = requestHeaders.get("x-fz-path") ?? "/dashboard";
+
+  if (!viewer) redirect(loginHref(asked));
+
+  // An administrator's temporary password gets them this far and no further.
+  // The page they are sent to is deliberately outside this layout, so there is
+  // no loop; the API refuses everything else until they choose their own.
+  if (viewer.mustChangePassword) redirect("/set-password");
 
   // A customer has no staff navigation at all, so they are sent to their own
   // area rather than shown an empty workspace and a permission error.

@@ -22,6 +22,9 @@ export {
   assertPermission,
   assertRole,
   grantedPermissionKeys,
+  branchScope,
+  holdsCompanyWide,
+  assertCompanyWide,
   invalidatePrincipal,
   invalidateAllPrincipals,
 } from "@/lib/api/permissions";

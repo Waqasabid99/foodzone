@@ -2,6 +2,11 @@ import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/api";
 import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
+import { logger } from "@/lib/logger";
+import { notifyPermission, usersWithPermission } from "@/server/services/notification.service";
+import { monthsBetween, nextFiscalYearAfter, runwayStatus } from "@/server/accounting/fiscal-calendar";
+import { missingPeriodError } from "@/server/accounting/posting-errors";
+import { BLOCKED, releaseBlockedEvents } from "@/server/jobs/outbox";
 
 /**
  * The fiscal calendar, and the guard that stops history moving.
@@ -25,6 +30,15 @@ import { recordAudit } from "@/server/utils/audit";
  * without one. An entry with no period cannot be closed, cannot be reported on,
  * and will not appear in any statement — it would be silently lost.
  */
+
+/** One type, so the dedupe and the bell icon agree about what this is. */
+export const FISCAL_RUNWAY_NOTIFICATION = "finance.fiscal_year_runway";
+
+/**
+ * The grant that can open a year — the same one `POST /admin/fiscal-years`
+ * checks, so the warning can only ever go to people who can act on it.
+ */
+const FISCAL_GRANT = "accounting_periods.close";
 
 const YEAR_SELECT = {
   id: true,
@@ -54,32 +68,22 @@ function asDate(value) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
 
-/** The calendar months between two dates, inclusive of both ends. */
-export function monthsBetween(startDate, endDate) {
-  const start = asDate(startDate);
-  const end = asDate(endDate);
-  const months = [];
-
-  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
-
-  while (cursor <= end) {
-    const monthStart = new Date(cursor);
-    const monthEnd = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0));
-
-    months.push({
-      // The first and last periods are clipped to the year, so a year that
-      // starts mid-month gets a short first period rather than one that
-      // reaches back before the year began.
-      startDate: monthStart < start ? start : monthStart,
-      endDate: monthEnd > end ? end : monthEnd,
-      name: new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }).format(monthStart),
-    });
-
-    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
-  }
-
-  return months;
-}
+/*
+ * Re-exported, not reimplemented. The calendar arithmetic lives in a module
+ * with no imports so that `prisma/seed.js` — plain node, no path aliases, no
+ * validated environment — can create the opening fiscal year from the same
+ * definition this service uses. Two copies would drift, and the drift would
+ * show up as a month that exists in the seed and not in the UI.
+ */
+export {
+  monthsBetween,
+  fiscalYearFor,
+  fiscalYearName,
+  fiscalYearStartMonth,
+  nextFiscalYearAfter,
+  runwayStatus,
+  RUNWAY_THRESHOLDS,
+} from "@/server/accounting/fiscal-calendar";
 
 /**
  * Creates a fiscal year and its monthly periods in one go.
@@ -122,12 +126,26 @@ export async function createFiscalYear(data, actor = null) {
     });
   });
 
+  /*
+   * Release anything that was waiting for a period.
+   *
+   * Opening a year is the only action that can clear a blocked posting, so it
+   * is the natural place to do it — the alternative is up to a day of silence
+   * between fixing the calendar and the books catching up, during which the
+   * ledger still looks wrong and nobody can tell whether the fix worked.
+   *
+   * Deliberately not scoped to the year just created: an event does not record
+   * which date it was refused for, and releasing one that is still blocked
+   * costs a single attempt before it parks again.
+   */
+  const released = await releaseBlockedEvents();
+
   await recordAudit({
     actorId: actor?.userId ?? null,
     action: "fiscal_year.create",
     entityType: "FiscalYear",
     entityId: year.id,
-    changes: { name: year.name, periods: months.length },
+    changes: { name: year.name, periods: months.length, releasedPostings: released },
   });
 
   return year;
@@ -167,11 +185,13 @@ export async function periodForDate(date, tx = prisma) {
 export async function assertPostable(date, tx = prisma) {
   const period = await periodForDate(date, tx);
 
-  if (!period) {
-    throw ApiError.validation("That date is not in any accounting period", {
-      entryDate: ["Create the fiscal year covering this date first"],
-    });
-  }
+  /*
+   * Thrown from one place, carrying a reason code. The outbox parks an event
+   * that fails for *this* reason instead of spending its retry budget on a
+   * fault that only a human opening a fiscal year can clear — see
+   * `accounting/posting-errors.js`.
+   */
+  if (!period) throw missingPeriodError(date);
 
   if (period.status === "CLOSED") {
     throw ApiError.conflict(`${period.name} is closed, so nothing can be posted into it`, {
@@ -190,6 +210,150 @@ export async function assertPostable(date, tx = prisma) {
   }
 
   return period;
+}
+
+/**
+ * Whether the books can still be posted into, and for how long.
+ *
+ * One read, used by three callers that must not disagree: the banner on the
+ * dashboard, the notice the daily job sends, and the year the form offers to
+ * open next.
+ *
+ * `blockedPostings` is the number of events already waiting for a period. It
+ * is the difference between a reminder and a bill of damages — "your year ends
+ * in three weeks" is easy to put off, "14 postings are waiting and none of
+ * them are in the ledger" is not.
+ */
+export async function fiscalRunway({ now = new Date() } = {}) {
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+
+  const [period, latest, blockedPostings] = await Promise.all([
+    prisma.accountingPeriod.findFirst({
+      where: { startDate: { lte: today }, endDate: { gte: today } },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        fiscalYear: { select: { id: true, name: true, endDate: true, isClosed: true } },
+      },
+    }),
+    prisma.fiscalYear.findFirst({ orderBy: { endDate: "desc" }, select: { endDate: true } }),
+    prisma.outboxEvent.count({ where: { status: BLOCKED } }),
+  ]);
+
+  /*
+   * Measured against the latest year on file, not the one covering today.
+   *
+   * They are usually the same year. When next year has already been opened
+   * they are not, and the runway is however far the calendar reaches — warning
+   * about a year that ends in a fortnight when its successor is already there
+   * is how a warning teaches people to ignore it.
+   */
+  const reach = period ? (latest?.endDate ?? period.fiscalYear.endDate) : null;
+  const status = runwayStatus({ yearEndDate: reach, now });
+
+  return {
+    ...status,
+    period: period ? { id: period.id, name: period.name, status: period.status } : null,
+    fiscalYear: period ? period.fiscalYear : null,
+    calendarEndsAt: reach ?? null,
+    blockedPostings,
+    // What to open next, so the warning and the form agree about the answer.
+    suggestion: nextFiscalYearAfter(latest?.endDate ?? null, { now }),
+  };
+}
+
+/**
+ * The daily warning, sent once per step rather than every morning.
+ *
+ * Nothing here opens a year. A year's shape is a business decision — a short
+ * transition year, a changed year end — and an automatically created one is
+ * worse than none, because periods that have been posted into cannot be
+ * deleted and an overlapping year then blocks the correct one. So this warns
+ * the people who hold the grant to open it, and leaves the decision with them.
+ *
+ * Deduplicated on the threshold, not the day: a notice every morning for two
+ * months trains people to dismiss it, and the escalation (60, 30, 7) is what
+ * carries the urgency instead. A *lapsed* calendar is the exception and does
+ * repeat daily — by then the books have stopped and a once-only notice that
+ * somebody missed is how a quarter goes unposted.
+ */
+export async function warnAboutFiscalRunway({ now = new Date() } = {}) {
+  const runway = await fiscalRunway({ now });
+
+  /*
+   * Who would be told, counted every cycle rather than only when something is
+   * sent.
+   *
+   * A fan-out that reaches nobody is the quietest way for a warning system to
+   * fail: everything reports success, the notification count is zero because
+   * there was nobody to notify, and the first anyone hears of it is a year
+   * that lapsed. So the audience is reported whether or not there is anything
+   * to say, and an empty audience is logged as the configuration problem it
+   * is.
+   */
+  const audience = (await usersWithPermission(FISCAL_GRANT)).length;
+  if (!audience) {
+    logger.error("nobody holds the grant to open a fiscal year", { permission: FISCAL_GRANT });
+  }
+
+  if (runway.state === "OK" && !runway.blockedPostings) {
+    return { warned: 0, audience, state: runway.state, daysLeft: runway.daysLeft };
+  }
+
+  const lapsed = runway.state === "LAPSED";
+  const waitingOnly = runway.state === "OK";
+  const yearId = runway.fiscalYear?.id ?? "none";
+
+  // Lapsed repeats daily, so the key carries the date; an expiry warning
+  // carries its threshold and is therefore sent once per step.
+  const key = lapsed
+    ? `lapsed:${now.toISOString().slice(0, 10)}`
+    : waitingOnly
+      ? // Postings parked for a date the calendar does not cover, while today
+        // is covered. Keyed by how many are waiting, so the count growing is
+        // worth another notice and a steady count is not.
+        `waiting:${runway.blockedPostings}`
+      : `expiring:${yearId}:${runway.threshold}`;
+
+  const already = await prisma.notification.findFirst({
+    where: { type: FISCAL_RUNWAY_NOTIFICATION, data: { path: ["key"], equals: key } },
+    select: { id: true },
+  });
+  if (already) return { warned: 0, audience, state: runway.state, daysLeft: runway.daysLeft, deduped: true };
+
+  const waiting = runway.blockedPostings
+    ? ` ${runway.blockedPostings} posting${runway.blockedPostings === 1 ? " is" : "s are"} already waiting and not in the ledger.`
+    : "";
+
+  const plural = runway.blockedPostings === 1 ? "posting is" : "postings are";
+  const title = lapsed
+    ? "The books have no open period for today"
+    : waitingOnly
+      ? `${runway.blockedPostings} ${plural} waiting for an accounting period`
+      : `The financial year ends in ${runway.daysLeft} day${runway.daysLeft === 1 ? "" : "s"}`;
+
+  const body = lapsed
+    ? `Nothing can be posted to the ledger until a fiscal year covering today exists.${waiting} Open ${runway.suggestion.name} on the periods page.`
+    : waitingOnly
+      ? `${runway.blockedPostings} ${plural} dated outside every period on the calendar, so ${runway.blockedPostings === 1 ? "it is" : "they are"} being held rather than lost. Open the year covering those dates and they post themselves.`
+      : `${runway.fiscalYear?.name ?? "The current year"} ends on ${new Date(runway.calendarEndsAt).toISOString().slice(0, 10)}. Open ${runway.suggestion.name} before then, or postings dated after it will have nowhere to go.`;
+
+  const { created } = await notifyPermission({
+    // The grant the create endpoint itself checks, so this cannot be sent to
+    // people who are not allowed to act on it.
+    permissionKey: FISCAL_GRANT,
+    type: FISCAL_RUNWAY_NOTIFICATION,
+    title,
+    body,
+    data: { key, state: runway.state, daysLeft: runway.daysLeft, suggestion: runway.suggestion },
+    referenceType: "FiscalYear",
+    referenceId: runway.fiscalYear?.id ?? null,
+  });
+
+  if (created) logger.warn("fiscal calendar is running out", { state: runway.state, daysLeft: runway.daysLeft, notified: created });
+
+  return { warned: created, audience, state: runway.state, daysLeft: runway.daysLeft };
 }
 
 async function loadPeriod(id) {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, created, ok, RateLimits } from "@/lib/api";
 import { registerDeviceSchema } from "@/server/validation/hr.schemas";
 import { listDevices, registerDevice } from "@/server/services/attendance-device.service";
 
@@ -7,7 +7,7 @@ const querySchema = z.object({ branchId: z.string().max(40).optional(), isActive
 
 export const GET = apiHandler(
   { auth: true, permissions: "attendance_devices.read", query: querySchema, branch: "query" },
-  async ({ query }) => ok(await listDevices(query)),
+  async ({ query, auth }) => ok(await listDevices({ ...query, scope: branchScope(auth, "attendance_devices.read") })),
 );
 
 /**

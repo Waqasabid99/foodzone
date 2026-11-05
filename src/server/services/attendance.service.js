@@ -6,7 +6,8 @@ import { withTransaction } from "@/server/utils/db";
 import { recordAudit } from "@/server/utils/audit";
 import { logger } from "@/lib/logger";
 import { deriveDay, summariseDays } from "@/server/attendance/derive";
-import { addDays, daysBetween, punchBelongsToShift, startOfDay } from "@/server/attendance/shift";
+import { addDays, daysBetween, punchBelongsToShift, startOfDay, zonedDateOf } from "@/server/attendance/shift";
+import { branchFilter } from "@/server/hr/access";
 
 /**
  * Turning punches into the day payroll reads.
@@ -24,6 +25,9 @@ import { addDays, daysBetween, punchBelongsToShift, startOfDay } from "@/server/
  */
 
 const D = (value) => new Prisma.Decimal(value ?? 0);
+
+/** How many of one employee's days are written at once by a range run. */
+const DERIVE_CONCURRENCY = 8;
 
 const SELECT = {
   id: true,
@@ -49,6 +53,27 @@ const SELECT = {
   shift: { select: { id: true, name: true, startMinute: true, endMinute: true } },
 };
 
+const SHIFT_SELECT = {
+  id: true,
+  startMinute: true,
+  endMinute: true,
+  breakMinutes: true,
+  graceMinutes: true,
+  halfDayThresholdMinutes: true,
+  fullDayThresholdMinutes: true,
+};
+
+/** The shape `deriveDay` wants, from whichever source the rows came. */
+function shapeContext({ assignment, holiday, leave }) {
+  return {
+    shift: assignment?.shift ?? null,
+    isWeeklyOff: assignment?.isWeeklyOff ?? false,
+    isHoliday: Boolean(holiday),
+    holiday: holiday ?? null,
+    leave: leave ? { id: leave.id, isPaid: leave.leaveType?.isPaid ?? true, name: leave.leaveType?.name } : null,
+  };
+}
+
 /** Everything the derivation needs about one employee's day, in one go. */
 async function contextFor({ employeeId, workDate, branchId, tx = prisma }) {
   const day = startOfDay(workDate);
@@ -58,17 +83,7 @@ async function contextFor({ employeeId, workDate, branchId, tx = prisma }) {
       where: { employeeId_workDate: { employeeId, workDate: day } },
       select: {
         isWeeklyOff: true,
-        shift: {
-          select: {
-            id: true,
-            startMinute: true,
-            endMinute: true,
-            breakMinutes: true,
-            graceMinutes: true,
-            halfDayThresholdMinutes: true,
-            fullDayThresholdMinutes: true,
-          },
-        },
+        shift: { select: SHIFT_SELECT },
       },
     }),
     tx.holiday.findFirst({
@@ -82,13 +97,7 @@ async function contextFor({ employeeId, workDate, branchId, tx = prisma }) {
     }),
   ]);
 
-  return {
-    shift: assignment?.shift ?? null,
-    isWeeklyOff: assignment?.isWeeklyOff ?? false,
-    isHoliday: Boolean(holiday),
-    holiday,
-    leave: leave ? { id: leave.id, isPaid: leave.leaveType?.isPaid ?? true, name: leave.leaveType?.name } : null,
-  };
+  return shapeContext({ assignment, holiday, leave });
 }
 
 /**
@@ -98,7 +107,19 @@ async function contextFor({ employeeId, workDate, branchId, tx = prisma }) {
  * the following morning, and grouping by date alone splits it across two days —
  * halving one and inventing the other.
  */
-async function punchesFor({ employeeId, workDate, shift, tx = prisma }) {
+function punchesOf({ candidates, workDate, shift, timezone = "UTC" }) {
+  const day = startOfDay(workDate);
+
+  if (!shift) {
+    // Nothing rostered, so the only anchor is the calendar — the branch's,
+    // not UTC's, or an evening punch lands on the day before.
+    return candidates.filter((punch) => zonedDateOf(punch.punchedAt, timezone).getTime() === day.getTime());
+  }
+
+  return candidates.filter((punch) => punchBelongsToShift({ punchedAt: punch.punchedAt, shift, workDate: day, timezone }));
+}
+
+async function punchesFor({ employeeId, workDate, shift, timezone = "UTC", tx = prisma }) {
   const day = startOfDay(workDate);
 
   // Widened by a day either side, then filtered by the shift window.
@@ -108,11 +129,7 @@ async function punchesFor({ employeeId, workDate, shift, tx = prisma }) {
     orderBy: { punchedAt: "asc" },
   });
 
-  if (!shift) {
-    return candidates.filter((punch) => startOfDay(punch.punchedAt).getTime() === day.getTime());
-  }
-
-  return candidates.filter((punch) => punchBelongsToShift({ punchedAt: punch.punchedAt, shift, workDate: day }));
+  return punchesOf({ candidates, workDate: day, shift, timezone });
 }
 
 /**
@@ -121,19 +138,28 @@ async function punchesFor({ employeeId, workDate, shift, tx = prisma }) {
  * Idempotent: the same punches produce the same row, so this is safe to run
  * nightly, on demand, and again after a re-sync.
  */
-export async function deriveAttendanceDay({ employeeId, workDate, force = false, tx = prisma }) {
-  const employee = await tx.employee.findUnique({
-    where: { id: employeeId },
-    select: { id: true, branchId: true, employeeCode: true },
-  });
+export async function deriveAttendanceDay({ employeeId, workDate, force = false, tx = prisma, loaded = null }) {
+  const employee =
+    loaded?.employee ??
+    (await tx.employee.findUnique({
+      where: { id: employeeId },
+      // The branch's timezone, because a shift is stored as a wall clock and the
+      // punches are instants. Without it the window is read at UTC midnight and
+      // every branch east or west of Greenwich is derived against the wrong hours.
+      select: { id: true, branchId: true, employeeCode: true, branch: { select: { timezone: true } } },
+    }));
   if (!employee) throw ApiError.notFound("Employee not found");
+
+  const timezone = employee.branch?.timezone ?? "UTC";
 
   const day = startOfDay(workDate);
 
-  const existing = await tx.attendanceDay.findUnique({
-    where: { employeeId_workDate: { employeeId, workDate: day } },
-    select: { id: true, isLocked: true, isManualOverride: true },
-  });
+  const existing = loaded
+    ? loaded.existing(day)
+    : await tx.attendanceDay.findUnique({
+        where: { employeeId_workDate: { employeeId, workDate: day } },
+        select: { id: true, isLocked: true, isManualOverride: true },
+      });
 
   // A paid day is frozen. Re-deriving it would make the payslip disagree with
   // the attendance it was built from.
@@ -144,13 +170,18 @@ export async function deriveAttendanceDay({ employeeId, workDate, force = false,
     return { skipped: true, reason: "MANUAL_OVERRIDE", employeeId, workDate: day };
   }
 
-  const context = await contextFor({ employeeId, workDate: day, branchId: employee.branchId, tx });
-  const punches = await punchesFor({ employeeId, workDate: day, shift: context.shift, tx });
+  const context = loaded
+    ? loaded.context(day)
+    : await contextFor({ employeeId, workDate: day, branchId: employee.branchId, tx });
+  const punches = loaded
+    ? punchesOf({ candidates: loaded.candidates, workDate: day, shift: context.shift, timezone })
+    : await punchesFor({ employeeId, workDate: day, shift: context.shift, timezone, tx });
 
   const derived = deriveDay({
     punches,
     shift: context.shift,
     workDate: day,
+    timezone,
     isHoliday: context.isHoliday,
     isWeeklyOff: context.isWeeklyOff,
     leave: context.leave,
@@ -191,23 +222,88 @@ export async function deriveAttendanceDay({ employeeId, workDate, force = false,
   });
 
   if (punches.length) {
-    await tx.attendancePunch.updateMany({
-      where: { id: { in: punches.map((punch) => punch.id) } },
-      data: { isProcessed: true },
-    });
+    if (loaded) {
+      // A range run flushes these once per employee: "mark processed" is the
+      // same statement every day, and it was costing a round-trip each time.
+      for (const punch of punches) loaded.processed.add(punch.id);
+    } else {
+      await tx.attendancePunch.updateMany({
+        where: { id: { in: punches.map((punch) => punch.id) } },
+        data: { isProcessed: true },
+      });
+    }
   }
 
   return { skipped: false, day: row, derived };
 }
 
 /**
+ * Everything one employee's range needs, loaded once instead of once a day.
+ *
+ * The day-at-a-time version asked the database six questions per day — the
+ * employee, the existing row, the roster, the holidays, the leave, the
+ * punches — and five of those answers are the same for every day in the
+ * range. Over a month for ten people that was close to two thousand
+ * round-trips, which took longer than an HTTP client will wait: the request
+ * timed out, the work stopped halfway, and the month was left half derived
+ * with nothing to say so.
+ *
+ * The queries are the same queries, widened to the range; the slicing that
+ * follows is pure, and `deriveDay` is handed exactly what it was handed
+ * before.
+ */
+async function loadRange({ employee, start, end, holidays, tx = prisma }) {
+  const timezone = employee.branch?.timezone ?? "UTC";
+  const dayKey = (date) => startOfDay(date).getTime();
+
+  const [existing, assignments, leaves, candidates] = await Promise.all([
+    tx.attendanceDay.findMany({
+      where: { employeeId: employee.id, workDate: { gte: start, lte: end } },
+      select: { id: true, workDate: true, isLocked: true, isManualOverride: true },
+    }),
+    tx.shiftAssignment.findMany({
+      where: { employeeId: employee.id, workDate: { gte: start, lte: end } },
+      select: { workDate: true, isWeeklyOff: true, shift: { select: SHIFT_SELECT } },
+    }),
+    tx.leaveRequest.findMany({
+      where: { employeeId: employee.id, status: "APPROVED", startDate: { lte: end }, endDate: { gte: start } },
+      select: { id: true, startDate: true, endDate: true, leaveType: { select: { id: true, name: true, isPaid: true } } },
+    }),
+    // The same day either side the single-day version allows, so a night
+    // shift at either end of the range still finds its punch-out.
+    tx.attendancePunch.findMany({
+      where: { employeeId: employee.id, punchedAt: { gte: addDays(start, -1), lt: addDays(end, 2) } },
+      select: { id: true, punchedAt: true, direction: true, method: true },
+      orderBy: { punchedAt: "asc" },
+    }),
+  ]);
+
+  const existingByDay = new Map(existing.map((row) => [dayKey(row.workDate), row]));
+  const assignmentByDay = new Map(assignments.map((row) => [dayKey(row.workDate), row]));
+
+  return {
+    employee,
+    timezone,
+    candidates,
+    processed: new Set(),
+    existing: (day) => existingByDay.get(dayKey(day)) ?? null,
+    context: (day) =>
+      shapeContext({
+        assignment: assignmentByDay.get(dayKey(day)) ?? null,
+        holiday: holidays.find((row) => dayKey(row.date) === dayKey(day) && (row.branchId === null || row.branchId === employee.branchId)) ?? null,
+        leave: leaves.find((row) => dayKey(row.startDate) <= dayKey(day) && dayKey(row.endDate) >= dayKey(day)) ?? null,
+      }),
+  };
+}
+
+/**
  * Derives a whole branch over a date range.
  *
- * The nightly job. Runs per employee per day rather than in one query because
- * each day needs its own roster, holiday and leave context — and because a
- * failure on one employee must not lose the rest.
+ * The nightly job. Still one write per employee per day — each day is its own
+ * row and its own answer — but the reads behind them are loaded once per
+ * employee, and a failure on one employee still must not lose the rest.
  */
-export async function deriveRange({ branchId, employeeId = null, from, to, force = false }) {
+export async function deriveRange({ branchId, employeeId = null, from, to, force = false, scope = null }) {
   const start = startOfDay(from);
   const end = startOfDay(to ?? from);
   const days = daysBetween(start, end);
@@ -216,33 +312,62 @@ export async function deriveRange({ branchId, employeeId = null, from, to, force
     throw ApiError.validation(`That is ${days} days`, { to: ["Derive at most 93 days at a time"] });
   }
 
+  const filter = branchFilter(scope);
   const employees = await prisma.employee.findMany({
     where: {
       ...(employeeId ? { id: employeeId } : {}),
       ...(branchId ? { branchId } : {}),
+      // Without the caller's own scope, a request with no branch would derive —
+      // and so rewrite — every branch's attendance.
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       status: { notIn: ["RESIGNED", "TERMINATED"] },
     },
-    select: { id: true, employeeCode: true },
+    select: { id: true, branchId: true, employeeCode: true, branch: { select: { timezone: true } } },
+  });
+
+  // One query for the whole run: a holiday is a property of the calendar, not
+  // of the person, so asking it per employee per day asked it 310 times for
+  // the same handful of rows.
+  const holidays = await prisma.holiday.findMany({
+    where: { date: { gte: start, lte: end } },
+    select: { id: true, name: true, isPaid: true, date: true, branchId: true },
   });
 
   const results = { employees: employees.length, days, derived: 0, skipped: 0, failed: [] };
 
   for (const employee of employees) {
-    for (let index = 0; index < days; index += 1) {
-      const workDate = addDays(start, index);
+    const loaded = await loadRange({ employee, start, end, holidays });
+    const dates = Array.from({ length: days }, (unused, index) => addDays(start, index));
 
-      try {
-        const result = await deriveAttendanceDay({ employeeId: employee.id, workDate, force });
-        if (result.skipped) results.skipped += 1;
-        else results.derived += 1;
-      } catch (error) {
-        logger.warn("attendance derivation failed", {
-          employeeId: employee.id,
-          workDate,
-          error: error.message,
-        });
-        results.failed.push({ employeeId: employee.id, workDate, error: error.message });
-      }
+    // Each day is an independent row, so they are written a few at a time
+    // rather than one after another. Bounded, because the point is to hide
+    // the network's latency, not to open thirty connections at a branch.
+    for (let cursor = 0; cursor < dates.length; cursor += DERIVE_CONCURRENCY) {
+      const batch = dates.slice(cursor, cursor + DERIVE_CONCURRENCY);
+
+      await Promise.all(
+        batch.map(async (workDate) => {
+          try {
+            const result = await deriveAttendanceDay({ employeeId: employee.id, workDate, force, loaded });
+            if (result.skipped) results.skipped += 1;
+            else results.derived += 1;
+          } catch (error) {
+            logger.warn("attendance derivation failed", {
+              employeeId: employee.id,
+              workDate,
+              error: error.message,
+            });
+            results.failed.push({ employeeId: employee.id, workDate, error: error.message });
+          }
+        }),
+      );
+    }
+
+    if (loaded.processed.size) {
+      await prisma.attendancePunch.updateMany({
+        where: { id: { in: [...loaded.processed] } },
+        data: { isProcessed: true },
+      });
     }
   }
 
@@ -339,14 +464,18 @@ export async function revertCorrection(id, actor) {
  * point of having a supervisor look at a `MISSING_PUNCH` before somebody loses a
  * day's pay to a flat battery.
  */
-export async function approveAttendance({ branchId, employeeId = null, from, to, actor }) {
+export async function approveAttendance({ branchId, employeeId = null, from, to, scope = null, actor }) {
   const start = startOfDay(from);
   const end = startOfDay(to ?? from);
+  const filter = branchFilter(scope);
 
   const pending = await prisma.attendanceDay.findMany({
     where: {
       ...(branchId ? { branchId } : {}),
       ...(employeeId ? { employeeId } : {}),
+      // Approval is a signature. It must never reach a branch the signer has
+      // no authority at, even when they asked for "everything".
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       workDate: { gte: start, lte: end },
       approvedAt: null,
       isLocked: false,
@@ -380,11 +509,13 @@ export async function approveAttendance({ branchId, employeeId = null, from, to,
   };
 }
 
-export async function listAttendance({ branchId, employeeId, status, from, to, limit = 50, cursor } = {}) {
+export async function listAttendance({ branchId, employeeId, status, from, to, scope = null, limit = 50, cursor } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.attendanceDay.findMany({
     where: {
       ...(branchId ? { branchId } : {}),
       ...(employeeId ? { employeeId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       ...(status ? { status } : {}),
       ...(from || to
         ? { workDate: { ...(from ? { gte: startOfDay(from) } : {}), ...(to ? { lte: startOfDay(to) } : {}) } }
@@ -399,11 +530,13 @@ export async function listAttendance({ branchId, employeeId, status, from, to, l
 }
 
 /** One employee's month, with the totals payroll will use. */
-export async function attendanceSummary({ employeeId, branchId, from, to }) {
+export async function attendanceSummary({ employeeId, branchId, from, to, scope = null }) {
+  const filter = branchFilter(scope);
   const days = await prisma.attendanceDay.findMany({
     where: {
       ...(employeeId ? { employeeId } : {}),
       ...(branchId ? { branchId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
       workDate: { gte: startOfDay(from), lte: startOfDay(to) },
     },
     select: {

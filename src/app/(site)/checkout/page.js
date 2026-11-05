@@ -1,5 +1,8 @@
+import { cookies } from "next/headers";
 import CheckoutView from "@/components/checkout/CheckoutView";
 import { getSiteIdentity } from "@/server/content/site";
+import { TABLE_COOKIE } from "@/lib/table-context";
+import { tableForCheckout } from "@/server/content/table-context";
 
 export const metadata = {
   title: "Checkout — FoodZone",
@@ -19,11 +22,16 @@ export const metadata = {
  * confirmed order reads as though nothing happened.
  */
 export default async function CheckoutPage() {
-  const { currency } = await getSiteIdentity();
+  const [{ currency }, cookieStore] = await Promise.all([getSiteIdentity(), cookies()]);
+
+  // The cookie is a hint left by a scanned table code; the table row is the
+  // authority. One that has been deleted or switched off resolves to nothing
+  // rather than tagging an order for a seat that no longer exists.
+  const table = await tableForCheckout(cookieStore.get(TABLE_COOKIE)?.value ?? null);
 
   return (
     <div className="mx-auto max-w-page px-margin-mobile py-8 md:px-margin-desktop md:py-10">
-      <CheckoutView currency={currency} />
+      <CheckoutView currency={currency} tableId={table?.id ?? null} tableName={table?.name ?? null} />
     </div>
   );
 }

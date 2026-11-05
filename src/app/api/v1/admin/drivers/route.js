@@ -1,10 +1,11 @@
 import { apiHandler, created, ok, RateLimits } from "@/lib/api";
 import { createDriverSchema, listDriversSchema } from "@/server/validation/delivery.schemas";
 import { createDriver, listDrivers } from "@/server/services/driver.service";
+import { branchScope } from "@/lib/api/permissions";
 
 export const GET = apiHandler(
   { auth: true, permissions: "drivers.read", query: listDriversSchema, branch: "query" },
-  async ({ query }) => ok(await listDrivers(query)),
+  async ({ query, auth }) => ok(await listDrivers({ ...query, scope: branchScope(auth, "drivers.read") })),
 );
 
 /**

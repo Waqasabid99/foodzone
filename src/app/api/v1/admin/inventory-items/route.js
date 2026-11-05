@@ -1,10 +1,10 @@
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, assertCompanyWide, branchScope, created, ok, RateLimits } from "@/lib/api";
 import { createItemSchema, listItemsSchema } from "@/server/validation/inventory.schemas";
 import { createItem, listItems } from "@/server/services/inventory-item.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "inventory_items.read", query: listItemsSchema, branch: "query" },
-  async ({ query }) => ok(await listItems(query)),
+  async ({ query, auth }) => ok(await listItems({ ...query, scope: branchScope(auth, "inventory_items.read") })),
 );
 
 /**
@@ -22,5 +22,10 @@ export const POST = apiHandler(
     rateLimit: RateLimits.write,
     audit: { action: "inventory_item.create", entityType: "InventoryItem", entityId: ({ result }) => result?.id ?? null },
   },
-  async ({ body, auth }) => created(await createItem(body, auth)),
+  async ({ body, auth }) => {
+    // One catalogue of ingredients for every branch, so it takes a
+    // company-wide role to add to it.
+    assertCompanyWide(auth, "inventory_items.create");
+    return created(await createItem(body, auth));
+  },
 );

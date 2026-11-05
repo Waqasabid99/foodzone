@@ -63,12 +63,30 @@ async function api(pathname, { method = "GET", body, token, ip, headers = {} } =
   return { status: res.status, body: json };
 }
 
-async function drainOutbox() {
-  const res = await fetch(`${BASE}/api/internal/jobs/outbox`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${CRON}` },
-  });
-  return res.status;
+/**
+ * Drains the outbox until it is actually empty.
+ *
+ * One call processes at most WORKER_BATCH_SIZE events, so a single drain is
+ * not "the queue is empty" — it is "twenty fewer". With a backlog ahead of it,
+ * the event this test is waiting for never gets claimed, and the assertion
+ * fails for a reason that has nothing to do with what it is testing. A real
+ * scheduler calls this repeatedly; so does this.
+ */
+async function drainOutbox({ maxCycles = 20 } = {}) {
+  let status = 0;
+  for (let cycle = 0; cycle < maxCycles; cycle += 1) {
+    const res = await fetch(`${BASE}/api/internal/jobs/outbox`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${CRON}` },
+    });
+    status = res.status;
+    if (status !== 200) return status;
+
+    const body = await res.json().catch(() => null);
+    const stats = body?.data?.stats;
+    if (!stats || (stats.pending === 0 && stats.processing === 0)) return status;
+  }
+  return status;
 }
 
 const num = (value) => Number(value ?? 0);
@@ -78,7 +96,19 @@ const round = (value, dp = 2) => Math.round(Number(value ?? 0) * 10 ** dp) / 10 
 const YEAR = 2026;
 const MONTH = "03";
 const dayOf = (d) => `${YEAR}-${MONTH}-${String(d).padStart(2, "0")}`;
-const at = (d, time) => `${dayOf(d)}T${time}:00Z`;
+/**
+ * A wall-clock time at the branch, as the instant a device would report.
+ *
+ * The branch is in Asia/Karachi and its shift is "09:00 to 18:00" — a wall
+ * clock, not UTC. Sending these as `…T18:00Z` made them 23:00 in Karachi,
+ * four hours past the window a punch may fall in, so every clock-out was
+ * discarded and a full day derived as MISSING_PUNCH. The code was right; the
+ * test was writing local times and labelling them UTC.
+ *
+ * `+05:00` rather than a timezone lookup because Karachi has no daylight
+ * saving, so the offset is the whole truth.
+ */
+const at = (d, time) => new Date(`${dayOf(d)}T${time}:00+05:00`).toISOString();
 
 async function main() {
   // ================= SETUP =================
@@ -104,16 +134,34 @@ async function main() {
   const branchId = branch.body.data.id;
   created.branchIds.add(branchId);
 
-  // Payroll posts to the ledger, and nothing posts into a date that is not in
-  // an accounting period — so the fiscal year has to exist first. Worth knowing
-  // operationally: a system with no fiscal calendar accumulates business events
-  // that never reach the books, and the backfill cannot help until it is there.
-  const fy = await api("/admin/fiscal-years", {
-    method: "POST",
-    token: adminToken,
-    body: { name: `FY ${YEAR} ${stamp}`, startDate: `${YEAR}-01-01`, endDate: `${YEAR}-12-31` },
+  /*
+   * Payroll posts to the ledger, and nothing posts into a date that is not in
+   * an accounting period — so a period covering this suite's month has to
+   * exist first.
+   *
+   * Created only when nothing covers it, and covering only the month the suite
+   * actually posts into. `db:seed` opens the year covering *today* — July to
+   * June by default — so on a seeded database a calendar year requested here
+   * would overlap its second half and be refused, which is the fiscal module
+   * working as designed: overlapping years make "which period does this date
+   * belong to" ambiguous. A single month can sit beside any shape of year
+   * without colliding with it.
+   */
+  const monthStart = `${YEAR}-${MONTH}-01`;
+  const monthEnd = new Date(Date.UTC(YEAR, Number(MONTH), 0)).toISOString().slice(0, 10);
+  const covered = await prisma.accountingPeriod.findFirst({
+    where: { startDate: { lte: new Date(`${monthStart}T00:00:00Z`) }, endDate: { gte: new Date(`${monthEnd}T00:00:00Z`) } },
+    select: { id: true },
   });
-  check("a fiscal year covers the payroll period", fy.status === 201, fy.body);
+
+  if (!covered) {
+    const fy = await api("/admin/fiscal-years", {
+      method: "POST",
+      token: adminToken,
+      body: { name: `FY ${YEAR}-${MONTH} ${stamp}`, startDate: monthStart, endDate: monthEnd },
+    });
+    check("a fiscal year covers the payroll period", fy.status === 201, fy.body);
+  }
 
   // ================= DEPARTMENTS AND EMPLOYEES =================
   const dept = await api("/admin/departments", {
@@ -563,8 +611,50 @@ async function main() {
   const afterRegen = await prisma.payslip.count({ where: { periodId } });
   check("without accumulating duplicates", afterRegen === 2, afterRegen);
 
-  const approvedPayroll = await api(`/admin/payroll-periods/${periodId}/approve`, { method: "POST", token: adminToken });
-  check("the period is approved", approvedPayroll.body?.data?.status === "APPROVED", approvedPayroll.body);
+  // ================= TWO PEOPLE ON THE PAYROLL =================
+  // Whoever ran the payroll must not be the one who approves it. The
+  // permissions were already separate, but `hr-manager` is seeded with
+  // `payroll.*` and nothing checked *who* ran the previous step, so one person
+  // could compute their own pay, approve it and mark it paid.
+  const selfApprove = await api(`/admin/payroll-periods/${periodId}/approve`, { method: "POST", token: adminToken });
+  check("the person who ran payroll cannot approve it", selfApprove.status === 403, {
+    status: selfApprove.status,
+    body: selfApprove.body?.error,
+  });
+
+  const stillProcessing = await api(`/admin/payroll-periods/${periodId}`, { token: adminToken });
+  check("and the refused approval left the period alone", stillProcessing.body?.data?.status === "PROCESSING", stillProcessing.body?.data?.status);
+
+  const payReg = await api("/auth/register", {
+    method: "POST",
+    body: { name: "P12 Payroll Approver", email: emailOf("approver"), password: "approver-passphrase-12" },
+  });
+  const approverId = payReg.body.data.user.id;
+  created.userIds.add(approverId);
+  await prisma.user.update({ where: { id: approverId }, data: { emailVerifiedAt: new Date(), status: "ACTIVE" } });
+
+  const approverRole = await api("/admin/roles", {
+    method: "POST",
+    token: adminToken,
+    body: { name: `P12 Payroll Approver ${stamp}`, description: "Approves payroll, does not run it" },
+  });
+  await api(`/admin/roles/${approverRole.body.data.id}/permissions`, {
+    method: "PUT",
+    token: adminToken,
+    body: { permissionKeys: ["payroll.read", "payroll.approve", "payroll.mark_paid", "employees.read"] },
+  });
+  await api(`/admin/users/${approverId}/roles`, {
+    method: "POST",
+    token: adminToken,
+    body: { roleId: approverRole.body.data.id, branchId },
+  });
+  const approverToken = (
+    await api("/auth/login", { method: "POST", body: { email: emailOf("approver"), password: "approver-passphrase-12" } })
+  ).body.data.accessToken;
+
+  const approvedPayroll = await api(`/admin/payroll-periods/${periodId}/approve`, { method: "POST", token: approverToken });
+  check("a second person approves it", approvedPayroll.body?.data?.status === "APPROVED", approvedPayroll.body);
+  check("and the period records who", approvedPayroll.body?.data?.approvedById === approverId, approvedPayroll.body?.data);
 
   const lockedDay = await api(`/admin/attendance?employeeId=${cookId}&from=${dayOf(2)}&to=${dayOf(2)}`, { token: adminToken });
   check("approving payroll locks the attendance it paid", lockedDay.body.data.items[0].isLocked === true, lockedDay.body?.data?.items?.[0]);
@@ -617,7 +707,69 @@ async function main() {
     body: { reference: `TRX-${stamp}` },
   });
   check("payroll is marked paid", paid.body?.data?.status === "PAID", paid.body);
+  check("by the person who ran it, which is allowed", paid.status === 200, paid.body?.error);
   await drainOutbox();
+
+  // ================= THE OVERRIDE =================
+  // One outlet, one person who does the payroll. The second-person rule is a
+  // branch setting rather than an absolute, because a control that stops wages
+  // going out is a control somebody switches off in a hurry — better that it is
+  // a deliberate, audited change than a reason to share a login.
+  const soloPeriod = await api("/admin/payroll-periods", {
+    method: "POST",
+    token: adminToken,
+    body: { branchId, name: `Solo ${YEAR} ${stamp}`, startDate: dayOf(11), endDate: dayOf(20) },
+  });
+  check("a second period is created", soloPeriod.status === 201, soloPeriod.body?.error);
+  const soloId = soloPeriod.body.data.id;
+
+  // Two worked days written straight to the table. The punch-to-attendance
+  // pipeline is proved earlier in this suite; what is being tested here is the
+  // approval rule, and routing it through punches again only borrows that
+  // pipeline's flakiness. The porter rather than the cook, because the cook's
+  // user account is used further down to prove an employee sees their own
+  // payslip and only that one.
+  for (const day of [11, 12]) {
+    await prisma.attendanceDay.create({
+      data: {
+        employeeId: porterId,
+        branchId,
+        workDate: new Date(`${dayOf(day)}T00:00:00.000Z`),
+        status: "PRESENT",
+        workedMinutes: 480,
+        payableFactor: 1,
+      },
+    });
+  }
+
+  const soloGenerated = await api(`/admin/payroll-periods/${soloId}/generate`, { method: "POST", token: adminToken, body: {} });
+  check("the second period has a payslip to approve", soloGenerated.body?.data?.generated === 1, soloGenerated.body?.data);
+
+  const blocked = await api(`/admin/payroll-periods/${soloId}/approve`, { method: "POST", token: adminToken });
+  check("the rule still applies to the new period", blocked.status === 403, blocked.status);
+
+  const turnOff = await api("/admin/settings", {
+    method: "PUT",
+    token: adminToken,
+    body: { branchId, values: { "payroll.require_separate_approver": false } },
+  });
+  check("a branch can turn the second person off", turnOff.status === 200, turnOff.body?.error);
+
+  const selfApproved = await api(`/admin/payroll-periods/${soloId}/approve`, { method: "POST", token: adminToken });
+  check("and then one person can approve their own run", selfApproved.body?.data?.status === "APPROVED", selfApproved.body?.error);
+
+  const trail = await prisma.auditLog.findFirst({
+    where: { action: "payroll.approve", entityId: soloId },
+    orderBy: { createdAt: "desc" },
+    select: { changes: true, actorId: true },
+  });
+  check("the exception is on the audit trail", trail?.changes?.selfApproved === true, trail?.changes);
+
+  const normalTrail = await prisma.auditLog.findFirst({
+    where: { action: "payroll.approve", entityId: periodId },
+    select: { changes: true },
+  });
+  check("and an ordinary approval is not marked", normalTrail?.changes?.selfApproved === undefined, normalTrail?.changes);
 
   const paymentEntry = await prisma.journalEntry.findFirst({
     where: { source: "PAYROLL", sourceId: `${periodId}:PAID` },
@@ -751,7 +903,14 @@ async function cleanup() {
   await prisma.branch.deleteMany({ where: { code: { startsWith: "E2EC" } } });
   await prisma.setting.deleteMany({});
 
-  const leftovers = {
+  const leftovers = await countAll();
+  console.log("\nDatabase after cleanup:", JSON.stringify(leftovers));
+  return leftovers;
+}
+
+/** Every count the cleanliness gate looks at, read the same way before and after. */
+async function countAll() {
+  return {
     users: await prisma.user.count(),
     branches: await prisma.branch.count(),
     employees: await prisma.employee.count(),
@@ -772,14 +931,29 @@ async function cleanup() {
     roles: await prisma.role.count(),
     accounts: await prisma.account.count(),
   };
-  console.log("\nDatabase after cleanup:", JSON.stringify(leftovers));
-  return leftovers;
 }
+
+/*
+ * The cleanliness gate: this suite must leave the database as it found it.
+ *
+ * Compared against a baseline taken before the first assertion, not against
+ * zero. Zero was right while an e2e database was effectively empty of
+ * accounting data, and stopped being right when `db:seed` began opening the
+ * fiscal year covering today: the seeded year, its twelve periods, and the
+ * ledger rows the *earlier* phases legitimately post are all part of the
+ * database this suite inherits, and none of them are its mess to clean.
+ *
+ * A baseline keeps the gate honest in both directions — anything this suite
+ * leaves behind still fails, without it having to be taught which rows other
+ * suites own.
+ */
+let baseline = {};
 
 try {
   // Wake the database before the first assertion, so a suspended compute
   // fails here rather than as a mystery timeout mid-suite.
   await warmUpDatabase(prisma);
+  baseline = await countAll();
   await main();
 } catch (error) {
   console.log("SUITE ERROR:", error.message, "\n", error.stack?.split("\n").slice(0, 5).join("\n"));
@@ -791,8 +965,11 @@ try {
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));
 
-  const ignore = ["roles", "accounts"];
-  const dirty = Object.entries(leftovers).filter(([key, value]) => !ignore.includes(key) && value > 0);
+  // Only growth counts. `[name, left behind, total]` so the number that
+  // matters is not buried in the number that does not.
+  const dirty = Object.entries(leftovers)
+    .filter(([key, value]) => value > (baseline[key] ?? 0))
+    .map(([key, value]) => [key, value - (baseline[key] ?? 0), value]);
   if (dirty.length) console.log("WARNING: database not clean:", JSON.stringify(dirty));
 
   process.exit(failures.length || dirty.length ? 1 : 0);

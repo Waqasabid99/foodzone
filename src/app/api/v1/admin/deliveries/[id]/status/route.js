@@ -3,6 +3,7 @@ import { assertPermission } from "@/lib/api/permissions";
 import { idParamSchema } from "@/server/validation/schemas";
 import { setDeliveryStatusSchema } from "@/server/validation/delivery.schemas";
 import { setDeliveryStatus } from "@/server/services/delivery.service";
+import { assertRecordAccess } from "@/server/delivery/access";
 
 export const PUT = apiHandler(
   {
@@ -21,6 +22,7 @@ export const PUT = apiHandler(
       assertPermission(auth, "deliveries.mark_failed");
     }
 
+    await assertRecordAccess(auth, "delivery", params.id, "deliveries.update_status");
     return ok(await setDeliveryStatus({ deliveryId: params.id, ...body, actor: auth }));
   },
 );

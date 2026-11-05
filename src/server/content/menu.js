@@ -1,6 +1,6 @@
 import { unstable_cache } from "next/cache";
 import { CacheTag } from "@/lib/cache-tags";
-import { getBranchMenu } from "@/server/services/menu.service";
+import { getOrderMenu } from "@/server/services/menu.service";
 import { publicCategories, publicProducts } from "@/server/services/catalog.service";
 import { getSettings } from "@/server/services/setting.service";
 import { logger } from "@/lib/logger";
@@ -58,6 +58,7 @@ function fromMenuProduct(product) {
     prepTimeMinutes: product.prepTimeMinutes ?? null,
     categoryName: product.category?.name ?? null,
     isRecommended: Boolean(product.isRecommended),
+    isCombo: product.type === "COMBO",
     priceFrom: product.priceFrom,
     compareAtPrice: variants.find((variant) => variant.compareAtPrice)?.compareAtPrice ?? null,
     available: variants.some((variant) => variant.available),
@@ -88,6 +89,7 @@ function fromCatalogProduct(product) {
     prepTimeMinutes: product.prepTimeMinutes ?? null,
     categoryName: product.category?.name ?? null,
     isRecommended: Boolean(product.isFeatured),
+    isCombo: product.type === "COMBO",
     priceFrom: product.priceFrom ?? (variants.length ? Math.min(...variants.map((v) => v.price)) : null),
     compareAtPrice: variants.find((variant) => variant.compareAtPrice)?.compareAtPrice ?? null,
     available: true,
@@ -95,8 +97,10 @@ function fromCatalogProduct(product) {
   };
 }
 
-async function loadBranchMenu(branchId) {
-  const result = await getBranchMenu({ branchIdOrCode: branchId });
+async function loadBranchMenu(branchId, orderType) {
+  // By order type, exactly as the cart resolves it, so the price on the card
+  // is the price at checkout.
+  const result = await getOrderMenu({ branchIdOrCode: branchId, orderType });
 
   return {
     reason: result.reason,
@@ -118,8 +122,8 @@ async function loadBranchMenu(branchId) {
  * branch id would be one collision away from handing a page a payload it does
  * not understand — with no error, just a page that quietly renders nothing.
  */
-const cachedBranchMenu = (branchId) =>
-  unstable_cache(() => loadBranchMenu(branchId), ["menu-page-sections", branchId], {
+const cachedBranchMenu = (branchId, orderType) =>
+  unstable_cache(() => loadBranchMenu(branchId, orderType), ["menu-page-sections", branchId, orderType], {
     revalidate: BRANCH_MENU_REVALIDATE,
     tags: [CacheTag.MENUS, CacheTag.CATALOG],
   })();
@@ -154,9 +158,9 @@ const cachedCatalogMenu = unstable_cache(loadCatalogMenu, ["catalog-menu"], {
 /**
  * @param branch  the resolved outlet, or null when none is chosen or configured
  */
-export async function getMenuPageData({ branch = null } = {}) {
+export async function getMenuPageData({ branch = null, orderType = "DELIVERY" } = {}) {
   const [menuResult, settingsResult] = await Promise.allSettled([
-    branch ? cachedBranchMenu(branch.id) : cachedCatalogMenu(),
+    branch ? cachedBranchMenu(branch.id, orderType) : cachedCatalogMenu(),
     // Branch-scoped: several of these are overridable per outlet, prep time
     // among them, and the banner that quotes it has to quote the right one.
     getSettings({ branchId: branch?.id ?? null, publicOnly: true }),
@@ -197,6 +201,7 @@ export async function getMenuPageData({ branch = null } = {}) {
         return buildPayload({
           source: "catalog",
           branch,
+          orderType,
           reason: menu.reason,
           menu: catalog,
           settingsResult,
@@ -208,10 +213,10 @@ export async function getMenuPageData({ branch = null } = {}) {
     }
   }
 
-  return buildPayload({ source, branch, reason: menu.reason, menu, settingsResult, failed });
+  return buildPayload({ source, branch, orderType, reason: menu.reason, menu, settingsResult, failed });
 }
 
-function buildPayload({ source, branch, reason, menu, settingsResult, failed = false }) {
+function buildPayload({ source, branch, orderType, reason, menu, settingsResult, failed = false }) {
   const settings = settingsResult.status === "fulfilled" ? settingsResult.value : {};
 
   const sections = menu.sections;
@@ -229,6 +234,9 @@ function buildPayload({ source, branch, reason, menu, settingsResult, failed = f
           openState: branch.openState ?? null,
         }
       : null,
+    // The order type these prices were resolved for, so the page can notice
+    // when the cart has since switched and fetch the right ones.
+    orderType,
     reason,
     menuName: menu.menuName,
     currency: branch?.currency || settings["store.currency"] || "PKR",

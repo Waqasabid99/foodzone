@@ -4,12 +4,13 @@ import { logger } from "@/lib/logger";
 import { publicCategories, publicProducts } from "@/server/services/catalog.service";
 import { listReviews } from "@/server/services/review.service";
 import { getSettings } from "@/server/services/setting.service";
+import { liveHeroSlides } from "@/server/services/hero.service";
+import { toMenuCard } from "@/lib/menu-card";
 import {
   PLACEHOLDER_CATEGORIES,
   PLACEHOLDER_DEAL,
   PLACEHOLDER_FEATURED,
   PLACEHOLDER_REVIEWS,
-  PLACEHOLDER_SOCIAL,
   HOW_IT_WORKS,
 } from "@/server/content/placeholders";
 
@@ -85,13 +86,16 @@ function pickDeal(cards) {
 async function loadHome() {
   // Settled individually: an empty catalog is the expected state right now, and
   // one failing read should cost its own section, not the whole page.
-  const [settingsResult, categoriesResult, featuredResult, catalogResult, reviewsResult] =
+  const [settingsResult, categoriesResult, featuredResult, catalogResult, reviewsResult, slidesResult] =
     await Promise.allSettled([
       getSettings({ publicOnly: true }),
       publicCategories(),
       publicProducts({ featured: true, limit: 8 }),
-      publicProducts({ limit: 8 }),
+      // More than the page shows: the grid takes what is left after the deal
+      // and the two beside it, and a limit of exactly eight leaves five.
+      publicProducts({ limit: 16 }),
       listReviews({ status: "PUBLISHED", limit: 6 }),
+      liveHeroSlides(),
     ]);
 
   // Settling each read keeps one bad section from taking the page down, but it
@@ -104,6 +108,7 @@ async function loadHome() {
     ["featured products", featuredResult],
     ["catalog", catalogResult],
     ["reviews", reviewsResult],
+    ["heroSlides", slidesResult],
   ]) {
     if (result.status === "rejected") {
       logger.error("home page section failed, falling back to placeholder", {
@@ -115,6 +120,7 @@ async function loadHome() {
 
   const settings = settingsResult.status === "fulfilled" ? settingsResult.value : {};
   const currency = settings["store.currency"] ?? "PKR";
+  const timeZone = settings["store.timezone"] || "UTC";
   const storeName = settings["store.name"] || "FoodZone";
 
   const categories = categoriesResult.status === "fulfilled" ? categoriesResult.value : [];
@@ -131,10 +137,29 @@ async function loadHome() {
   const testimonials = reviewRows.filter((review) => review.comment?.trim()).slice(0, 3).map(toTestimonial);
 
   const deal = pickDeal(cards);
+  // The deal has the big slot; these are the cards beside it.
+  const rail = cards.filter((card) => card.id !== deal?.id).slice(0, 3);
+  const slides = slidesResult.status === "fulfilled" ? slidesResult.value : [];
+
+  /*
+   * The orderable grid.
+   *
+   * Drawn from the whole published catalog rather than from the featured list,
+   * because "featured" is already spoken for above — the deal and the two
+   * beside it — and a home page that shows the same burger three times is a
+   * shop that looks like it sells one thing. Anything already on the page is
+   * taken out rather than deduplicated afterwards.
+   */
+  const spokenFor = new Set([deal?.id, ...rail.map((card) => card.id)].filter(Boolean));
+  const grid = catalogRows
+    .filter((row) => !spokenFor.has(row.id))
+    .map(toMenuCard)
+    .slice(0, 8);
 
   return {
     storeName,
     currency,
+    timeZone,
     generatedAt: new Date().toISOString(),
 
     categories: categories.length
@@ -144,16 +169,31 @@ async function loadHome() {
     deal: deal ? { item: deal, isPlaceholder: false } : { item: PLACEHOLDER_DEAL, isPlaceholder: true },
 
     // The deal already has the top slot, so the rail beside it shows what comes next.
-    featured: cards.length
-      ? { items: cards.filter((card) => card.id !== deal?.id).slice(0, 3), isPlaceholder: false }
-      : { items: PLACEHOLDER_FEATURED, isPlaceholder: true },
+    featured: cards.length ? { items: rail, isPlaceholder: false } : { items: PLACEHOLDER_FEATURED, isPlaceholder: true },
 
     testimonials: testimonials.length
       ? { items: testimonials, isPlaceholder: false }
       : { items: PLACEHOLDER_REVIEWS, isPlaceholder: true },
 
-    social: { items: PLACEHOLDER_SOCIAL, isPlaceholder: true },
+    /*
+     * No placeholder, like the hero and for the same reason: these cards add to
+     * a real cart. Invented dishes would be a shop window of things nobody can
+     * buy, each linking to a product page that does not exist.
+     */
+    products: grid,
+
     howItWorks: HOW_IT_WORKS,
+
+    /*
+     * The front window, or nothing.
+     *
+     * No placeholder here, deliberately. Every other section falls back to
+     * branded artwork because an empty row looks broken; the hero is the one
+     * that already has a designed default behind it — the standard opening —
+     * and inventing a fake campaign would be the shop advertising an offer it
+     * is not running.
+     */
+    heroSlides: slides,
   };
 }
 

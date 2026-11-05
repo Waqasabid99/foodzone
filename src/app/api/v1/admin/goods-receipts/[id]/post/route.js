@@ -1,6 +1,7 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
 import { idParamSchema } from "@/server/validation/schemas";
 import { postGoodsReceipt } from "@/server/services/goods-receipt.service";
+import { assertRecordAccess } from "@/server/purchasing/access";
 
 /**
  * Posts the receipt: stock in, batches created, the order updated.
@@ -18,5 +19,8 @@ export const POST = apiHandler(
     params: idParamSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, auth }) => ok(await postGoodsReceipt(params.id, auth)),
+  async ({ params, auth }) => {
+    await assertRecordAccess(auth, "goodsReceipt", params.id, "goods_receipts.approve");
+    return ok(await postGoodsReceipt(params.id, auth));
+  },
 );

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { toast } from "react-toastify";
-import { Bike, MapPin, ShoppingBag, Store, UtensilsCrossed, Wallet } from "lucide-react";
+import { Bike, MapPin, ShoppingBag, Store, UtensilsCrossed } from "lucide-react";
 import AddressPicker from "@/components/checkout/AddressPicker";
 import CheckoutSummary from "@/components/checkout/CheckoutSummary";
 import OrderPlaced from "@/components/checkout/OrderPlaced";
@@ -14,6 +14,7 @@ import { api } from "@/lib/api-client";
 import { loadCart, setCartType, useCart } from "@/hooks/useCart";
 import { useSession } from "@/hooks/useSession";
 import { checkoutBlockers, checkoutPayload, checkoutRequirements, quoteItems } from "@/lib/checkout";
+import PaymentChoice from "@/components/checkout/PaymentChoice";
 import { toFormErrors } from "@/lib/form-errors";
 import { loginHref } from "@/lib/redirects";
 import { formatMoney } from "@/lib/format";
@@ -40,13 +41,45 @@ const GUEST_FIELDS = ["guest", "name", "phone", "email"];
  * the number on screen to be the number charged, and no chance for a
  * browser-side multiply to disagree with the kitchen.
  */
-export default function CheckoutView({ currency = "PKR" }) {
+export default function CheckoutView({ currency = "PKR", tableId = null, tableName = null }) {
   const { status: cartStatus, cart, error: cartError } = useCart();
   const { status: sessionStatus, user } = useSession();
   const pathname = usePathname();
 
   const [addresses, setAddresses] = useState({ status: "idle", list: [] });
   const [addressId, setAddressId] = useState(null);
+  /*
+   * How this branch lets people pay.
+   *
+   * Loaded from the branch rather than assumed, because each restaurant brings
+   * its own merchant account and most will have none. Paying in person is not
+   * in this list: it is always available, so it is stated here rather than
+   * being a server-sent option that could go missing and leave somebody unable
+   * to order at all.
+   */
+  const [payOptions, setPayOptions] = useState([]);
+  const [payWith, setPayWith] = useState(null);
+
+  useEffect(() => {
+    const branchId = cart?.branchId;
+    if (!branchId) return undefined;
+
+    let live = true;
+    api
+      .get(`/checkout/payment-options?branchId=${encodeURIComponent(branchId)}`)
+      .then((options) => {
+        if (!live) return;
+        setPayOptions(Array.isArray(options) ? options : []);
+      })
+      // A branch that cannot be asked is a branch that takes payment in
+      // person. Failing quietly is right: the customer can still order.
+      .catch(() => live && setPayOptions([]));
+
+    return () => {
+      live = false;
+    };
+  }, [cart?.branchId]);
+
   const [guest, setGuest] = useState({ name: "", phone: "", email: "" });
   const [guestErrors, setGuestErrors] = useState({});
   const [guestCount, setGuestCount] = useState("");
@@ -217,8 +250,27 @@ export default function CheckoutView({ currency = "PKR" }) {
           guestCount: guestCount ? Number(guestCount) : null,
           note,
           tipAmount: tip,
+          tableId,
+          payWith,
         }),
       );
+
+      /*
+       * The gateway's hosted page. Sent before the cart is refreshed and
+       * before any success state is shown: the order exists, the money does
+       * not yet, and showing a receipt first would tell the customer they had
+       * paid while their card details were still unasked for.
+       */
+      if (placed?.clientAction?.url) {
+        window.location.assign(placed.clientAction.url);
+        return;
+      }
+
+      // Asked to pay now, but the gateway would not start. The order stands,
+      // so say so plainly rather than losing it.
+      if (payWith && placed?.payment?.status === "UNAVAILABLE") {
+        toast.info("Your order is placed. Online payment is unavailable right now, so please pay in person.");
+      }
 
       // The server emptied the cart inside the same transaction; refresh the
       // local copy so the header badge and every other reader agree.
@@ -360,6 +412,14 @@ export default function CheckoutView({ currency = "PKR" }) {
 
         {requirements.wantsGuestCount ? (
           <Section title="How many are eating?">
+            {/* Shown rather than assumed: the customer scanned a sticker, and
+                confirming the table is cheaper than a tray going to the wrong
+                one. No table just means the order is collected at the counter. */}
+            {tableName ? (
+              <p className="rounded-field bg-secondary-container px-4 py-3 text-body-md text-on-secondary-container">
+                Serving table <strong>{tableName}</strong>, from the code you scanned.
+              </p>
+            ) : null}
             <Field
               id="guest-count"
               label="Guests"
@@ -402,18 +462,8 @@ export default function CheckoutView({ currency = "PKR" }) {
           </Section>
         ) : null}
 
-        {/* Stated rather than chosen, because there is nothing to choose: no
-            payment provider is connected, so every order is placed unpaid and
-            settled in person. Offering a "Card" button that did not take a card
-            would be worse than offering none. */}
         <Section title="Payment">
-          <p className="flex items-start gap-3 text-body-md text-on-surface">
-            <Wallet aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-primary" />
-            <span>
-              Pay {type === "DELIVERY" ? "when your order arrives" : "at the counter"}. Card payment
-              online isn&apos;t available yet.
-            </span>
-          </p>
+          <PaymentChoice options={payOptions} value={payWith} onChange={setPayWith} orderType={type} />
         </Section>
 
         <Section title={`Your order (${cart.totals?.itemCount ?? cart.items.length})`}>

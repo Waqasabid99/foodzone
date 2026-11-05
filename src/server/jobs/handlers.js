@@ -16,6 +16,7 @@ import {
   postProductionRun,
   postRefund,
   postStockAdjustment,
+  postStockCount,
   postSupplierBill,
   postWastage,
 } from "@/server/services/posting.service";
@@ -33,6 +34,67 @@ import { logger } from "@/lib/logger";
  * to do" — when retrying could not possibly help.
  */
 let registered = false;
+
+/**
+ * Who, at this branch, holds a given permission.
+ *
+ * The same question the API asks before it answers, asked of everybody rather
+ * than of one caller: a notification aimed at "the till" has to find the
+ * people who can actually work the till, and roles are database rows — the
+ * seeded twenty are a starting point and an administrator can author more, so
+ * naming a role key here would be wrong the first time somebody did.
+ *
+ * A grant with no branch is company-wide and counts everywhere; a super admin
+ * holds everything by bypass rather than by grant, so they are found
+ * separately. Expired grants are excluded, and an explicit DENY override at
+ * that branch removes somebody the role would otherwise have included.
+ */
+async function staffWhoCan(branchId, permissionKey) {
+  if (!branchId) return [];
+  const now = new Date();
+  const notExpired = { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
+  const moduleKey = `${permissionKey.slice(0, permissionKey.indexOf("."))}.*`;
+
+  const users = await prisma.user.findMany({
+    where: {
+      deletedAt: null,
+      // The same two states that hold a working session. A member of staff who
+      // has not verified their email can still sign in and work the till, so
+      // excluding them here would silently leave them out of the one message
+      // that tells them a table is waiting.
+      status: { in: ["ACTIVE", "PENDING_VERIFICATION"] },
+      OR: [
+        { isSuperAdmin: true },
+        {
+          roleAssignments: {
+            some: {
+              ...notExpired,
+              OR: [{ branchId }, { branchId: null }],
+              role: { permissions: { some: { permission: { key: { in: [permissionKey, moduleKey] } } } } },
+            },
+          },
+        },
+        {
+          permissionOverrides: {
+            some: { ...notExpired, effect: "ALLOW", OR: [{ branchId }, { branchId: null }], permission: { key: permissionKey } },
+          },
+        },
+      ],
+    },
+    select: {
+      id: true,
+      permissionOverrides: {
+        where: { ...notExpired, effect: "DENY", OR: [{ branchId }, { branchId: null }] },
+        select: { permission: { select: { key: true } } },
+      },
+    },
+    take: 100,
+  });
+
+  return users
+    .filter((user) => !user.permissionOverrides.some((row) => row.permission.key === permissionKey))
+    .map((user) => user.id);
+}
 
 export function registerJobHandlers() {
   if (registered) return;
@@ -157,6 +219,88 @@ export function registerJobHandlers() {
         title: `Order ${order.orderNumber}`,
         body: `Your order ${message}`,
         data: { orderId, orderNumber: order.orderNumber, status: toStatus },
+        referenceType: "Order",
+        referenceId: orderId,
+      },
+    });
+  });
+
+  /**
+   * A table has asked to settle.
+   *
+   * This is the one order event whose audience is **staff**, not the
+   * customer. A waiter cannot take the money, so the ask has to reach whoever
+   * can — and the till may be a screen nobody is standing in front of. The
+   * till's own list on the overview is the primary signal; this is what gets
+   * somebody's attention when they are not looking at it.
+   *
+   * Idempotent on the order: asking twice while the first ask is unread must
+   * not put two rows in front of the same person, which is exactly what a
+   * waiter walking past a table twice would otherwise produce.
+   */
+  registerHandler("order.bill_requested", async ({ orderId }) => {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      select: {
+        orderNumber: true,
+        branchId: true,
+        billRequestedAt: true,
+        grandTotal: true,
+        currency: true,
+        table: { select: { name: true } },
+      },
+    });
+    // Cleared again before this ran — paid, or asked by mistake. Nothing to
+    // tell anybody, and retrying cannot change that.
+    if (!order?.billRequestedAt) return;
+
+    const userIds = await staffWhoCan(order.branchId, "payments.capture");
+    if (!userIds.length) return;
+
+    const where = order.table?.name ? `Table ${order.table.name}` : order.orderNumber;
+    const existing = await prisma.notification.findMany({
+      where: { type: "order.bill_requested", referenceId: orderId, userId: { in: userIds } },
+      select: { userId: true },
+    });
+    const told = new Set(existing.map((row) => row.userId));
+    const toTell = userIds.filter((id) => !told.has(id));
+    if (!toTell.length) return;
+
+    await prisma.notification.createMany({
+      data: toTell.map((userId) => ({
+        userId,
+        type: "order.bill_requested",
+        title: `${where} is asking for the bill`,
+        body: `${order.orderNumber} — ${order.currency ?? "PKR"} ${order.grandTotal}`,
+        data: { orderId, orderNumber: order.orderNumber },
+        referenceType: "Order",
+        referenceId: orderId,
+      })),
+    });
+  });
+
+  /**
+   * A later round joined an order.
+   *
+   * Only the customer is told, and only when the order is attached to an
+   * account: somebody watching their bill on their phone should see it change
+   * when the table orders again. The kitchen does not need telling — its board
+   * polls, and the round is already a ticket on it.
+   */
+  registerHandler("order.course_added", async ({ orderId, course }) => {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      select: { orderNumber: true, userId: true, grandTotal: true, currency: true },
+    });
+    if (!order?.userId) return;
+
+    await prisma.notification.create({
+      data: {
+        userId: order.userId,
+        type: "order.course_added",
+        title: `More added to ${order.orderNumber}`,
+        body: `Your bill is now ${order.currency ?? "PKR"} ${order.grandTotal}.`,
+        data: { orderId, orderNumber: order.orderNumber, course },
         referenceType: "Order",
         referenceId: orderId,
       },
@@ -306,6 +450,7 @@ export function registerJobHandlers() {
   posting("finance.production_completed", "productionOrderId", postProductionRun);
   posting("finance.wastage_recorded", "wastageId", postWastage);
   posting("finance.stock_adjusted", "adjustmentId", postStockAdjustment);
+  posting("finance.stock_counted", "countId", postStockCount);
   posting("finance.driver_payout_approved", "payoutId", postDriverPayout);
   posting("finance.cash_session_closed", "sessionId", postCashVariance);
   posting("finance.supplier_bill_approved", "billId", postSupplierBill);

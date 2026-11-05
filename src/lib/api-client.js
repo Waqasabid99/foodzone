@@ -123,7 +123,7 @@ async function send(path, { method, body, signal }) {
   return { response, payload };
 }
 
-async function request(path, { method = "GET", body, signal, retryOnUnauthorized = true } = {}) {
+async function request(path, { method = "GET", body, signal, retryOnUnauthorized = true, withMeta = false } = {}) {
   let { response, payload } = await send(path, { method, body, signal });
 
   // Access tokens last 15 minutes; the session behind them lasts 30 days. So a
@@ -148,7 +148,14 @@ async function request(path, { method = "GET", body, signal, retryOnUnauthorized
     });
   }
 
-  return payload.data;
+  /*
+   * `meta` is a sibling of `data` in the envelope, and unwrapping to `data` is
+   * what nearly every caller wants — so the pagination cursor was simply
+   * unreachable from the browser, which is why the only paginated lists were
+   * server-rendered. Opt in rather than change the default: every existing
+   * caller still gets the payload it was written against.
+   */
+  return withMeta ? { data: payload.data, meta: payload.meta ?? null } : payload.data;
 }
 
 export const api = {

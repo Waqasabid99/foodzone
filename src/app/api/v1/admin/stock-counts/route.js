@@ -1,10 +1,11 @@
-import { apiHandler, created, ok, RateLimits } from "@/lib/api";
+import { apiHandler, branchScope, created, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/inventory/access";
 import { listCountsSchema, startCountSchema } from "@/server/validation/inventory.schemas";
 import { listCounts, startCount } from "@/server/services/stock-count.service";
 
 export const GET = apiHandler(
   { auth: true, permissions: "stock_counts.read", query: listCountsSchema, branch: "query" },
-  async ({ query }) => ok(await listCounts(query)),
+  async ({ query, auth }) => ok(await listCounts({ ...query, scope: branchScope(auth, "stock_counts.read") })),
 );
 
 /**
@@ -21,5 +22,8 @@ export const POST = apiHandler(
     body: startCountSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ body, auth }) => created(await startCount({ ...body, actor: auth })),
+  async ({ body, auth }) => {
+    await assertRecordAccess(auth, "location", body.locationId, "stock_counts.create");
+    return created(await startCount({ ...body, actor: auth }));
+  },
 );

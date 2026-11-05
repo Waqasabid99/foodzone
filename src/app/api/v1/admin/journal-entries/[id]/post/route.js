@@ -1,4 +1,5 @@
 import { apiHandler, ok, RateLimits } from "@/lib/api";
+import { assertRecordAccess } from "@/server/finance/access";
 import { idParamSchema } from "@/server/validation/schemas";
 import { postDraftEntry } from "@/server/services/journal.service";
 
@@ -10,5 +11,8 @@ export const POST = apiHandler(
     params: idParamSchema,
     rateLimit: RateLimits.write,
   },
-  async ({ params, auth }) => ok(await postDraftEntry(params.id, auth)),
+  async ({ params, auth }) => {
+    await assertRecordAccess(auth, "journalEntry", params.id, "journal_entries.post");
+    return ok(await postDraftEntry(params.id, auth));
+  },
 );

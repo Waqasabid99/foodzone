@@ -3,6 +3,7 @@ import { ApiError } from "@/lib/api";
 import { recordAudit } from "@/server/utils/audit";
 import { hashToken, shortCode, verifyToken } from "@/server/utils/crypto";
 import { logger } from "@/lib/logger";
+import { branchFilter } from "@/server/hr/access";
 
 /**
  * Attendance terminals.
@@ -181,9 +182,14 @@ export async function recordSync({ deviceId, cursor = null, status = "ONLINE", p
   return shape(device);
 }
 
-export async function listDevices({ branchId, isActive } = {}) {
+export async function listDevices({ branchId, isActive, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const rows = await prisma.attendanceDevice.findMany({
-    where: { ...(branchId ? { branchId } : {}), ...(isActive != null ? { isActive } : {}) },
+    where: {
+      ...(branchId ? { branchId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
+      ...(isActive != null ? { isActive } : {}),
+    },
     select: SELECT,
     orderBy: { name: "asc" },
   });
@@ -204,9 +210,14 @@ export async function getDevice(id) {
  * but "which one stopped" — a device that went quiet three days ago has been
  * losing punches for three days, and nobody finds out until payroll.
  */
-export async function deviceHealth({ branchId = null, staleAfterMinutes = STALE_AFTER_MINUTES } = {}) {
+export async function deviceHealth({ branchId = null, staleAfterMinutes = STALE_AFTER_MINUTES, scope = null } = {}) {
+  const filter = branchFilter(scope);
   const devices = await prisma.attendanceDevice.findMany({
-    where: { ...(branchId ? { branchId } : {}), isActive: true },
+    where: {
+      ...(branchId ? { branchId } : {}),
+      ...(filter ? { AND: [{ branchId: filter }] } : {}),
+      isActive: true,
+    },
     select: SELECT,
   });
 

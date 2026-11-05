@@ -87,6 +87,8 @@ export async function describeSettings({ branchId = null } = {}) {
       type: definition.type,
       isPublic: Boolean(definition.isPublic),
       branchOverridable: Boolean(definition.branchOverridable),
+      // The choices a list setting offers, where the registry names them.
+      options: definition.options ?? null,
       default: definition.default,
       globalValue: globalRows.has(definition.key) ? globalRows.get(definition.key).value : null,
       branchValue: branchRows.has(definition.key) ? branchRows.get(definition.key).value : null,

@@ -1,6 +1,7 @@
 import { apiHandler, created, RateLimits } from "@/lib/api";
 import { comboOptionSchema, groupParamSchema } from "@/server/validation/catalog.schemas";
 import { addComboOption } from "@/server/services/combo.service";
+import { CacheTag } from "@/lib/cache-tags";
 
 export const POST = apiHandler(
   {
@@ -10,6 +11,7 @@ export const POST = apiHandler(
     body: comboOptionSchema,
     rateLimit: RateLimits.write,
     audit: { action: "combo_option.create", entityType: "ComboGroupOption" },
+    invalidates: [CacheTag.CATALOG],
   },
   async ({ params, body }) =>
     created(await addComboOption({ comboProductId: params.id, groupId: params.groupId, option: body })),
