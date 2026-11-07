@@ -1,0 +1,12 @@
+{
+  "all": true,
+  "src": ["src"],
+  "include": ["src/lib/**", "src/server/**"],
+  "exclude": ["src/generated/**"],
+  "reporter": ["text-summary", "lcov"],
+  "check-coverage": true,
+  "statements": 36,
+  "branches": 75,
+  "functions": 49,
+  "lines": 36
+}

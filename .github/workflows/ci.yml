@@ -57,8 +57,31 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit tests
-        run: npm run test:unit
+      # Coverage is measured here, not in a separate job: it is the same run,
+      # and a coverage step that can pass while the tests fail is theatre.
+      #
+      # Read the number correctly. `all: true` counts every file under
+      # src/lib and src/server, including the many this suite never loads
+      # because the end-to-end suites cover them against a running server —
+      # that traffic is invisible to c8 here. So this is *unit* coverage of the
+      # whole server layer, deliberately unflattering, and the figure to watch
+      # is functions (what actually gets called) rather than statements (which
+      # a bare import inflates).
+      #
+      # The thresholds in .c8rc.json are a ratchet set just under the current
+      # numbers: they fail on a regression without failing ordinary work. Raise
+      # them when coverage rises; never lower them to make a build pass.
+      - name: Unit tests and coverage
+        run: npm run test:unit:coverage
+
+      - name: Coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-coverage-lcov
+          path: coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 7
 
       # Regenerates the OpenAPI document and fails if it differs from the one
       # committed. The document is the contract the mobile app will build

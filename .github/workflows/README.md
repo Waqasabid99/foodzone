@@ -4,7 +4,7 @@ Two jobs, both on every pull request and every push to `main`.
 
 | Job | What it proves | Needs a database |
 |---|---|---|
-| **check** | lint, 965 unit tests, the OpenAPI document is current, the app builds | no |
+| **check** | lint, 965 unit tests with coverage, the OpenAPI document is current, the app builds | no |
 | **e2e** | the migrations apply from empty, the seed runs, and all 22 end-to-end suites pass against a real Postgres | yes, a service container |
 
 Nothing is scheduled. A pipeline that runs when nobody is looking is a
@@ -32,6 +32,29 @@ database grew one migration at a time, which can hide a chain that no longer
 applies to a fresh schema — the failure that otherwise waits until the first
 real deploy. Running `prisma migrate deploy` against an empty Postgres on
 every pull request is the cheapest way to never meet it.
+
+## What the coverage number means
+
+The `check` job reports unit coverage over `src/lib` and `src/server`, with the
+thresholds in `.c8rc.json`. At the time of writing: **37% of statements, 51% of
+functions**. That is lower than it looks and lower than it is, and both halves
+matter.
+
+`all: true` counts every file in those directories, including the many this
+suite never loads — the service and route layers are exercised by the
+end-to-end suites against a running server, and none of that traffic is
+visible to c8 in this process. So the figure is *unit* coverage measured
+against the whole server layer, deliberately unflattering, rather than a claim
+about how much of the system is tested.
+
+Watch **functions**, not statements. A bare `import` executes a module's
+top-level statements and inflates statement coverage without a single
+assertion; a function only counts when something calls it.
+
+The thresholds are a **ratchet** set just below the current numbers: they catch
+a regression without failing ordinary work. Raise them as coverage rises. Never
+lower one to make a build pass — that converts the check into a formality, and
+the next person will not know it happened.
 
 ## The database is deliberately not UTC
 

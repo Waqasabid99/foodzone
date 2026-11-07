@@ -13,6 +13,9 @@ const eslintConfig = defineConfig([
     ".next-*/**",
     "out/**",
     "build/**",
+    // c8's HTML report, which ships its own vendored scripts. Generated
+    // output, and linting it reports problems in code nobody here wrote.
+    "coverage/**",
     "next-env.d.ts",
     "src/generated/**",
   ]),

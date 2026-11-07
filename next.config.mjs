@@ -18,6 +18,27 @@ function bucketPattern() {
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   /**
+   * Ship the server, not the toolchain.
+   *
+   * A standalone build traces the dependencies each route actually imports and
+   * writes a self-contained server into `.next/standalone`, so a deployment is
+   * a couple of hundred megabytes instead of the gigabyte-plus that shipping
+   * `node_modules` entire would cost. On a small VPS that is the difference
+   * between comfortable and tight, and it is also the shape Hostinger's Node
+   * runtime expects, which keeps both deployment targets identical.
+   *
+   * Two things the output does *not* include, because Next cannot know whether
+   * a CDN is serving them: `.next/static` and `public/`. Both have to be copied
+   * in beside the server, or the site renders with no CSS and no images. The
+   * deployment runbook does this; if a deploy ever comes up unstyled, this is
+   * the reason.
+   *
+   * `next start` is unaffected — the normal build output is still written, so
+   * local runs and the end-to-end suite behave exactly as before.
+   */
+  output: "standalone",
+
+  /**
    * Where the build goes.
    *
    * `.next` unless something asks otherwise, which lets a production build for
