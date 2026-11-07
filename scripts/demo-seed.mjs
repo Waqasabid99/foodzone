@@ -24,6 +24,8 @@ import { random, pick, CUSTOMERS, GUESTS, BASKETS, CHANNELS, HOUR_WEIGHTS, DAY_M
 import { hashPassword } from "../src/server/utils/password.js";
 import { postOrderSale, postPaymentReceipt } from "../src/server/services/posting.service.js";
 import { bootstrapInstallation, installationNeedsSetup } from "../src/server/services/bootstrap.service.js";
+import { registerDevice } from "../src/server/services/attendance-device.service.js";
+import { DEPARTMENTS, EMPLOYEES, DEVICES } from "../prisma/demo/staff.js";
 
 if (process.env.NODE_ENV === "production") {
   console.error("Refusing to run: this writes invented data and NODE_ENV is production.");
@@ -568,6 +570,73 @@ async function seedOwner() {
   log(`owner: ${DEMO_OWNER.email} / ${DEMO_OWNER.password}`);
 }
 
+/**
+ * Staff, and a terminal on each branch's wall.
+ *
+ * Devices are registered through the real service, which means the key is
+ * generated and hashed exactly as it would be for hardware — and shown once,
+ * here, because that is the only time it exists in readable form. Running this
+ * again leaves an existing terminal alone rather than rotating its key out
+ * from under a simulator that is mid-shift.
+ */
+async function seedStaff(branches) {
+  const departments = new Map();
+  for (const department of DEPARTMENTS) {
+    departments.set(
+      department.code,
+      await prisma.department.upsert({
+        where: { code: department.code },
+        create: { code: department.code, name: department.name, isActive: true },
+        update: { name: department.name },
+      }),
+    );
+  }
+
+  for (const person of EMPLOYEES) {
+    await prisma.employee.upsert({
+      where: { employeeCode: person.code },
+      create: {
+        employeeCode: person.code,
+        branchId: branches[person.branch].id,
+        departmentId: departments.get(person.department).id,
+        designation: person.designation,
+        firstName: person.first,
+        lastName: person.last,
+        biometricId: person.biometricId,
+        employmentType: "FULL_TIME",
+        status: "ACTIVE",
+        salaryType: "MONTHLY",
+        baseSalary: person.salary,
+        currency: "PKR",
+        joinedAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000),
+      },
+      update: { designation: person.designation, branchId: branches[person.branch].id, baseSalary: person.salary },
+    });
+  }
+
+  log(`staff: ${EMPLOYEES.length} employees across ${departments.size} departments`);
+
+  const keys = [];
+  for (const device of DEVICES) {
+    const existing = await prisma.attendanceDevice.findUnique({ where: { serialNumber: device.serial }, select: { id: true } });
+    if (existing) {
+      keys.push({ serial: device.serial, apiKey: null });
+      continue;
+    }
+    const registered = await registerDevice({
+      branchId: branches[device.branch].id,
+      name: device.name,
+      serialNumber: device.serial,
+      vendor: device.vendor,
+      model: device.model,
+    });
+    keys.push({ serial: device.serial, apiKey: registered.apiKey });
+  }
+
+  log(`terminals: ${DEVICES.length} registered`);
+  return keys;
+}
+
 async function main() {
   console.log("\nSeeding the demo restaurant\n");
 
@@ -579,9 +648,16 @@ async function main() {
   await seedMenus(branches, products);
   await seedTablesAndQr(branches);
 
+  const deviceKeys = await seedStaff(branches);
   const customers = await seedCustomers();
   const posted = await seedOrders(branches, customers);
   await postLedger(posted);
+
+  const fresh = deviceKeys.filter((d) => d.apiKey);
+  if (fresh.length) {
+    console.log("\nTerminal keys — shown once, and needed by scripts/attendance-terminal.mjs:");
+    for (const device of fresh) console.log(`  ${device.serial}  ${device.apiKey}`);
+  }
 
   console.log(`\nDone. Sign in at /login as ${DEMO_OWNER.email} with the password above.`);
   console.log("Customers use their own address with the password demo-customer-pass.\n");

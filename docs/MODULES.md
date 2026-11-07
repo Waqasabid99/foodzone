@@ -558,6 +558,41 @@ rebuild it, drop the database and seed again.
 Not yet seeded: inventory and stock, employees and attendance, suppliers and
 purchasing, expenses, and reviews. Those screens are still empty.
 
+### Testing attendance without a terminal
+
+The device side of attendance needs a box on a wall, which makes it the one
+part of the system that cannot be exercised by clicking around. It can still
+be tested completely, because a terminal is only an HTTP client: it
+authenticates with a device key, pushes a buffer of punches to
+`POST /api/v1/devices/punches`, and replays that buffer when the network comes
+back.
+
+`scripts/attendance-terminal.mjs` is that client. It keeps a monotonic log id
+per punch in a local state file the way a terminal keeps it in flash, holds
+punches when a push fails instead of dropping them, and can run its clock fast
+or slow:
+
+```sh
+node scripts/attendance-terminal.mjs --serial ZK-CLF-0001 --key dev_… --day
+node scripts/attendance-terminal.mjs --serial ZK-CLF-0001 --key dev_… --replay
+node scripts/attendance-terminal.mjs --serial ZK-CLF-0001 --key dev_… --in 1002 --offline
+```
+
+`npm run db:demo` registers a terminal per branch and prints its key once.
+
+**What this does not prove** is that a real ZKTeco or eSSL will talk to that
+endpoint. They will not: those devices speak their own protocol over the LAN
+and most push nothing to the internet at all. Something has to translate — a
+small agent on the restaurant's network, a device model that supports HTTP
+push, or the per-vendor adapter still deferred. This script is the contract
+that translation has to satisfy, and it is a faster thing to hand a hardware
+supplier than a description of the endpoint.
+
+Phase 12 covers the same endpoint in CI: a missing key and a wrong key are
+refused, a batch is accepted with its cursor advanced, an unknown badge is
+kept as unmatched rather than dropped, and a re-sync counts duplicates instead
+of doubling everybody's hours.
+
 ### When the year runs out
 
 Nothing creates next year automatically, and that is deliberate: a year's shape

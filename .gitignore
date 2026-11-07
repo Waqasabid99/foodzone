@@ -48,5 +48,9 @@ next-env.d.ts
 
 /src/generated/prisma
 
+# The simulated attendance terminal's buffer and log-id counter, which stands
+# in for a real device's flash. Machine-local state, like the device it mimics.
+/.terminal-state/
+
 # Local storage driver uploads
 /storage/
