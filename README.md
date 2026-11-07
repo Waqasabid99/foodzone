@@ -45,6 +45,7 @@ Full-stack fast-food e-commerce app.
 - `npm run db:migrate` — run Prisma migrations
 - `npm run db:seed` — seed the permission catalogue, system roles, chart of accounts and the current fiscal year (no users, no sample data)
 - `npm run db:bootstrap` — create the owner account and first branch from the command line
+- `npm run db:demo` — fill the system with a demo restaurant: catalog with photographs, a month of orders, and a posted ledger (never in production)
 - `npm run test:unit` / `npm run test:unit:coverage` — unit suite, with or without coverage
 - `npm run test:e2e:ci` — every end-to-end suite, against a running server
 - `npm run docs:api:check` — regenerate the OpenAPI document and fail if it differs from the committed copy

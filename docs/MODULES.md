@@ -520,6 +520,44 @@ The owner is created with `isSuperAdmin`, which the permission layer documents
 as "bootstrap account only" — that is this account. Staff should be given roles
 instead.
 
+### The demo restaurant
+
+`npm run db:demo` fills an installation with a working Karachi fast-food chain,
+so the system can be shown to somebody. It is the opposite of `db:seed` in
+every way that matters: invented content, and it **refuses to run when
+NODE_ENV is production**.
+
+What it creates:
+
+* an owner account (`owner@foodzone.demo` / `demo-owner-pass`) **first**, because
+  setup refuses once any user exists and this script creates eight customers —
+  seeding before bootstrapping locks you out of your own demo;
+* two branches, 7 categories and 20 products with real photographs, 32 price
+  variants, 4 shared modifier groups, a laid-out menu per branch, and 24 tables
+  each with its own QR code;
+* eight customers (`demo-customer-pass`) and a month of trading — around 570
+  orders weighted to lunch and dinner peaks, busier at weekends and at the
+  larger branch, spread across every channel and order type, with nine left
+  mid-flight so the kitchen board and the pass are not empty;
+* the ledger, posted through the **real posting rules** — so revenue, cost of
+  sales, tax payable and the cash and card accounts are genuine double-entry
+  and the trial balance balances because it is true.
+
+Photographs are hot-linked from Unsplash, whose host is already allowed in
+`next.config.mjs`, so nothing is committed and no storage driver has to be
+configured before a demo looks right. Every URL was fetched and looked at
+before it was used: a 200 proves a photograph exists, not that it is the right
+one.
+
+The catalog upserts, so editing `prisma/demo/menu.js` and re-running updates it
+in place. The trading history does **not** — orders carry unique numbers and
+posted ledger entries behind them, and regenerating would either collide or
+double the revenue on screen. Re-running leaves the existing history alone; to
+rebuild it, drop the database and seed again.
+
+Not yet seeded: inventory and stock, employees and attendance, suppliers and
+purchasing, expenses, and reviews. Those screens are still empty.
+
 ### When the year runs out
 
 Nothing creates next year automatically, and that is deliberate: a year's shape
