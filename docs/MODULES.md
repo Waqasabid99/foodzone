@@ -555,8 +555,23 @@ posted ledger entries behind them, and regenerating would either collide or
 double the revenue on screen. Re-running leaves the existing history alone; to
 rebuild it, drop the database and seed again.
 
-Not yet seeded: inventory and stock, employees and attendance, suppliers and
-purchasing, expenses, and reviews. Those screens are still empty.
+It also seeds the store room: 34 inventory items across six categories with
+Karachi wholesale costs, four suppliers, a stock location per branch, and 17
+costed recipes. Opening stock arrives as **posted goods receipts** rather than
+rows written into a levels table — that is the only way the numbers downstream
+are real, because the receipt is what moves the stock, sets each weighted
+average cost, creates the batches the expiry report reads, and posts inventory
+and GRNI to the ledger.
+
+The payoff is the screen a restaurant owner leans in for: a Classic Beef
+Burger costing Rs 249.90 in ingredients against Rs 690 on the menu, and
+Rs 660,491 of stock on the shelf.
+
+Ten employees with biometric ids and a terminal per branch come with it — see
+*Testing attendance without a terminal* above.
+
+Not yet seeded: purchase orders, expenses, and reviews. Those screens are
+still empty.
 
 ### Testing attendance without a terminal
 

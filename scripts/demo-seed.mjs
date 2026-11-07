@@ -26,6 +26,9 @@ import { postOrderSale, postPaymentReceipt } from "../src/server/services/postin
 import { bootstrapInstallation, installationNeedsSetup } from "../src/server/services/bootstrap.service.js";
 import { registerDevice } from "../src/server/services/attendance-device.service.js";
 import { DEPARTMENTS, EMPLOYEES, DEVICES } from "../prisma/demo/staff.js";
+import { UNITS, ITEM_CATEGORIES, ITEMS, SUPPLIERS, RECIPES } from "../prisma/demo/inventory.js";
+import { createGoodsReceipt, postGoodsReceipt } from "../src/server/services/goods-receipt.service.js";
+import { createRecipe } from "../src/server/services/recipe.service.js";
 
 if (process.env.NODE_ENV === "production") {
   console.error("Refusing to run: this writes invented data and NODE_ENV is production.");
@@ -637,6 +640,166 @@ async function seedStaff(branches) {
   return keys;
 }
 
+/**
+ * The store room: what is bought, what it costs, and what is on the shelf.
+ *
+ * Opening stock arrives as a **posted goods receipt** rather than rows written
+ * into a levels table, because that is the only way the numbers downstream are
+ * real: the receipt moves the stock, sets the weighted average cost, creates
+ * the batches the expiry report reads, and posts inventory and GRNI to the
+ * ledger. Inserting a stock level directly would give the same tile on the
+ * dashboard and nothing behind it.
+ */
+async function seedInventory(branches) {
+  const units = new Map();
+  // Base units first: a derived unit points at the one it converts into.
+  for (const unit of UNITS.filter((u) => !u.base)) {
+    units.set(unit.code, await prisma.unitOfMeasure.upsert({
+      where: { code: unit.code },
+      create: { code: unit.code, name: unit.name, type: unit.type, precision: unit.precision, isActive: true },
+      update: { name: unit.name },
+    }));
+  }
+  for (const unit of UNITS.filter((u) => u.base)) {
+    units.set(unit.code, await prisma.unitOfMeasure.upsert({
+      where: { code: unit.code },
+      create: {
+        code: unit.code, name: unit.name, type: unit.type, precision: unit.precision, isActive: true,
+        baseUnitId: units.get(unit.base).id, factor: unit.factor,
+      },
+      update: { name: unit.name, baseUnitId: units.get(unit.base).id, factor: unit.factor },
+    }));
+  }
+
+  const categories = new Map();
+  for (const category of ITEM_CATEGORIES) {
+    categories.set(category.code, await prisma.inventoryCategory.upsert({
+      where: { name: category.name },
+      create: { name: category.name, code: category.code, isActive: true },
+      update: { code: category.code },
+    }));
+  }
+
+  const items = new Map();
+  for (const item of ITEMS) {
+    items.set(item.sku, await prisma.inventoryItem.upsert({
+      where: { sku: item.sku },
+      create: {
+        sku: item.sku, name: item.name, categoryId: categories.get(item.category).id,
+        uomId: units.get(item.uom).id, type: "RAW_MATERIAL", costingMethod: "WEIGHTED_AVERAGE",
+        reorderLevel: item.reorder ?? null, reorderQuantity: item.reorder ? item.reorder * 2 : null,
+        isPerishable: Boolean(item.perishable), shelfLifeDays: item.perishable ?? null,
+        trackBatches: Boolean(item.perishable), isActive: true,
+      },
+      update: { name: item.name, reorderLevel: item.reorder ?? null },
+    }));
+  }
+
+  const suppliers = new Map();
+  for (const supplier of SUPPLIERS) {
+    suppliers.set(supplier.code, await prisma.supplier.upsert({
+      where: { code: supplier.code },
+      create: {
+        code: supplier.code, name: supplier.name, contactPerson: supplier.contact,
+        phone: supplier.phone, paymentTermDays: supplier.terms, isActive: true,
+      },
+      update: { name: supplier.name, contactPerson: supplier.contact },
+    }));
+  }
+
+  const locations = [];
+  for (const branch of branches) {
+    const code = `${branch.code}-MAIN`;
+    const existing = await prisma.stockLocation.findFirst({ where: { branchId: branch.id, code }, select: { id: true } });
+    locations.push(existing ?? await prisma.stockLocation.create({
+      data: { branchId: branch.id, code, name: "Main store", type: "MAIN_STORE", isDefault: true, isActive: true },
+    }));
+  }
+
+  log(`inventory: ${items.size} items in ${categories.size} categories, ${suppliers.size} suppliers, ${locations.length} stock locations`);
+
+  // Opening stock, once. A second receipt would double the shelf.
+  const alreadyStocked = await prisma.goodsReceipt.count();
+  if (alreadyStocked > 0) {
+    log(`stock: ${alreadyStocked} goods receipt(s) already here, left alone`);
+  } else {
+    const supplierFor = (category) =>
+      category === "MEAT" ? "SUP-ALKAR" : category === "PROD" ? "SUP-FRESH" : category === "PACK" ? "SUP-PACK" : "SUP-METRO";
+
+    let receipts = 0;
+    for (const location of locations) {
+      const bySupplier = new Map();
+      for (const item of ITEMS) {
+        const key = supplierFor(item.category);
+        if (!bySupplier.has(key)) bySupplier.set(key, []);
+        bySupplier.get(key).push(item);
+      }
+
+      for (const [supplierCode, lines] of bySupplier) {
+        // The second branch holds a smaller shelf, as a smaller outlet does.
+        const scale = location.code.includes("-02-") || location.code.startsWith("FZ-KHI-02") ? 0.6 : 1;
+        const receipt = await createGoodsReceipt({
+          locationId: location.id,
+          supplierId: suppliers.get(supplierCode).id,
+          receivedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+          items: lines.map((item) => ({
+            itemId: items.get(item.sku).id,
+            quantity: Math.max(1, Math.round(item.opening * scale)),
+            uomId: units.get(item.uom).id,
+            unitCost: item.cost,
+            ...(item.perishable ? { batchNumber: `OPEN-${item.sku}`, expiryDate: new Date(Date.now() + item.perishable * 24 * 60 * 60 * 1000) } : {}),
+          })),
+        });
+        await postGoodsReceipt(receipt.id, null);
+        receipts += 1;
+      }
+    }
+    log(`stock: ${receipts} opening goods receipts posted, which set every average cost`);
+  }
+
+  return { units, items };
+}
+
+/**
+ * What each dish takes out of the store.
+ *
+ * Created against the product's default variant, which is what the costing
+ * roll-up reads. This is where the margin column on every other screen comes
+ * from, so it is worth more to a demo than it looks.
+ */
+async function seedRecipes({ units, items }) {
+  const existing = await prisma.recipe.count();
+  if (existing > 0) {
+    log(`recipes: ${existing} already here, left alone`);
+    return;
+  }
+
+  let made = 0;
+  for (const recipe of RECIPES) {
+    const variant = await prisma.productVariant.findFirst({
+      where: { isDefault: true, product: { slug: recipe.product } },
+      select: { id: true, product: { select: { name: true } } },
+    });
+    if (!variant) continue;
+
+    await createRecipe({
+      name: `${variant.product.name} — standard`,
+      variantId: variant.id,
+      yieldQuantity: recipe.yield,
+      yieldUomId: units.get("pc").id,
+      isActive: true,
+      ingredients: recipe.ingredients.map(([sku, quantity, uom]) => ({
+        itemId: items.get(sku).id,
+        quantity,
+        uomId: units.get(uom).id,
+      })),
+    });
+    made += 1;
+  }
+
+  log(`recipes: ${made} costed, so every dish has a food cost and a margin`);
+}
+
 async function main() {
   console.log("\nSeeding the demo restaurant\n");
 
@@ -648,6 +811,8 @@ async function main() {
   await seedMenus(branches, products);
   await seedTablesAndQr(branches);
 
+  const stock = await seedInventory(branches);
+  await seedRecipes(stock);
   const deviceKeys = await seedStaff(branches);
   const customers = await seedCustomers();
   const posted = await seedOrders(branches, customers);
