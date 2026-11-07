@@ -62859,6 +62859,154 @@
         "x-source": "src/app/api/v1/settings/public/route.js"
       }
     },
+    "/api/v1/setup": {
+      "post": {
+        "operationId": "postSetup",
+        "summary": "Create a setup",
+        "description": "First-run setup: creates the owner account and the first branch.\n\nThe only unauthenticated endpoint in the system that creates an account with\nadministrative rights, so read `bootstrap.service.js` before changing\nanything here — the guards are the whole of its security.\n\n**404, not 403, once setup is done.** A system that answers \"forbidden\" has\ntold an anonymous caller that a setup endpoint exists and that it is already\nclaimed. Not found says nothing, and is also true: there is no setup to\nperform.\n\nThe token travels in a header, not the body: it stays out of the validated\npayload, out of anything that logs a request body, and out of the schema\nthat describes what an installation is. It is compared in constant time.\n\nPublic — no authentication required. Rate limit: 20 requests per 15m (`auth` class).",
+        "tags": [
+          "Platform"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "owner": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 80
+                      },
+                      "email": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 254
+                      },
+                      "password": {
+                        "type": "string",
+                        "minLength": 10,
+                        "maxLength": 72
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "email",
+                      "password"
+                    ]
+                  },
+                  "branch": {
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 20,
+                        "pattern": "^[A-Za-z0-9-]+$"
+                      },
+                      "name": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 80
+                      },
+                      "city": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 80
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "phone": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 20
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "timezone": {
+                        "default": "Asia/Karachi",
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 60
+                      },
+                      "currency": {
+                        "default": "PKR",
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "code",
+                      "name"
+                    ]
+                  }
+                },
+                "required": [
+                  "owner",
+                  "branch"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "data"
+                  ],
+                  "properties": {
+                    "success": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [],
+        "x-rate-limit": {
+          "limit": 20,
+          "window": "15m"
+        },
+        "x-source": "src/app/api/v1/setup/route.js"
+      }
+    },
     "/api/v1/webhooks/payments/{provider}": {
       "post": {
         "operationId": "postWebhooksPaymentsByProvider",

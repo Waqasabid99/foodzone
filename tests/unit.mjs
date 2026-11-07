@@ -189,6 +189,8 @@ const { fiscalYearFor, fiscalYearStartMonth, nextFiscalYearAfter, runwayStatus, 
 const { NO_ACCOUNTING_PERIOD, isMissingAccountingPeriod, missingPeriodError } = await import(
   "@/server/accounting/posting-errors"
 );
+const { bootstrapSchema } = await import("@/server/validation/bootstrap.schemas");
+const { setupTokenMatches } = await import("@/server/services/bootstrap.service");
 const {
   addDays,
   crossesMidnight,
@@ -2583,6 +2585,63 @@ check("a nonsense start month is refused rather than quietly defaulted", () => {
   assert.throws(() => fiscalYearStartMonth("0"), /FISCAL_YEAR_START_MONTH/);
   assert.throws(() => fiscalYearStartMonth("july"), /FISCAL_YEAR_START_MONTH/);
   assert.throws(() => fiscalYearStartMonth("7.5"), /FISCAL_YEAR_START_MONTH/);
+});
+
+// --- first-run setup -----------------------------------------------------
+//
+// The one screen that creates an account nobody is signed in to create. Its
+// guards are the whole of its security, so they are tested rather than assumed.
+
+const SETUP_INPUT = {
+  owner: { name: "Restaurant Owner", email: "owner@example.com", password: "a-long-enough-passphrase" },
+  branch: { code: "fz-khi-01", name: "Main Branch", city: "Karachi" },
+};
+
+check("setup fills in the defaults a Pakistani restaurant would choose", () => {
+  const parsed = bootstrapSchema.parse(structuredClone(SETUP_INPUT));
+  assert.equal(parsed.branch.timezone, "Asia/Karachi");
+  assert.equal(parsed.branch.currency, "PKR");
+  // Branch codes are upper-cased elsewhere in the system; setup must not be
+  // the one place that creates a lower-case one.
+  assert.equal(parsed.branch.code, "FZ-KHI-01");
+});
+
+check("setup will not create an owner with a weak password", () => {
+  const weak = structuredClone(SETUP_INPUT);
+  weak.owner.password = "short";
+  assert.equal(bootstrapSchema.safeParse(weak).success, false);
+});
+
+check("setup needs an owner and a branch, not one or the other", () => {
+  assert.equal(bootstrapSchema.safeParse({ owner: SETUP_INPUT.owner }).success, false);
+  assert.equal(bootstrapSchema.safeParse({ branch: SETUP_INPUT.branch }).success, false);
+  const noEmail = structuredClone(SETUP_INPUT);
+  delete noEmail.owner.email;
+  assert.equal(bootstrapSchema.safeParse(noEmail).success, false);
+});
+
+check("an unset setup token refuses everything", () => {
+  /*
+   * Fail closed. If SETUP_TOKEN is missing from the environment the setup
+   * endpoint must be unusable, not open — a deployment where somebody forgot
+   * the variable is exactly the one an attacker would find first.
+   */
+  assert.equal(setupTokenMatches("anything", undefined), false);
+  assert.equal(setupTokenMatches("anything", ""), false);
+  assert.equal(setupTokenMatches("anything", "   "), false);
+  assert.equal(setupTokenMatches("", undefined), false);
+});
+
+check("the setup token has to match exactly", () => {
+  assert.equal(setupTokenMatches("right-token", "right-token"), true);
+  assert.equal(setupTokenMatches("wrong-token", "right-token"), false);
+  // A prefix must not pass: a comparison that stops at the shorter string
+  // would let "r" through.
+  assert.equal(setupTokenMatches("r", "right-token"), false);
+  assert.equal(setupTokenMatches("right-token-and-more", "right-token"), false);
+  assert.equal(setupTokenMatches("", "right-token"), false);
+  assert.equal(setupTokenMatches(null, "right-token"), false);
+  assert.equal(setupTokenMatches(undefined, "right-token"), false);
 });
 
 // --- the next year, and how much runway is left in this one -------------------

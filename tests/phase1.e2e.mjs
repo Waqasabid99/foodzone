@@ -123,6 +123,67 @@ async function waitForCode(email, { timeoutMs = 8000 } = {}) {
 }
 
 async function main() {
+  /*
+   * ===================== FIRST-RUN SETUP =====================
+   *
+   * The one endpoint that creates an administrator with nobody signed in, so
+   * its guards are the whole of its security and they are checked here rather
+   * than trusted.
+   *
+   * This has to run before anything else registers a user, because "has this
+   * installation been claimed" is the guard being tested. On the canonical
+   * run — a database built from empty — the full path exercises; on a
+   * database that already has users, the only honest thing left to assert is
+   * that setup refuses, which is checked too.
+   */
+  const SETUP_TOKEN = process.env.E2E_SETUP_TOKEN ?? "e2e-setup-token";
+  const setupBody = {
+    owner: { name: "Setup Owner", email: emailOf("owner"), password: "a-long-enough-passphrase" },
+    branch: { code: `SU${String(stamp).slice(-6)}`, name: "Setup Branch", city: "Karachi" },
+  };
+  const postSetup = (token, body = setupBody) =>
+    api("/setup", { method: "POST", body, headers: token ? { "x-setup-token": token } : {} });
+
+  const unclaimed = (await prisma.user.count()) === 0;
+
+  if (unclaimed) {
+    const noToken = await postSetup(null);
+    check("setup without a token is not found, not forbidden", noToken.status === 404, noToken.status);
+
+    const wrongToken = await postSetup("definitely-not-the-token");
+    check("setup with the wrong token is refused", wrongToken.status === 404, wrongToken.status);
+
+    const stillEmpty = await prisma.user.count();
+    check("a refused setup creates nothing", stillEmpty === 0, stillEmpty);
+
+    const done = await postSetup(SETUP_TOKEN);
+    check("setup with the token creates the owner and the first branch", done.status === 201, done.body);
+    check("the branch code is upper-cased like every other", done.body?.data?.branch?.code === setupBody.branch.code.toUpperCase(), done.body?.data?.branch);
+    check("and defaults to this country's timezone and currency", done.body?.data?.branch?.timezone === "Asia/Karachi" && done.body?.data?.branch?.currency === "PKR", done.body?.data?.branch);
+
+    const owner = await prisma.user.findUnique({
+      where: { email: setupBody.owner.email },
+      select: { id: true, status: true, isSuperAdmin: true, emailVerifiedAt: true },
+    });
+    check("the owner can actually sign in: active, verified, super admin", owner?.status === "ACTIVE" && owner?.isSuperAdmin === true && !!owner?.emailVerifiedAt, owner);
+
+    const again = await postSetup(SETUP_TOKEN, {
+      owner: { name: "Second Owner", email: emailOf("owner2"), password: "a-long-enough-passphrase" },
+      branch: { code: `S2${String(stamp).slice(-6)}`, name: "Second Branch" },
+    });
+    check("setup cannot be run twice, even with the right token", again.status === 404, again.status);
+    check("and the second owner was not created", (await prisma.user.count()) === 1, await prisma.user.count());
+
+    // Removed immediately: the rest of this suite assumes it is building an
+    // installation from nothing, and an extra owner and branch would show up
+    // in its counts.
+    await prisma.branch.deleteMany({ where: { id: done.body.data.branch.id } });
+    await prisma.user.deleteMany({ where: { id: done.body.data.owner.id } });
+  } else {
+    const claimed = await postSetup(SETUP_TOKEN);
+    check("setup refuses on an installation that already has users", claimed.status === 404, claimed.status);
+  }
+
   // ===================== AUTH =====================
   const custEmail = emailOf("customer");
   const reg = await api("/auth/register", { method: "POST", body: { name: "E2E Customer", email: custEmail, password: "correct-horse-1", client: "ios" } });

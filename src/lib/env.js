@@ -102,6 +102,18 @@ const schema = z.object({
   /// caches for the life of the process. That file owns the format checks.
   CREDENTIAL_ENCRYPTION_KEYS: z.string().optional(),
 
+  // --- first-run setup -------------------------------------------------------
+  /// Guards the `/setup` page, which creates the owner account on a fresh
+  /// installation. Generate one with `openssl rand -hex 16` and set it
+  /// alongside the other secrets before the first deploy.
+  ///
+  /// Read directly from `process.env` by `services/bootstrap.service.js`
+  /// rather than through `env()`, so that a missing value fails that one
+  /// endpoint closed instead of refusing to boot the whole application — a
+  /// deployment with no setup token should still serve a site that is already
+  /// set up. Declared here to be documented with the rest.
+  SETUP_TOKEN: z.string().optional(),
+
   // --- accounting ------------------------------------------------------------
   /// The month a fiscal year opens in, 1-12. Defaults to 7: Pakistan's
   /// financial year runs 1 July to 30 June. Read before the first `db:seed`,

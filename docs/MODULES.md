@@ -482,6 +482,44 @@ month — **1 July to 30 June**, Pakistan's financial year. A client whose year
 differs sets `FISCAL_YEAR_START_MONTH` (1-12) *before the first seed*; changing
 it afterwards does not move years that already exist.
 
+### Setting up a new installation
+
+`db:seed` leaves a system with permissions, roles, a chart of accounts, a
+fiscal calendar and public pages — and nobody who can sign in. Closing that gap
+is the one action in the system that creates an administrator with no
+administrator behind it, so it has its own guards.
+
+Two ways in, both through `services/bootstrap.service.js`, so there is one
+definition of a correctly set-up installation rather than two that drift:
+
+**The `/setup` page.** On a fresh deployment the site serves a form asking for
+the owner's name, email and password, and the first branch's code, name, city,
+timezone and currency (defaulting to `Asia/Karachi` and `PKR`). Hand the link
+to the client and they choose their own password, so nobody else ever knows it.
+
+It is guarded three ways, each failing closed:
+
+* only while **zero users exist** — any user at all means the system has been
+  in use, and the page `notFound()`s rather than explaining itself;
+* only with the **`SETUP_TOKEN`** from the environment, compared in constant
+  time. An unset variable refuses everything, because a deployment where
+  somebody forgot it is exactly the one worth protecting;
+* rate limited, as the auth endpoints are.
+
+A well-formed request with the wrong token and one made after setup is
+complete both answer **404**, identically — an anonymous caller cannot learn
+whether an installation is waiting to be claimed.
+
+**`npm run db:bootstrap`.** The same work from a terminal, reading
+`OWNER_NAME`, `OWNER_EMAIL`, `BRANCH_CODE`, `BRANCH_NAME` and optionally
+`OWNER_PASSWORD`, `BRANCH_CITY`, `BRANCH_TIMEZONE`, `BRANCH_CURRENCY`. Leave
+the password out and one is generated and printed once. No token is needed:
+anyone who can run it already has the database credentials.
+
+The owner is created with `isSuperAdmin`, which the permission layer documents
+as "bootstrap account only" — that is this account. Staff should be given roles
+instead.
+
 ### When the year runs out
 
 Nothing creates next year automatically, and that is deliberate: a year's shape
