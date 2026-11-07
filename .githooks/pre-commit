@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# Keeps src/generated/openapi.json in step with the code it describes.
+#
+# The document is generated from the route modules: their handler config, their
+# validation schemas, and their doc comments, which become the endpoint
+# descriptions. So editing a comment on a route changes the document, and that
+# is not obvious while you are editing the comment.
+#
+# `docs:api:check` in CI catches the drift, but it catches it after a push,
+# which cost two red builds before this hook existed — both times the document
+# had been regenerated and then an input changed afterwards. Remembering is the
+# part that failed; three seconds of generation is cheaper than remembering.
+#
+# The document is pure generated output with no judgement in its contents, so
+# it is regenerated and staged silently rather than failing the commit. If
+# generation itself fails, the commit stops: that means the routes do not load,
+# which is worth knowing before it reaches CI.
+#
+# Enable with:  git config core.hooksPath .githooks
+# Skip once with: git commit --no-verify
+
+set -e
+
+# Nothing to do when the generator cannot run at all — a fresh clone with no
+# dependencies installed should not be blocked from committing.
+[ -d node_modules ] || exit 0
+
+if ! npm run --silent docs:api >/tmp/foodzone-openapi-hook.log 2>&1; then
+  echo "pre-commit: the OpenAPI generator failed, so the commit is stopped." >&2
+  echo "Its output:" >&2
+  tail -20 /tmp/foodzone-openapi-hook.log >&2
+  exit 1
+fi
+
+if ! git diff --quiet -- src/generated/openapi.json; then
+  git add src/generated/openapi.json
+  echo "pre-commit: regenerated src/generated/openapi.json and added it to this commit."
+fi
+
+exit 0

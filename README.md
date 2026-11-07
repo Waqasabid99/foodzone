@@ -2,7 +2,7 @@
 
 Full-stack fast-food e-commerce app.
 
-**Stack:** Next.js 16 (App Router, JavaScript) · Tailwind CSS v4 · PostgreSQL (Neon) via Prisma 7 · Zustand · react-toastify · Framer Motion · lucide-react · react-icons
+**Stack:** Next.js 16 (App Router, JavaScript) · Tailwind CSS v4 · PostgreSQL via Prisma 7 · recharts · react-toastify · lucide-react
 
 ## Getting started
 
@@ -16,19 +16,38 @@ Full-stack fast-food e-commerce app.
    ```bash
    npm install
    npm run db:migrate   # creates tables from prisma/schema.prisma
-   npm run db:seed      # seeds sample categories/products
+   npm run db:seed      # permissions, roles, chart of accounts, fiscal year
    ```
-4. Run the dev server:
+   The seed creates **no users and no sample data** — it is safe to run on any
+   environment, including production, and converges when run again.
+4. Turn on the repository's git hooks (once per clone):
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+   `.githooks/pre-commit` regenerates `src/generated/openapi.json` when a route
+   changes and adds it to the commit. The document is generated from the route
+   modules — including their doc comments, which become the endpoint
+   descriptions — so editing a comment changes it, which is easy to miss and
+   fails CI's `docs:api:check`.
+5. Run the dev server:
    ```bash
    npm run dev
    ```
+6. Open **http://localhost:3000/setup** to create the owner account and the
+   first branch. The page needs `SETUP_TOKEN` set in `.env`, and closes itself
+   for good once an owner exists. `npm run db:bootstrap` does the same from a
+   terminal — see **[docs/MODULES.md](docs/MODULES.md)**.
 
 ## Scripts
 
 - `npm run dev` — start the dev server
 - `npm run build` / `npm run start` — production build & start
 - `npm run db:migrate` — run Prisma migrations
-- `npm run db:seed` — seed sample data
+- `npm run db:seed` — seed the permission catalogue, system roles, chart of accounts and the current fiscal year (no users, no sample data)
+- `npm run db:bootstrap` — create the owner account and first branch from the command line
+- `npm run test:unit` / `npm run test:unit:coverage` — unit suite, with or without coverage
+- `npm run test:e2e:ci` — every end-to-end suite, against a running server
+- `npm run docs:api:check` — regenerate the OpenAPI document and fail if it differs from the committed copy
 - `npm run db:studio` — open Prisma Studio
 
 ## Architecture
