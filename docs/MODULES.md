@@ -573,6 +573,58 @@ Ten employees with biometric ids and a terminal per branch come with it — see
 Not yet seeded: purchase orders, expenses, and reviews. Those screens are
 still empty.
 
+### Backups, and proving they work
+
+Two scripts, both needing `pg_dump` and `pg_restore` from `postgresql-client`.
+
+`npm run db:backup` dumps in Postgres's custom format, **lists the dump it
+just wrote**, copies it off the machine if `BACKUP_OFFSITE_CMD` is set, and
+prunes old ones. The listing step is the one that matters: a dump that cannot
+be read is not a backup, and the moment to find that out is now rather than
+during an incident. The offsite command is yours — `rclone`, `aws s3 cp`,
+`scp` — so this adds no dependency and assumes nothing about where copies
+live. **A backup on the same disk as the database is not a backup**, and the
+script says so on every run until the variable is set.
+
+Retention keeps 14 days but never fewer than 3 dumps, whatever their age. A
+machine switched off for a month comes back, prunes by age, and finds it has
+deleted everything it had — which is how a retention policy becomes the thing
+that loses the data. `server/ops/backup-policy.js` is pure and has tests,
+because deleting backups is the only destructive part of the system.
+
+`npm run db:restore-drill` restores the newest dump into a scratch database
+and **asks the restored data questions only coherent data can answer**:
+
+* every migration in the repository is present;
+* the tables a restaurant would notice losing are populated;
+* **the ledger balances** — debits equal credits to the rupee, which is false
+  if rows were lost from the middle of a dump, where a row count would pass;
+* the newest order is recent, and not dated in the future, which would mean
+  the clocks disagree somewhere.
+
+The scratch database is dropped afterwards unless `--keep` is passed. Run it
+on an ordinary Tuesday, on purpose. Nobody discovers their backups are useless
+while things are working.
+
+### Knowing when something is wrong
+
+`GET /api/health` is unauthenticated and outside `/api/v1`, because its callers
+are uptime monitors, load balancers and deploy scripts, none of which have a
+session. It reports the database, whether migrations ran, whether the queue is
+moving, and how many postings are waiting for a fiscal year.
+
+It returns **503 only when the database is unreachable**, and `degraded` with
+a 200 when the site is serving customers but background work has stopped —
+because that is real but not worth paging somebody at 3am. It deliberately
+leaks nothing: no versions, no hostnames, no business counts, and no driver
+error text, which carries hosts and user names.
+
+Requests slower than `SLOW_REQUEST_MS` (default 1500) log a warning with the
+method, path, status and request id. Not every request: a dinner service
+produces thousands of fast ones and a log that is mostly "took 11ms" is a log
+nobody reads. The query string is never logged — it carries search terms,
+phone numbers and tokens.
+
 ### Testing attendance without a terminal
 
 The device side of attendance needs a box on a wall, which makes it the one

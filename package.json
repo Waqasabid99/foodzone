@@ -16,6 +16,8 @@
     "db:seed": "node prisma/seed.js",
     "db:bootstrap": "node --import ./tests/register-loader.mjs scripts/bootstrap.mjs",
     "db:demo": "node --import ./tests/register-loader.mjs scripts/demo-seed.mjs",
+    "db:backup": "node scripts/backup.mjs",
+    "db:restore-drill": "node scripts/restore-drill.mjs",
     "db:studio": "prisma studio",
     "test:e2e:server": "SMTP_HOST= WORKER_IN_PROCESS=false SETUP_TOKEN=${E2E_SETUP_TOKEN:-e2e-setup-token} APP_URL=http://localhost:3100 CRON_SECRET=${E2E_CRON_SECRET:-phase2-test-secret} MOCK_PAYMENT_SECRET=${MOCK_PAYMENT_SECRET:-mock-payment-secret} next start -p 3100 > ${E2E_LOG:-/tmp/foodzone-e2e-server.log} 2>&1",
     "test:e2e": "E2E_MAIL=console node tests/phase1.e2e.mjs && node tests/phase2.e2e.mjs && node tests/phase3.e2e.mjs && node tests/phase4.e2e.mjs && node tests/phase5.e2e.mjs && node tests/phase6.e2e.mjs && node tests/phase7.e2e.mjs && node tests/phase8.e2e.mjs && node tests/phase9.e2e.mjs && node tests/phase10.e2e.mjs && node tests/phase11.e2e.mjs && node tests/phase12.e2e.mjs && node tests/phase13.e2e.mjs && node tests/phase14.e2e.mjs && node tests/phase15.e2e.mjs && node tests/phase16.e2e.mjs && node tests/phase17.e2e.mjs && node tests/phase18.e2e.mjs && node tests/phase19.e2e.mjs && node tests/phase20.e2e.mjs && node tests/phase21.e2e.mjs && node tests/phase22.e2e.mjs",

@@ -394,6 +394,8 @@ async function seedOrders(branches, customers) {
   }
 
   const today = new Date();
+  // The hour it is in Karachi, which is where this restaurant is.
+  const karachiHourNow = new Date(Date.now() + KARACHI_OFFSET_MS).getUTCHours();
   let sequence = 1;
   const created = [];
 
@@ -408,6 +410,14 @@ async function seedOrders(branches, customers) {
 
       for (const [hour, weight] of HOUR_WEIGHTS.entries()) {
         if (weight === 0) continue;
+        /*
+         * Today stops at the current hour. Generating the whole day would
+         * date tonight's dinner rush in the future, which inflates "sales
+         * today" on the dashboard with trade that has not happened — the
+         * first thing a prospect looks at, and the first thing an accountant
+         * would question.
+         */
+        if (back === 0 && hour > karachiHourNow) continue;
         const expected = (weight / 8) * multiplier * branchFactor;
         const count = Math.floor(expected) + (rng() < expected % 1 ? 1 : 0);
 
@@ -431,15 +441,25 @@ async function seedOrders(branches, customers) {
   log(`generating ${created.length} orders across ${HISTORY_DAYS + 1} days…`);
 
   const liveStatuses = ["PENDING", "CONFIRMED", "PREPARING", "READY", "OUT_FOR_DELIVERY"];
+  /*
+   * The newest handful are still being worked on, counted from the end rather
+   * than by a time window.
+   *
+   * A window looks more realistic and fails at the wrong moment: seed at ten
+   * in the morning, when only a thin breakfast hour has happened, and the
+   * kitchen board is empty for the one demo where somebody asks to see it.
+   * Counting back from the newest order guarantees a full pass whatever hour
+   * the demo is built in, and those orders are genuinely the most recent, so
+   * nothing about it is a lie.
+   */
+  const LIVE_ORDERS = 9;
+  const liveFrom = Math.max(0, created.length - LIVE_ORDERS);
   let live = 0;
   const posted = [];
 
-  for (const { branch, order } of created) {
-    const minutesAgo = (Date.now() - order.placedAt.getTime()) / 60000;
-    // Anything from the last three hours is still happening. Everything else
-    // is history, and a small slice of history was cancelled, because a month
-    // with no cancellations is not a real month.
-    const isLive = minutesAgo < 180 && live < 9;
+  for (const [index, { branch, order }] of created.entries()) {
+    const isLive = index >= liveFrom;
+    // A month with no cancellations is not a real month.
     const cancelled = !isLive && rng() < 0.04;
 
     let status = "COMPLETED";

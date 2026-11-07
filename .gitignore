@@ -52,5 +52,9 @@ next-env.d.ts
 # in for a real device's flash. Machine-local state, like the device it mimics.
 /.terminal-state/
 
+# Database dumps. Never in the repository: they are the whole business in one
+# file, and the repository is public.
+/backups/
+
 # Local storage driver uploads
 /storage/

@@ -177,11 +177,12 @@ jobs:
       - name: Start the server
         run: |
           npm run test:e2e:server &
-          # Waits on the server's own "Ready in" line rather than polling a
-          # URL: there is no unauthenticated health endpoint, and every real
-          # route would answer before the app had finished starting.
+          # Polls /api/health, which answers only once the database is
+          # reachable and the schema is migrated — the two things every suite
+          # assumes. Waiting on the server's own "Ready in" line, as this used
+          # to, says the process started, not that it can serve anything.
           for i in $(seq 1 90); do
-            if grep -q "Ready in" "$E2E_LOG" 2>/dev/null; then
+            if curl -fsS -o /dev/null http://localhost:3100/api/health 2>/dev/null; then
               echo "server ready after ${i}s"
               exit 0
             fi

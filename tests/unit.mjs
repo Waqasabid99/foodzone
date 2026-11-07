@@ -190,6 +190,7 @@ const { NO_ACCOUNTING_PERIOD, isMissingAccountingPeriod, missingPeriodError } = 
   "@/server/accounting/posting-errors"
 );
 const { bootstrapSchema } = await import("@/server/validation/bootstrap.schemas");
+const { backupName, backupTakenAt, planRetention } = await import("@/server/ops/backup-policy");
 const { setupTokenMatches } = await import("@/server/services/bootstrap.service");
 const {
   addDays,
@@ -2585,6 +2586,72 @@ check("a nonsense start month is refused rather than quietly defaulted", () => {
   assert.throws(() => fiscalYearStartMonth("0"), /FISCAL_YEAR_START_MONTH/);
   assert.throws(() => fiscalYearStartMonth("july"), /FISCAL_YEAR_START_MONTH/);
   assert.throws(() => fiscalYearStartMonth("7.5"), /FISCAL_YEAR_START_MONTH/);
+});
+
+// --- backup retention ------------------------------------------------------
+//
+// The only destructive part of a backup system, so it is the part with tests.
+
+check("a backup name carries its own timestamp, and reads back", () => {
+  const name = backupName(new Date("2026-11-07T14:30:00Z"));
+  assert.equal(name, "foodzone-2026-11-07T14-30-00Z.dump");
+  assert.equal(backupTakenAt(name).toISOString(), "2026-11-07T14:30:00.000Z");
+});
+
+check("anything that is not one of our backups is left alone", () => {
+  /*
+   * The backup directory is a directory, and directories collect things:
+   * somebody's notes, a half-copied file, a dump from another system. The
+   * pruner must never delete a file it cannot prove it wrote.
+   */
+  const plan = planRetention(["notes.txt", "foodzone.dump", "old-backup.sql", ".keep"], { now: new Date("2026-11-07T00:00:00Z") });
+  assert.deepEqual(plan.remove, []);
+  assert.deepEqual(plan.keep, []);
+  assert.equal(plan.ignored.length, 4);
+});
+
+check("backups older than the window are pruned", () => {
+  const names = [
+    "foodzone-2026-11-07T02-00-00Z.dump",
+    "foodzone-2026-11-01T02-00-00Z.dump",
+    "foodzone-2026-10-20T02-00-00Z.dump",
+    "foodzone-2026-09-15T02-00-00Z.dump",
+  ];
+  const plan = planRetention(names, { now: new Date("2026-11-07T06:00:00Z"), keepDays: 14, keepAtLeast: 1 });
+  assert.deepEqual(plan.keep, ["foodzone-2026-11-07T02-00-00Z.dump", "foodzone-2026-11-01T02-00-00Z.dump"]);
+  assert.deepEqual(plan.remove, ["foodzone-2026-10-20T02-00-00Z.dump", "foodzone-2026-09-15T02-00-00Z.dump"]);
+});
+
+check("a machine that was switched off does not prune itself to nothing", () => {
+  /*
+   * The failure this exists for: every backup is older than the window, a
+   * pure age rule deletes all of them, and the retention policy becomes the
+   * thing that lost the data. Keeping the newest few always wins over age.
+   */
+  const names = [
+    "foodzone-2026-01-03T02-00-00Z.dump",
+    "foodzone-2026-01-02T02-00-00Z.dump",
+    "foodzone-2026-01-01T02-00-00Z.dump",
+  ];
+  const plan = planRetention(names, { now: new Date("2026-11-07T06:00:00Z"), keepDays: 14, keepAtLeast: 3 });
+  assert.deepEqual(plan.remove, []);
+  assert.equal(plan.keep.length, 3);
+});
+
+check("the newest is kept even when everything is ancient and the floor is one", () => {
+  const plan = planRetention(["foodzone-2020-01-01T02-00-00Z.dump"], { now: new Date("2026-11-07T06:00:00Z"), keepAtLeast: 1 });
+  assert.deepEqual(plan.remove, []);
+});
+
+check("pruning keeps the newest, not whatever the filesystem listed first", () => {
+  // Directory order is not sorted order, and trusting it would delete the
+  // most recent backup on some machines and not others.
+  const plan = planRetention(
+    ["foodzone-2026-09-01T02-00-00Z.dump", "foodzone-2026-11-06T02-00-00Z.dump", "foodzone-2026-10-01T02-00-00Z.dump"],
+    { now: new Date("2026-11-07T06:00:00Z"), keepDays: 5, keepAtLeast: 1 },
+  );
+  assert.deepEqual(plan.keep, ["foodzone-2026-11-06T02-00-00Z.dump"]);
+  assert.equal(plan.remove.length, 2);
 });
 
 // --- first-run setup -----------------------------------------------------

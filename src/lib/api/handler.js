@@ -79,6 +79,38 @@ function isPasswordChangePath(request) {
   }
 }
 
+/**
+ * How long a request took, logged only when that is news.
+ *
+ * Timing every request into the log would bury the one that matters: a
+ * restaurant at dinner service generates thousands of fast ones, and nobody
+ * reads a log that is mostly "took 11ms". So the threshold is the point at
+ * which somebody waiting at a till would notice, and nothing below it is
+ * written at all.
+ *
+ * Deliberately not metrics. A counter needs somewhere to send it, and there is
+ * no collector in this deployment yet; a warning line with a request id is
+ * something you can grep for today, and the line a real metrics pipeline
+ * replaces when one exists.
+ *
+ * The path is logged, never the query string: it carries search terms, phone
+ * numbers and tokens, and this ends up in a log file somebody else can read.
+ */
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS ?? 1500);
+
+function reportDuration({ request, ctx, startedAt, status }) {
+  const durationMs = Date.now() - startedAt;
+  if (durationMs < SLOW_REQUEST_MS) return;
+
+  logger.warn("slow request", {
+    method: request.method,
+    path: new URL(request.url).pathname,
+    status,
+    durationMs,
+    requestId: ctx?.requestId ?? null,
+  });
+}
+
 export function apiHandler(options, handler) {
   // apiHandler(fn) — no options.
   if (typeof options === "function") {
@@ -103,6 +135,7 @@ export function apiHandler(options, handler) {
 
   const wrapped = async (request, context) => {
     const ctx = requestContext(request);
+    const startedAt = Date.now();
     let limitResult = null;
 
     try {
@@ -190,8 +223,10 @@ export function apiHandler(options, handler) {
         );
       }
 
+      reportDuration({ request, ctx, startedAt, status: response.status });
       return response;
     } catch (error) {
+      reportDuration({ request, ctx, startedAt, status: 500 });
       return toErrorResponse(error, { request, ctx, limitResult });
     }
   };
