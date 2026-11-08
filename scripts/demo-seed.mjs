@@ -182,6 +182,7 @@ async function seedProducts(categories, modifierGroups) {
 }
 
 async function seedMenus(branches, products) {
+  let sectionsCreated = 0;
   for (const branch of branches) {
     const menu = await prisma.menu.upsert({
       where: { id: (await prisma.menu.findFirst({ where: { branchId: branch.id, slug: "all-day" }, select: { id: true } }))?.id ?? "none" },
@@ -195,28 +196,87 @@ async function seedMenus(branches, products) {
     await prisma.menuItem.deleteMany({ where: { menuId: menu.id } });
     await prisma.menuSection.deleteMany({ where: { menuId: menu.id } });
 
+    /*
+     * A product sits on a menu once.
+     *
+     * The layout names four products twice — in "Most ordered" and again in
+     * their own category — and `@@unique([menuId, productId, variantId])`
+     * forbids that the moment items are written with their variant. So the
+     * showcase contributes a *flag* rather than a second row: the category
+     * owns the placement and the product carries `isRecommended`, which is
+     * what the storefront reads to badge it as a chef's pick.
+     */
+    const recommendedSlugs = new Set(
+      MENU_SECTIONS.filter((section) => section.recommended).flatMap((section) => section.slugs),
+    );
+
+    // Placement goes to the first section that is not a showcase, so a
+    // showcase at the top does not quietly empty "Burgers".
+    const placements = new Map();
     for (const [sIndex, section] of MENU_SECTIONS.entries()) {
+      if (section.recommended) continue;
+      for (const [pIndex, slug] of section.slugs.entries()) {
+        if (!placements.has(slug)) placements.set(slug, { sIndex, pIndex });
+      }
+    }
+    // A product named only in a showcase still has to live somewhere.
+    for (const [sIndex, section] of MENU_SECTIONS.entries()) {
+      for (const [pIndex, slug] of section.slugs.entries()) {
+        if (!placements.has(slug)) placements.set(slug, { sIndex, pIndex });
+      }
+    }
+
+    for (const [sIndex, section] of MENU_SECTIONS.entries()) {
+      const mine = [...placements.entries()]
+        .filter(([slug, at]) => at.sIndex === sIndex && products.get(slug))
+        .sort((a, b) => a[1].pIndex - b[1].pIndex);
+
+      // A section with nothing left to show is not created at all, rather than
+      // rendering as an empty heading on the storefront.
+      if (!mine.length) continue;
+
       const row = await prisma.menuSection.create({
         data: { menuId: menu.id, name: section.name, sortOrder: sIndex },
       });
+      if (branch === branches[0]) sectionsCreated += 1;
 
-      for (const [pIndex, slug] of section.slugs.entries()) {
+      for (const [slug, at] of mine) {
         const product = products.get(slug);
-        if (!product) continue;
-        await prisma.menuItem.create({
-          data: {
-            menuId: menu.id,
-            sectionId: row.id,
-            productId: product.id,
-            isAvailable: true,
-            isRecommended: Boolean(section.recommended),
-            sortOrder: pIndex,
-          },
+
+        /*
+         * One row per active variant, which is what `addMenuItem` does when it
+         * is handed a product with no variant named. A `MenuItem` is a
+         * (product, variant) pair, never a bare product: the price a customer
+         * pays comes from the variant, so an item without one is not on the
+         * menu as far as every reader is concerned. Seeding them bare left this
+         * demo with eight sections, nothing on the storefront, and a cart that
+         * answered "not on the menu at this branch right now" to everything.
+         */
+        const variants = await prisma.productVariant.findMany({
+          where: { productId: product.id, isActive: true },
+          select: { id: true },
+          orderBy: { sortOrder: "asc" },
         });
+
+        for (const [vIndex, variant] of variants.entries()) {
+          await prisma.menuItem.create({
+            data: {
+              menuId: menu.id,
+              sectionId: row.id,
+              productId: product.id,
+              variantId: variant.id,
+              isAvailable: true,
+              isRecommended: recommendedSlugs.has(slug),
+              // Variants of one product stay together, after the products
+              // listed before it in the section.
+              sortOrder: at.pIndex * 10 + vIndex,
+            },
+          });
+        }
       }
     }
   }
-  log(`menus: one "All day" menu per branch, ${MENU_SECTIONS.length} sections each`);
+  log(`menus: one "All day" menu per branch, ${sectionsCreated} sections each`);
 }
 
 async function seedTablesAndQr(branches) {

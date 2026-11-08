@@ -22,11 +22,14 @@ const TYPE_COPY = {
  * The cost is that a refresh loses this view, which is why the order number is
  * the most prominent thing on it.
  */
-export default function OrderPlaced({ order, signedIn }) {
+export default function OrderPlaced({ order, signedIn, storeCredit = 0 }) {
   const copy = TYPE_COPY[order.type] ?? TYPE_COPY.DELIVERY;
   const Icon = copy.icon;
   const currency = order.currency ?? "PKR";
   const address = order.addressSnapshot;
+  // Never below zero: credit can cover the bill exactly, and a negative
+  // "still to pay" would read as the restaurant owing the customer.
+  const stillOwed = Math.max(Number(order.grandTotal ?? 0) - Number(storeCredit ?? 0), 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -73,16 +76,37 @@ export default function OrderPlaced({ order, signedIn }) {
             </p>
           ) : null}
 
-          {/* Stated plainly because nothing was charged: the order is placed
-              unpaid, and a customer who is not expecting to pay at the door
-              finds that out at the worst possible moment. */}
+          {/* Stated plainly because the rest is still to be charged: the order
+              is placed unpaid or part-paid, and a customer who is not
+              expecting to pay at the door finds that out at the worst possible
+              moment. Store credit already taken is named and subtracted — the
+              bill is unchanged, but what is owed is not, and quoting the full
+              total here would have somebody asked twice for the same money. */}
           <p className="rounded-field bg-surface-container-low px-4 py-3 text-body-md text-on-surface-variant">
-            Payment is taken{" "}
-            {order.type === "DELIVERY" ? "when your order arrives" : "at the counter"} —{" "}
-            <strong className="font-semibold text-on-surface">
-              {formatMoney(order.grandTotal, currency)}
-            </strong>
-            .
+            {storeCredit > 0 ? (
+              <>
+                Paid with store credit —{" "}
+                <strong className="font-semibold text-on-surface">{formatMoney(storeCredit, currency)}</strong>.{" "}
+                {stillOwed > 0 ? (
+                  <>
+                    The rest is taken{" "}
+                    {order.type === "DELIVERY" ? "when your order arrives" : "at the counter"} —{" "}
+                    <strong className="font-semibold text-on-surface">{formatMoney(stillOwed, currency)}</strong>.
+                  </>
+                ) : (
+                  <>That covers it, so there is nothing left to pay.</>
+                )}
+              </>
+            ) : (
+              <>
+                Payment is taken{" "}
+                {order.type === "DELIVERY" ? "when your order arrives" : "at the counter"} —{" "}
+                <strong className="font-semibold text-on-surface">
+                  {formatMoney(order.grandTotal, currency)}
+                </strong>
+                .
+              </>
+            )}
           </p>
         </div>
 

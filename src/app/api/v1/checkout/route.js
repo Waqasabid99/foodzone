@@ -50,7 +50,14 @@ export const POST = apiHandler(
      * for guests with no account. The order exists either way; a gateway that
      * refuses leaves it placed and unpaid rather than losing it.
      */
-    const payment = body.payWith
+    /*
+     * Store credit may have settled the bill outright, in which case there is
+     * nothing for a gateway to charge: `createPayment` would refuse an order
+     * that owes nothing, and that refusal would surface as a failed checkout
+     * on an order that is placed and fully paid. A remainder still goes to the
+     * gateway as usual.
+     */
+    const payment = body.payWith && order.paymentState !== "PAID"
       ? await startOnlinePayment({ order, payWith: body.payWith })
       : null;
 

@@ -93,7 +93,8 @@ seeded baseline.
 
 ### Deferred from Phase 2
 
-- [ ] **Orphaned upload sweep** — delete objects uploaded but never confirmed
+- [x] **Orphaned upload sweep** — `sweepOrphanedUploads` deletes objects uploaded
+      but never confirmed, run from the job scheduler or `POST /admin/media/sweep`
 - [ ] **SMS / WhatsApp channels** — provider not chosen yet
 - [ ] **Notification preferences** — per-user, per-type opt-outs
 - [ ] **Distributed rate-limit store** — needed before running several instances
@@ -168,10 +169,13 @@ seeded baseline.
       remove lines after placement behind `orders.edit_items`, and re-run
       `syncOrderPaymentState` so a bill settled and then added to reads
       correctly
-- [ ] **Scheduled orders** — `ordering.max_scheduled_days_ahead` is defined and
-      `promisedAt` is populated, but choosing a future slot is not exposed yet
-- [ ] **Invoice PDF rendering** — the receipt payload is complete; turning it
-      into a PDF is a presentation concern per client
+- [x] **Scheduled orders** — a customer picks a slot, not a minute. The grid comes
+      from the branch's own trading hours, stops a full slot before closing, and
+      holds a per-branch ceiling enforced at checkout rather than only drawn on
+      the page. The kitchen board keeps a pre-order off the pass until there is
+      time to cook it, and counts it separately until then
+- [x] **Invoice PDF rendering** — rendered through pdfkit at
+      `GET /admin/orders/{id}/invoice/pdf`
 
 ## Phase 6 — Pricing, Discounts & Tax
 
@@ -233,9 +237,8 @@ one it turns out to be.
       `x-sfpy-signature` webhook, refunds with the gateway's own 90-day limit,
       and declared credentials. Nothing outside `providers/` changed, as
       predicted. A second gateway is another file, not another feature
-- [ ] **Store credit as tender** — `STORE_CREDIT` is in the method enum and the
-      wallet is modelled, but spending creator credit at checkout depends on
-      Phase 12
+- [x] **Store credit as tender** — built with Phase 13's wallet; see **Store
+      credit as a tender at checkout** there for what it does
 - [ ] **Driver cash-in-hand and handover** — COD collected by a driver is
       recorded against a session today; the driver-specific float, reconciliation
       and handover flow belong with drivers in Phase 8
@@ -728,7 +731,9 @@ calendar screen; nothing creates next year automatically.
 - [ ] **Device pull/sync** — terminals push to `/devices/punches`. Polling a
       device over its own vendor protocol needs a per-vendor adapter and a
       worker that can reach the LAN the device sits on
-- [ ] **Payslip PDFs** — `pdfUrl` is modelled; rendering and storing the
+- [x] **Payslip PDFs** — rendered through pdfkit for an admin and for the
+      employee themselves; the payslip shows the arithmetic, not just the
+      answer. Previously: `pdfUrl` is modelled; rendering and storing the
       document is its own piece of work
 - [ ] **Statutory deductions** — provident fund, income tax and social security
       are expressible as salary components, but the rules that compute them per
@@ -799,10 +804,15 @@ calendar screen; nothing creates next year automatically.
 
 ### Deferred from Phase 13
 
-- [ ] **Store credit as a tender at checkout** — the wallet, the redemption
-      quote and the cap are built, and `Payment.method` has `STORE_CREDIT`, but
-      the checkout path does not yet accept it. `redeem()` is written and
-      transactional, waiting on a checkout that calls it
+- [x] **Store credit as a tender at checkout** — `POST /checkout` takes a
+      `storeCredit` amount, re-derives the ceiling rather than trusting it, and
+      spends the credit inside the order's own transaction: the ledger debit,
+      the `STORE_CREDIT` payment and the order commit together or not at all.
+      The bill is unchanged — credit pays it, it does not discount it — so the
+      receipt posts against customer credit rather than cash. Refused outright
+      when over the cap, because spending less than asked quietly charges the
+      difference to a card. The checkout page offers it, says why the cap bites,
+      and the confirmation states what is left to pay
 - [ ] **Video transcoding and moderation automation** — uploads are validated on
       declared duration and size; a real pipeline would probe the file, generate
       thumbnails, and pre-screen for nudity before a human sees it

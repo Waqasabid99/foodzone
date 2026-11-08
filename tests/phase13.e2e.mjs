@@ -755,6 +755,86 @@ async function main() {
   const smallOrder = await api("/me/creator/wallet/redeemable?orderTotal=100", { token: creatorToken });
   check("and never exceeds half a small order", num(smallOrder.body.data.redeemable) === 50, smallOrder.body?.data);
 
+  // ================= STORE CREDIT AS A TENDER =================
+  /*
+   * Credit is a way to pay, not a discount. The bill is unchanged and a
+   * `STORE_CREDIT` payment settles part of it — which is the whole reason the
+   * money lands against customer credit in the ledger rather than cash: the
+   * restaurant was paid when the creator earned it, and booking it as a
+   * receipt would count the same money twice.
+   */
+  const spendSession = `sess-${stamp}-spend`;
+  addedToCart(await api("/cart/items", {
+    method: "POST",
+    token: creatorToken,
+    session: spendSession,
+    body: { branchId, type: "DINE_IN", productId, quantity: 1 },
+  }));
+
+  const spendCart = await api("/cart", { token: creatorToken, session: spendSession });
+  const spendTotal = num(spendCart.body?.data?.totals?.grandTotal);
+  const quoted = await api(`/me/creator/wallet/redeemable?orderTotal=${spendTotal}`, { token: creatorToken });
+  const ceiling = num(quoted.body?.data?.redeemable);
+  check("the wallet quotes a ceiling for this basket", ceiling > 0 && ceiling <= spendTotal, { spendTotal, body: quoted.body?.data });
+
+  // Asking for a rupee more than the cap allows is refused outright rather
+  // than quietly reduced: the difference would land on a card the customer
+  // did not expect to use.
+  const tooMuch = await api("/checkout", {
+    method: "POST",
+    token: creatorToken,
+    session: spendSession,
+    body: { branchId, type: "DINE_IN", storeCredit: ceiling + 1 },
+  });
+  check("more credit than the cap allows is refused", tooMuch.status === 400, { status: tooMuch.status, error: tooMuch.body?.error?.message });
+  check("and the refusal says what the most is", /most that can be spent/.test(tooMuch.body?.error?.details?.storeCredit?.[0] ?? ""), tooMuch.body?.error?.details);
+
+  const beforeSpend = num((await api("/me/creator/wallet", { token: creatorToken })).body?.data?.wallet?.balance);
+
+  const spent = await api("/checkout", {
+    method: "POST",
+    token: creatorToken,
+    session: spendSession,
+    body: { branchId, type: "DINE_IN", storeCredit: ceiling },
+  });
+  check("an order can be paid with store credit", spent.status === 201, spent.body?.error);
+  const creditOrderId = spent.body?.data?.id;
+
+  const creditPayment = await prisma.payment.findFirst({
+    where: { orderId: creditOrderId, method: "STORE_CREDIT" },
+    select: { id: true, amount: true, status: true, provider: true, capturedAt: true },
+  });
+  check("a STORE_CREDIT payment records what settled the bill", num(creditPayment?.amount) === ceiling, creditPayment);
+  check("captured on creation, with no gateway to wait for", creditPayment?.status === "CAPTURED" && Boolean(creditPayment?.capturedAt), creditPayment);
+  check("and no provider, because none was involved", creditPayment?.provider === null, creditPayment);
+
+  const creditOrder = await prisma.order.findUnique({
+    where: { id: creditOrderId },
+    select: { grandTotal: true, paymentState: true },
+  });
+  check("the bill itself is untouched — credit paid it, it did not discount it", num(creditOrder?.grandTotal) === spendTotal, { creditOrder, spendTotal });
+  check(
+    "and the derived state says how much is settled",
+    creditOrder?.paymentState === (ceiling >= spendTotal ? "PAID" : "PARTIALLY_PAID"),
+    { paymentState: creditOrder?.paymentState, ceiling, spendTotal },
+  );
+
+  const afterSpend = await api("/me/creator/wallet", { token: creatorToken });
+  check("the balance comes down by what was spent", num(afterSpend.body?.data?.wallet?.balance) === beforeSpend - ceiling, { before: beforeSpend, after: afterSpend.body?.data?.wallet?.balance, ceiling });
+  const redemption = (afterSpend.body?.data?.transactions?.items ?? []).find((row) => row.type === "REDEMPTION");
+  check("the ledger records the redemption as a debit", num(redemption?.amount) === -ceiling, redemption);
+  check("pointing at the order it paid for", redemption?.orderId === creditOrderId, redemption);
+
+  // The loop has to close both ways: credit spent on an order that is then
+  // cancelled has to come back, or a customer loses it for food they never got.
+  await api(`/admin/orders/${creditOrderId}/cancel`, { method: "POST", token: adminToken, body: { reason: "testing the refund path" } });
+  await drainOutbox();
+
+  const afterCancel = await api("/me/creator/wallet", { token: creatorToken });
+  check("cancelling the order returns the credit", num(afterCancel.body?.data?.wallet?.balance) === beforeSpend, { before: beforeSpend, after: afterCancel.body?.data?.wallet?.balance });
+  const reversal = (afterCancel.body?.data?.transactions?.items ?? []).find((row) => row.type === "REDEMPTION_REVERSAL");
+  check("as a reversal row rather than an edit to the debit", num(reversal?.amount) === ceiling, reversal);
+
   // ================= SELF PURCHASE =================
   const selfSession = `sess-${stamp}-self`;
   addedToCart(await api("/cart/items", {

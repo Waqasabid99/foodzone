@@ -25,6 +25,7 @@ export default function CheckoutSummary({
   blockers,
   pending,
   onPlace,
+  storeCredit = 0,
 }) {
   const figures = totals ?? {};
   const blocked = blockers.length > 0 || Boolean(quoteError);
@@ -81,6 +82,24 @@ export default function CheckoutSummary({
             )}
           </dd>
         </div>
+
+        {/*
+          Below the total, not among the lines above it, because credit is a way
+          of paying rather than a discount: the bill is what it is, and this is
+          how much of it is already covered. Folding it into the total would
+          misstate the order and the receipt would not match.
+        */}
+        {storeCredit > 0 ? (
+          <>
+            <Row label="Paid by store credit" value={`− ${formatMoney(storeCredit, currency)}`} tone="success" />
+            <div className="flex items-baseline justify-between gap-3">
+              <dt className="text-label-bold text-on-surface">Left to pay</dt>
+              <dd className="text-label-bold text-on-surface">
+                {formatMoney(Math.max(Number(figures.grandTotal ?? 0) - storeCredit, 0), currency)}
+              </dd>
+            </div>
+          </>
+        ) : null}
       </dl>
 
       {quoteError ? (

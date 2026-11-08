@@ -167,6 +167,18 @@ export const checkoutSchema = z.object({
    * that was never offered is refused rather than quietly accepted.
    */
   scheduledFor: z.coerce.date().optional(),
+  /**
+   * How much store credit to spend on this order.
+   *
+   * An amount, not a flag, because the customer is shown a figure before they
+   * agree to it — `GET /me/creator/wallet/redeemable` quotes the ceiling for a
+   * given total. The amount is re-checked against that ceiling at checkout
+   * rather than trusted: the balance may have been spent on another order, and
+   * the program's cap may have changed, since the page was drawn.
+   *
+   * Only a signed-in creator has a wallet, so this is refused for a guest.
+   */
+  storeCredit: moneySchema.optional(),
 });
 
 export const quoteSchema = z.object({

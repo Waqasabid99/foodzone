@@ -4,6 +4,8 @@ import { phoneKey } from "@/lib/phone-key";
 import { withRetryingTransaction } from "@/server/utils/db";
 import { getSettings } from "@/server/services/setting.service";
 import { resolveScheduledSlot } from "@/server/services/slot.service";
+import { redeemableFor, redeem } from "@/server/services/creator-wallet.service";
+import { syncOrderPaymentState } from "@/server/services/payment.service";
 import { getBranch } from "@/server/services/branch.service";
 import { nextDocumentNumber, dayPeriodKey } from "@/server/utils/sequence";
 import { priceOrder } from "@/server/pricing/engine";
@@ -29,6 +31,22 @@ import { validateCoupon } from "@/server/services/coupon.service";
  */
 
 /** Order numbers reset daily per branch: "KHI1-2026-09-09-0042". */
+/**
+ * Why a wallet cannot pay for this order, in words a customer can act on.
+ *
+ * `redeemableFor` returns a code because it is also read by the dashboard; a
+ * checkout has to say what to do about it instead. "No credit available" would
+ * be wrong for three of these four: the money is there, something else is
+ * stopping it being spent, and a customer told the wrong reason contacts
+ * support rather than fixing it.
+ */
+const REDEMPTION_REFUSALS = {
+  NOT_A_CREATOR: "This account has no store credit",
+  WALLET_FROZEN: "This wallet is on hold — please contact support",
+  NO_BALANCE: "There is no store credit left to spend",
+  BELOW_MINIMUM: "The balance is below the smallest amount that can be redeemed",
+};
+
 async function allocateOrderNumber(tx, { branch, at }) {
   return nextDocumentNumber(tx, {
     documentType: "ORDER",
@@ -257,6 +275,7 @@ export async function placeOrder({
   cartId = null,
   couponCode = null,
   scheduledFor = null,
+  storeCredit = 0,
   at = new Date(),
 }) {
   if (!items?.length) throw ApiError.validation("Your cart is empty", { items: ["Add at least one item"] });
@@ -340,6 +359,49 @@ export async function placeOrder({
     throw ApiError.validation("A name is required for a guest order", {
       guest: ["A name, or a table for a dine-in order"],
     });
+  }
+
+  /*
+   * Store credit, settled before a single row is written.
+   *
+   * The ceiling is re-derived here rather than taken from the request. The
+   * page that quoted it may have sat open while another order spent the
+   * balance, and the cap itself is a program setting an admin can change — so
+   * the figure the customer agreed to is a claim to check, not a fact.
+   *
+   * Refused rather than quietly reduced. Spending less credit than asked means
+   * charging the difference to a card, and a customer who chose to pay with
+   * credit finds out from their statement. `redeemableFor` applies the
+   * program's own rules — a frozen wallet, the minimum redemption, the
+   * percentage cap — so the reason given back is the real one.
+   */
+  const creditRequested = Number(storeCredit ?? 0);
+  if (creditRequested > 0) {
+    if (!userId) {
+      throw ApiError.validation("Store credit needs an account", {
+        storeCredit: ["Sign in to spend store credit"],
+      });
+    }
+
+    const quote = await redeemableFor({ userId, orderTotal: priced.grandTotal });
+    const ceiling = Number(quote.redeemable);
+
+    if (ceiling <= 0) {
+      throw ApiError.conflict("That store credit cannot be spent on this order", {
+        storeCredit: [REDEMPTION_REFUSALS[quote.reason] ?? "No credit is available to spend"],
+        available: quote.available,
+        ...(quote.minimum ? { minimum: quote.minimum } : {}),
+      });
+    }
+
+    if (creditRequested > ceiling) {
+      throw ApiError.validation("That is more store credit than this order can take", {
+        storeCredit: [`The most that can be spent here is ${ceiling}`],
+        redeemable: quote.redeemable,
+        available: quote.available,
+        ...(quote.maxPercent ? { maxPercent: quote.maxPercent } : {}),
+      });
+    }
   }
 
   const prepMinutes = Math.max(
@@ -577,6 +639,57 @@ export async function placeOrder({
       await tx.cart.update({ where: { id: cartId }, data: { couponCode: null } });
     }
 
+    /*
+     * Store credit spent, inside the order's own transaction.
+     *
+     * Three rows have to agree or none of them may exist: the ledger entry
+     * that takes the credit, the `STORE_CREDIT` payment that records what
+     * settled the bill, and the order itself. Written after the order so the
+     * payment has something to point at, and before the commit so a customer
+     * can never end up with an order whose credit was never taken — or credit
+     * taken for an order that was rolled back.
+     *
+     * `post()` inside `redeem()` refuses to overdraw, so the race this cannot
+     * prevent — the balance being spent elsewhere between the check above and
+     * here — fails the whole checkout rather than half-paying an order.
+     */
+    if (creditRequested > 0) {
+      const creditPayment = await tx.payment.create({
+        data: {
+          orderId: createdOrder.id,
+          branchId,
+          method: "STORE_CREDIT",
+          // No gateway is involved: the money arrived when the creator earned
+          // it, and this is the liability being settled.
+          provider: null,
+          // Settled on creation rather than pending a capture. There is
+          // nothing to capture — the balance moves in this transaction.
+          status: "CAPTURED",
+          amount: creditRequested,
+          currency: branch.currency ?? "PKR",
+          capturedAt: at,
+          // Keyed on the order so a retried checkout cannot pay twice from the
+          // wallet, matching the key `redeem()` uses on the ledger side.
+          idempotencyKey: `store-credit:${createdOrder.id}`,
+        },
+        select: { id: true },
+      });
+
+      await redeem({
+        tx,
+        userId,
+        orderId: createdOrder.id,
+        amount: creditRequested,
+        paymentId: creditPayment.id,
+      });
+
+      // Derived from the rows just written, never assigned: credit may cover
+      // the bill in full or leave a remainder for a card.
+      await syncOrderPaymentState(tx, createdOrder.id);
+
+      return { ...createdOrder, storeCreditPaymentId: creditPayment.id };
+    }
+
     return createdOrder;
   });
 
@@ -586,6 +699,23 @@ export async function placeOrder({
     eventType: "order.placed",
     payload: { orderId: order.id },
   });
+
+  /*
+   * The same announcement a capture at the till raises, so store credit
+   * reaches the ledger by the one path every other tender uses: the handler
+   * for this fans out to `finance.payment_captured`, which posts the receipt
+   * against customer credit rather than cash — the liability is being settled,
+   * not money arriving.
+   *
+   * Enqueued after the commit, like `order.placed`: a posting failure must not
+   * undo an order the customer has already been charged for.
+   */
+  if (order.storeCreditPaymentId) {
+    await enqueue({
+      eventType: "payment.captured",
+      payload: { paymentId: order.storeCreditPaymentId, orderId: order.id },
+    });
+  }
 
   return order.id;
 }
@@ -627,6 +757,7 @@ export async function checkoutCart({ cart, userId, guest, input, channel = "WEB"
     // The code lives on the cart, so a customer who applied it on the website
     // and checks out from the app still gets it.
     couponCode: input.couponCode ?? cart.couponCode ?? null,
+    storeCredit: input.storeCredit ?? 0,
     at,
   });
 }

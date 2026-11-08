@@ -15,6 +15,7 @@ import { loadCart, setCartType, useCart } from "@/hooks/useCart";
 import { useSession } from "@/hooks/useSession";
 import { checkoutBlockers, checkoutPayload, checkoutRequirements, quoteItems } from "@/lib/checkout";
 import PaymentChoice from "@/components/checkout/PaymentChoice";
+import StoreCreditPicker from "@/components/checkout/StoreCreditPicker";
 import { toFormErrors } from "@/lib/form-errors";
 import { loginHref } from "@/lib/redirects";
 import { formatMoney } from "@/lib/format";
@@ -87,8 +88,28 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
   const [tip, setTip] = useState(0);
   const [tipCustom, setTipCustom] = useState("");
   const [quote, setQuote] = useState({ key: null, totals: null, error: null });
+  /*
+   * Store credit: the server's quote, and the customer's answer to it.
+   *
+   * The offer carries the total it was quoted for, the same way `quote` does,
+   * so a stale ceiling is spotted by comparison rather than cleared by a
+   * `setState` in an effect body. The amount sent at checkout is always the
+   * current ceiling, never a figure this page worked out, and the server
+   * checks it again before spending anything.
+   */
+  const [creditOffer, setCreditOffer] = useState({ key: null, available: 0, redeemable: 0, maxPercent: null });
+  const [creditApplied, setCreditApplied] = useState(false);
   const [placing, setPlacing] = useState(false);
   const [order, setOrder] = useState(null);
+  /*
+   * What the order that was just placed paid with credit.
+   *
+   * Held separately from `credit`, because placing empties the cart, which
+   * re-quotes, which clears the offer — and the receipt still has to say what
+   * was spent. A 201 means the server accepted exactly this amount; anything
+   * above the ceiling would have been refused.
+   */
+  const [placedCredit, setPlacedCredit] = useState(0);
   const [switching, setSwitching] = useState(false);
 
   const signedIn = sessionStatus === "authenticated";
@@ -171,10 +192,60 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
     };
   }, [quoteKey]);
 
+  /*
+   * What the wallet can put toward this bill.
+   *
+   * Keyed on the quoted total, because the ceiling is a percentage of it: a
+   * tip or a coupon moves the total, which moves the most credit this order
+   * may take. Asked only of a signed-in customer, and any failure — no wallet,
+   * no permission, the program switched off — leaves the offer empty and the
+   * control hidden rather than interrupting a checkout over an optional way
+   * to pay.
+   */
+  const creditKey = signedIn && quote.totals?.grandTotal ? String(quote.totals.grandTotal) : null;
+
+  useEffect(() => {
+    if (!creditKey) return undefined;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const offer = await api.get(`/me/creator/wallet/redeemable?orderTotal=${encodeURIComponent(creditKey)}`);
+        if (cancelled) return;
+        setCreditOffer({
+          key: creditKey,
+          available: Number(offer.available ?? 0),
+          redeemable: Number(offer.redeemable ?? 0),
+          maxPercent: offer.maxPercent ?? null,
+        });
+      } catch {
+        if (!cancelled) setCreditOffer({ key: creditKey, available: 0, redeemable: 0, maxPercent: null });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [creditKey]);
+
+  /*
+   * Only an offer quoted for the total now on screen counts. While a re-quote
+   * is in flight the control disappears rather than offering a ceiling that
+   * belonged to a different bill.
+   *
+   * `applied` survives the total moving — a customer who said yes stays
+   * said-yes and the amount follows the new ceiling — but it can only ever
+   * spend what the current offer allows.
+   */
+  const credit = creditOffer.key === creditKey && creditKey
+    ? creditOffer
+    : { available: 0, redeemable: 0, maxPercent: null };
+  const creditToSpend = creditApplied && credit.redeemable > 0 ? credit.redeemable : 0;
+
   if (order) {
     return (
       <Page title="Order confirmed" subtitle="We've sent it through to the kitchen.">
-        <OrderPlaced order={order} signedIn={signedIn} />
+        <OrderPlaced order={order} signedIn={signedIn} storeCredit={placedCredit} />
       </Page>
     );
   }
@@ -252,6 +323,7 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
           tipAmount: tip,
           tableId,
           payWith,
+          storeCredit: creditToSpend,
         }),
       );
 
@@ -275,6 +347,7 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
       // The server emptied the cart inside the same transaction; refresh the
       // local copy so the header badge and every other reader agree.
       loadCart({ force: true });
+      setPlacedCredit(creditToSpend);
       setOrder(placed);
     } catch (error) {
       const { fieldErrors, formError } = toFormErrors(error, { fields: GUEST_FIELDS });
@@ -462,6 +535,17 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
           </Section>
         ) : null}
 
+        {/* Before the gateway choice, because applying credit changes how much
+            is left for a gateway to take — and may leave nothing at all. */}
+        <StoreCreditPicker
+          available={credit.available}
+          redeemable={credit.redeemable}
+          maxPercent={credit.maxPercent}
+          currency={lineCurrency}
+          applied={creditToSpend > 0}
+          onChange={setCreditApplied}
+        />
+
         <Section title="Payment">
           <PaymentChoice options={payOptions} value={payWith} onChange={setPayWith} orderType={type} />
         </Section>
@@ -499,6 +583,7 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
           blockers={blockers}
           pending={placing}
           onPlace={place}
+          storeCredit={creditToSpend}
         />
       </div>
     </Page>

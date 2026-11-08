@@ -193,7 +193,7 @@ export function parseTip(input) {
  * checking out from the app. Sending it back would only create a chance to send
  * a stale one.
  */
-export function checkoutPayload({ cart, signedIn, addressId, guest, guestCount, note, tipAmount, tableId = null, payWith = null }) {
+export function checkoutPayload({ cart, signedIn, addressId, guest, guestCount, note, tipAmount, tableId = null, payWith = null, storeCredit = 0 }) {
   const { needsAddress, needsContact, wantsGuestCount, acceptsTip } = checkoutRequirements({
     type: cart?.type,
     signedIn,
@@ -214,6 +214,13 @@ export function checkoutPayload({ cart, signedIn, addressId, guest, guestCount, 
     // Absent means settle in person, which stays the default. Only sent when
     // the customer actually picked a gateway.
     ...(payWith ? { payWith } : {}),
+    /*
+     * Store credit, only when there is some to spend and the customer applied
+     * it. Omitted rather than sent as zero: the server reads any positive
+     * amount as "spend this", and a stray zero on a guest checkout would be
+     * refused for having no account rather than ignored.
+     */
+    ...(storeCredit > 0 ? { storeCredit } : {}),
     ...(needsContact
       ? {
           guest: {

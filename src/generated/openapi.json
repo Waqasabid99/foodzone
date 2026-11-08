@@ -56591,7 +56591,12 @@
                     "minLength": 2,
                     "maxLength": 40
                   },
-                  "scheduledFor": {}
+                  "scheduledFor": {},
+                  "storeCredit": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 99999999
+                  }
                 }
               }
             }
