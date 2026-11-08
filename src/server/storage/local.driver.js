@@ -56,6 +56,18 @@ export const localDriver = {
     return { sizeBytes: buffer.byteLength };
   },
 
+  /**
+   * Writes bytes we produced ourselves.
+   *
+   * The upload flow has no path for this: it signs a target for a *client* to
+   * send to. A PDF rendered on the server has no client, so every driver needs
+   * one way to put bytes somewhere directly.
+   */
+  async putObject({ storageKey, buffer }) {
+    const result = await this.writeObject({ storageKey, buffer });
+    return { ...result, url: this.publicUrl({ storageKey }) };
+  },
+
   async readObject({ storageKey }) {
     return fs.readFile(resolveLocalPath(storageKey));
   },
@@ -77,6 +89,56 @@ export const localDriver = {
       // Already gone is the desired end state, not an error.
       if (error.code !== "ENOENT") throw error;
     }
+  },
+
+  /**
+   * Everything in the upload root, for the orphan sweep.
+   *
+   * `mtime` rather than `birthtime`: not every filesystem records a creation
+   * time, and the ones that do not report it as the epoch — which would make
+   * every file look ancient to a sweep that deletes by age.
+   *
+   * A missing root is an empty listing, not an error: a fresh install has
+   * never taken an upload.
+   */
+  async listObjects({ limit = 1000 } = {}) {
+    const base = root();
+    const objects = [];
+
+    async function walk(directory) {
+      if (objects.length >= limit) return;
+
+      let entries;
+      try {
+        entries = await fs.readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if (error.code === "ENOENT") return;
+        throw error;
+      }
+
+      for (const entry of entries) {
+        if (objects.length >= limit) return;
+        const full = path.join(directory, entry.name);
+
+        if (entry.isDirectory()) {
+          await walk(full);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+
+        const stat = await fs.stat(full);
+        objects.push({
+          // Posix separators, because that is the shape of a storage key on
+          // every other driver and the sweep compares keys as strings.
+          storageKey: path.relative(base, full).split(path.sep).join("/"),
+          uploadedAt: stat.mtime,
+          sizeBytes: stat.size,
+        });
+      }
+    }
+
+    await walk(base);
+    return { objects, cursor: null };
   },
 
   publicUrl({ storageKey }) {

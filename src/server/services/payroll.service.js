@@ -550,6 +550,28 @@ export async function getPayslip(id) {
 }
 
 /**
+ * Refuses unless this payslip is the caller's own, and final.
+ *
+ * The same two rules `myPayslips` lists by, enforced for a single record —
+ * because a list endpoint that filters correctly and a detail endpoint that
+ * forgets to is the classic way one of these leaks. A draft is excluded even
+ * from its own employee: it is not yet a statement of what they are owed.
+ */
+export async function assertOwnPayslip({ userId, payslipId }) {
+  const payslip = await prisma.payslip.findUnique({
+    where: { id: payslipId },
+    select: { id: true, status: true, employee: { select: { userId: true } } },
+  });
+
+  // The same answer for "no such payslip" and "not yours": a stranger probing
+  // ids should not learn which ones exist.
+  if (!payslip || payslip.employee?.userId !== userId) throw ApiError.notFound("Payslip not found");
+  if (!["APPROVED", "PAID"].includes(payslip.status)) throw ApiError.notFound("Payslip not found");
+
+  return payslip;
+}
+
+/**
  * The payslip an employee can see: their own.
  *
  * A separate path from `getPayslip` on purpose. Reading anybody's payslip needs

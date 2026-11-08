@@ -6,6 +6,7 @@ import { storage, storageDriverName } from "@/server/storage";
 import { assertUploadAllowed, buildStorageKey, resolveKind, uploadPolicies } from "@/server/storage/policy";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
+import { isSweepableKey, planUploadSweep, SWEEP_GRACE_MINUTES, SWEEP_LIMIT } from "@/server/ops/upload-sweep";
 
 /**
  * Uploads happen in three steps:
@@ -239,4 +240,146 @@ export async function attachAsset({ id, ownerType, ownerId }) {
     data: { ownerType, ownerId },
   });
   return assetView(updated);
+}
+
+/**
+ * Deletes objects that were uploaded but never confirmed.
+ *
+ * The three-step flow above writes the `MediaAsset` row at confirm, so a
+ * client that asks for a ticket, sends the bytes and then closes the tab
+ * leaves a file in the bucket that nothing in the database points to. Nobody
+ * will ever see it again and it is billed every month, so something has to go
+ * and look.
+ *
+ * It has to look at the *bucket*, not the database: the defining property of
+ * an orphan is that no row mentions it. That makes this the only housekeeping
+ * job that deletes data with no transaction behind it, so the rules live in
+ * `planUploadSweep`, where they are unit-tested, and this function does only
+ * the parts that need the provider and the database:
+ *
+ *   * page through the bucket, with a budget, so a huge bucket is swept across
+ *     several runs rather than one request that times out;
+ *   * ask the database about *only the keys on this page* — a `storageKey IN
+ *     (...)` of a few hundred, never a full table read;
+ *   * delete one object at a time, and let a single failure be logged and
+ *     skipped rather than abandoning the run.
+ *
+ * `dryRun` reports exactly what it would delete and touches nothing, which is
+ * how this should be run the first time against any real bucket.
+ */
+export async function sweepOrphanedUploads({
+  dryRun = false,
+  minAgeMinutes = SWEEP_GRACE_MINUTES,
+  limit = SWEEP_LIMIT,
+  maxPages = 20,
+  now = new Date(),
+} = {}) {
+  const driver = await storage();
+  const driverName = storageDriverName();
+
+  if (typeof driver.listObjects !== "function") {
+    // A driver that cannot enumerate cannot be swept. Say so rather than
+    // reporting a clean bucket, which is the same output as "found nothing".
+    logger.warn("upload sweep skipped: driver cannot list objects", { driver: driverName });
+    return { driver: driverName, skipped: true, reason: "DRIVER_CANNOT_LIST", deleted: 0, bytes: 0 };
+  }
+
+  const totals = {
+    driver: driverName,
+    dryRun,
+    scanned: 0,
+    deleted: 0,
+    failed: 0,
+    bytes: 0,
+    deferred: 0,
+    counts: { confirmed: 0, tooNew: 0, undated: 0, ignored: 0 },
+    pages: 0,
+  };
+  const removed = [];
+  let cursor = null;
+  let budget = limit;
+
+  for (let page = 0; page < maxPages && budget > 0; page += 1) {
+    const listing = await driver.listObjects({ limit: 500, cursor });
+    totals.pages += 1;
+    const objects = listing?.objects ?? [];
+
+    // Only the keys we could ever delete are worth a database round trip.
+    const candidateKeys = objects.map((object) => object.storageKey).filter((key) => isSweepableKey(key));
+    const known = candidateKeys.length
+      ? await prisma.mediaAsset.findMany({ where: { storageKey: { in: candidateKeys } }, select: { storageKey: true } })
+      : [];
+
+    const plan = planUploadSweep({
+      objects,
+      knownKeys: new Set(known.map((row) => row.storageKey)),
+      now,
+      minAgeMinutes,
+      limit: budget,
+    });
+
+    totals.scanned += plan.scanned;
+    totals.deferred += plan.deferred;
+    for (const reason of Object.keys(totals.counts)) totals.counts[reason] += plan.counts[reason];
+
+    for (const storageKey of plan.remove) {
+      const object = objects.find((candidate) => candidate.storageKey === storageKey);
+      const size = Number(object?.sizeBytes ?? 0);
+
+      if (dryRun) {
+        removed.push(storageKey);
+        totals.deleted += 1;
+        totals.bytes += size;
+        budget -= 1;
+        continue;
+      }
+
+      try {
+        await driver.deleteObject({ storageKey, kind: resolveKind(mimeFromKey(storageKey)) });
+        removed.push(storageKey);
+        totals.deleted += 1;
+        totals.bytes += size;
+      } catch (error) {
+        // One object that refuses to go must not cost the rest of the run.
+        totals.failed += 1;
+        logger.error("failed to sweep an orphaned upload", { storageKey, driver: driverName, error: error.message });
+      }
+      budget -= 1;
+    }
+
+    cursor = listing?.cursor ?? null;
+    if (!cursor) break;
+  }
+
+  // Logged whatever the outcome: a sweep that deleted nothing is the normal
+  // case, and the only way to know it ran is this line.
+  logger[totals.deleted || totals.failed ? "warn" : "info"]("orphaned upload sweep", {
+    driver: driverName,
+    dryRun,
+    scanned: totals.scanned,
+    deleted: totals.deleted,
+    failed: totals.failed,
+    bytes: totals.bytes,
+    deferred: totals.deferred,
+    ...totals.counts,
+  });
+
+  // The keys are returned for a dry run — somebody deciding whether to let this
+  // loose on a real bucket needs to see the list, not a count.
+  return { ...totals, removed: dryRun ? removed : removed.length };
+}
+
+/**
+ * The mime type a key implies, from its extension.
+ *
+ * Only the *kind* matters here (image, video, raw), because that is all
+ * `deleteObject` needs to find the object on a provider that partitions by
+ * type. A key with an extension we do not recognise is treated as a document,
+ * which is the kind whose delete path makes no assumptions.
+ */
+function mimeFromKey(storageKey) {
+  const extension = String(storageKey).split(".").pop()?.toLowerCase() ?? "";
+  if (["jpg", "jpeg", "png", "webp", "gif", "avif", "svg"].includes(extension)) return `image/${extension}`;
+  if (["mp4", "mov", "webm", "m4v"].includes(extension)) return `video/${extension}`;
+  return "application/octet-stream";
 }

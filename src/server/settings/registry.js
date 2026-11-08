@@ -375,6 +375,34 @@ export const SETTINGS = [
     schema: z.number().int().min(0).max(60),
     isPublic: true,
   },
+  {
+    key: "ordering.slot_minutes",
+    label: "How long a scheduled pickup or delivery slot is",
+    type: "number",
+    default: 30,
+    // Floored at 5 so a slot is a slot rather than a timestamp, and capped at
+    // four hours so a day still has more than one of them.
+    schema: z.number().int().min(5).max(240),
+    isPublic: true,
+  },
+  {
+    key: "ordering.slot_capacity",
+    label: "How many scheduled orders one slot may hold",
+    type: "number",
+    /*
+     * Zero means no ceiling, which is the honest default: the right number is
+     * a property of a particular kitchen on a particular night and nobody but
+     * the manager knows it. A guessed ceiling would start refusing real orders
+     * on the first Friday.
+     */
+    default: 0,
+    schema: z.number().int().min(0).max(500),
+    isPublic: true,
+    // Per branch: how many orders one slot can hold is a fact about a
+    // particular kitchen's hands and benches, not a chain-wide policy. A
+    // flagship with three chefs and a two-person satellite share nothing here.
+    branchOverridable: true,
+  },
 
   // --- operational ---------------------------------------------------------
   {

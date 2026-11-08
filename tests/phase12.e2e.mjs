@@ -851,6 +851,60 @@ async function main() {
   check("and sees exactly one", mine.body.data.length === 1, mine.body?.data?.length);
   check("with its lines", mine.body.data[0].lines.length >= 3, mine.body?.data?.[0]?.lines);
 
+  // --- the payslip as a file ---
+  //
+  // This is the one document in the system an employee is entitled to receive
+  // and the one most likely to be handed to somebody else — a landlord, a
+  // bank. Fetched raw, because the endpoint returns bytes rather than the
+  // JSON envelope.
+  async function fetchPdf(pathname, token) {
+    const res = await fetch(`${BASE}/api/v1${pathname}`, {
+      headers: { "x-forwarded-for": nextIp(), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    });
+    const bytes = Buffer.from(await res.arrayBuffer());
+    return {
+      status: res.status,
+      type: res.headers.get("content-type"),
+      disposition: res.headers.get("content-disposition"),
+      isPdf: bytes.subarray(0, 5).toString("latin1") === "%PDF-" && bytes.subarray(-6).toString("latin1").includes("%%EOF"),
+    };
+  }
+
+  const mySlipId = mine.body.data[0].id;
+  const ownPdf = await fetchPdf(`/me/payslips/${mySlipId}/pdf`, staffToken);
+  check("an employee can download their own payslip", ownPdf.status === 200 && ownPdf.isPdf, ownPdf);
+  check("it arrives as a file to save, not a page to look at", ownPdf.disposition?.startsWith("attachment"), ownPdf.disposition);
+
+  const storedSlip = await prisma.payslip.findUnique({ where: { id: mySlipId }, select: { pdfUrl: true } });
+  check("an approved payslip keeps its rendered copy", Boolean(storedSlip?.pdfUrl), storedSlip);
+
+  // Somebody else's. The answer must be the same as for a payslip that does
+  // not exist, or an id probe tells a stranger which ones do.
+  const otherSlip = await prisma.payslip.findFirst({
+    where: { periodId, id: { not: mySlipId } },
+    select: { id: true },
+  });
+  if (otherSlip) {
+    const theirs = await fetchPdf(`/me/payslips/${otherSlip.id}/pdf`, staffToken);
+    check("an employee cannot download somebody else's payslip", theirs.status === 404, theirs.status);
+  }
+
+  const adminPdf = await fetchPdf(`/admin/payslips/${mySlipId}/pdf`, adminToken);
+  check("payroll can download anybody's", adminPdf.status === 200 && adminPdf.isPdf, adminPdf.status);
+
+  const staffAdminPdf = await fetchPdf(`/admin/payslips/${mySlipId}/pdf`, staffToken);
+  check("but the admin route still needs the permission", staffAdminPdf.status === 403, staffAdminPdf.status);
+
+  // A draft is not a statement of what anybody is owed yet, so no copy of it
+  // is kept — the figures can still be regenerated underneath it.
+  const draftSlip = await prisma.payslip.findFirst({ where: { status: "DRAFT" }, select: { id: true } });
+  if (draftSlip) {
+    const draftPdf = await fetchPdf(`/admin/payslips/${draftSlip.id}/pdf`, adminToken);
+    check("a draft payslip renders for review", draftPdf.status === 200 && draftPdf.isPdf, draftPdf.status);
+    const storedDraft = await prisma.payslip.findUnique({ where: { id: draftSlip.id }, select: { pdfUrl: true } });
+    check("but a draft is never stored", storedDraft?.pdfUrl === null, storedDraft);
+  }
+
   const staffAll = await api(`/admin/payslips?periodId=${periodId}`, { token: staffToken });
   check("reading everybody's still needs the permission", staffAll.status === 403, staffAll.body?.error);
 }

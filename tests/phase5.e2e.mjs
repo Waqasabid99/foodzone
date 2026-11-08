@@ -455,8 +455,125 @@ async function main() {
   check("a promised time is set from the prep time", !!placed.body?.data?.promisedAt, placed.body?.data?.promisedAt);
   check("the first status event is recorded", placed.body?.data?.statusHistory?.length === 1, placed.body?.data?.statusHistory);
 
+  // ================= SCHEDULED ORDERS =================
+  //
+  // Ordering for later is a different promise from ordering now, and every
+  // assertion here is a way that promise gets broken: a slot the kitchen
+  // cannot reach, a slot that filled while the page sat open, a pre-order
+  // printing on the board eight hours early.
+  //
+  // The branch trades 11:00 to 23:00 every day, set here so the grid has
+  // something to be built from.
+  await prisma.branchHour.deleteMany({ where: { branchId } });
+  await prisma.branchHour.createMany({
+    data: Array.from({ length: 7 }, (_, dayOfWeek) => ({ branchId, dayOfWeek, opensAt: 660, closesAt: 1380 })),
+  });
+
+  const slotsToday = await api(`/branches/${branchId}/slots`, {});
+  check("the slots for a branch are public", slotsToday.status === 200, slotsToday.body?.error);
+  check("and come with the calendar a client should offer", slotsToday.body?.data?.dates?.length >= 1, slotsToday.body?.data?.dates);
+  check("the branch's own timezone is stated, not assumed", Boolean(slotsToday.body?.data?.timeZone), slotsToday.body?.data);
+
+  // Tomorrow, so the whole trading day is ahead of the lead time whatever hour
+  // this suite happens to run at.
+  const tomorrow = slotsToday.body.data.dates[1];
+  const grid = await api(`/branches/${branchId}/slots?date=${tomorrow}`, {});
+  check("a future day offers a full grid", grid.body?.data?.slots?.length > 1, grid.body?.data?.slots?.length);
+  check("the first slot is opening time", grid.body?.data?.slots?.[0]?.label === "11:00", grid.body?.data?.slots?.[0]);
+  check("the last slot leaves the kitchen time before closing", grid.body.data.slots.at(-1).label === "22:30", grid.body.data.slots.at(-1));
+
+  const beyond = await api(`/branches/${branchId}/slots?date=2030-01-01`, {});
+  check("a date past the booking window is refused", beyond.status === 400, beyond.status);
+
+  const chosen = grid.body.data.slots.find((slot) => slot.label === "19:00");
+
+  await api("/cart/items", { method: "POST", token: verifiedToken, body: { productId: drinkId, quantity: 2, branchId, type: "DINE_IN" } });
+  const preOrder = await api("/checkout", {
+    method: "POST",
+    token: verifiedToken,
+    body: { type: "DINE_IN", tableId, scheduledFor: chosen.at },
+  });
+  check("an order can be placed for a slot", preOrder.status === 201, preOrder.body);
+  created.orderIds.add(preOrder.body?.data?.id);
+  check("the slot is stored on the order", new Date(preOrder.body.data.scheduledFor).toISOString() === new Date(chosen.at).toISOString(), preOrder.body?.data?.scheduledFor);
+  /*
+   * The promise is the slot, not "now plus twenty minutes". `promisedAt`
+   * drives the kitchen's late warning, so leaving it at the ASAP value would
+   * show every pre-order as overdue from the moment it was placed.
+   */
+  check("a pre-order is promised for its slot", new Date(preOrder.body.data.promisedAt).toISOString() === new Date(chosen.at).toISOString(), preOrder.body?.data?.promisedAt);
+
+  /*
+   * Checked here, against the one checkout above that actually succeeded.
+   * It used to be asserted far below, after three deliberately-refused
+   * checkouts — and passed only because the full-slot refusal was broken and
+   * placed the order anyway, emptying the cart as a side effect. Once the
+   * ceiling was enforced the assertion failed, which is the test having been
+   * in the wrong place rather than the cart being wrong.
+   */
   const emptiedCart = await api("/cart", { token: verifiedToken });
   check("checking out empties the cart in the same transaction", emptiedCart.body?.data?.items?.length === 0, emptiedCart.body?.data?.items);
+
+  await api("/cart/items", { method: "POST", token: verifiedToken, body: { productId: drinkId, quantity: 2, branchId, type: "DINE_IN" } });
+  const offGrid = await api("/checkout", {
+    method: "POST",
+    token: verifiedToken,
+    body: { type: "DINE_IN", tableId, scheduledFor: new Date(new Date(chosen.at).getTime() + 7 * 60_000).toISOString() },
+  });
+  check("a time that was never offered is refused", offGrid.status === 400, { status: offGrid.status, error: offGrid.body?.error?.message });
+
+  const longPast = await api("/checkout", {
+    method: "POST",
+    token: verifiedToken,
+    body: { type: "DINE_IN", tableId, scheduledFor: new Date(Date.now() - 86_400_000).toISOString() },
+  });
+  check("a slot in the past is refused", longPast.status === 400, longPast.status);
+
+  // The ceiling. One order already holds 19:00, so a capacity of one makes it
+  // full — and the refusal has to happen server-side, because the page a
+  // customer is looking at was built before that order existed.
+  const capped = await api("/admin/settings", {
+    method: "PUT",
+    token: adminToken,
+    body: { branchId, values: { "ordering.slot_capacity": 1 } },
+  });
+  check("a branch can cap how many orders a slot holds", capped.status === 200, capped.body);
+
+  const refilled = await api(`/branches/${branchId}/slots?date=${tomorrow}`, {});
+  const nowFull = refilled.body.data.slots.find((slot) => slot.label === "19:00");
+  check("a full slot is still shown, marked full", nowFull && nowFull.available === false, nowFull);
+  check("and says how many places are left", nowFull?.remaining === 0, nowFull);
+
+  const full = await api("/checkout", {
+    method: "POST",
+    token: verifiedToken,
+    body: { type: "DINE_IN", tableId, scheduledFor: chosen.at },
+  });
+  check("a full slot is refused at checkout", full.status === 409, { status: full.status, error: full.body?.error?.message });
+  check("and the refusal suggests a time that is free", /Try /.test(full.body?.error?.message ?? ""), full.body?.error?.message);
+
+  await api("/admin/settings", {
+    method: "PUT",
+    token: adminToken,
+    body: { branchId, values: { "ordering.slot_capacity": 0 } },
+  });
+
+  // The kitchen must not see tomorrow's dinner this morning.
+  await prisma.order.update({ where: { id: preOrder.body.data.id }, data: { status: "CONFIRMED" } });
+  const board = await api(`/admin/kds?branchId=${branchId}`, { token: adminToken });
+  const onBoard = (board.body?.data?.tickets ?? []).some((ticket) => ticket.orderId === preOrder.body.data.id);
+  check("a pre-order is held off the kitchen board until it is due", !onBoard, board.body?.data?.tickets?.map((t) => t.orderNumber));
+
+  const kitchenAhead = await api(`/admin/kds/summary?branchId=${branchId}`, { token: adminToken });
+  check("but it is counted as coming later", kitchenAhead.body?.data?.scheduledLater >= 1, kitchenAhead.body?.data);
+
+  /*
+   * The mirror of the check above: a checkout the server refused must leave
+   * the cart untouched, so the customer can pick another slot without
+   * rebuilding their order. Three refusals happened above, so items remain.
+   */
+  const keptCart = await api("/cart", { token: verifiedToken });
+  check("a refused checkout leaves the cart alone", keptCart.body?.data?.items?.length > 0, keptCart.body?.data?.items);
 
   const secondOrder = await api("/admin/orders", {
     method: "POST",
@@ -594,12 +711,57 @@ async function main() {
   check("the receipt carries the branch's legal details", !!receipt.body?.data?.branch, receipt.body?.data?.branch);
   check("and the totals", receipt.body?.data?.totals?.grandTotal === 3410, receipt.body?.data?.totals);
 
+  // --- the invoice as a file ---
+  //
+  // The printable page has existed for a while; what is new is bytes somebody
+  // can attach to an email. Fetched directly rather than through `api`, which
+  // parses JSON — this endpoint deliberately does not return the envelope.
+  async function fetchPdf(pathname, token) {
+    const res = await fetch(`${BASE}/api/v1${pathname}`, {
+      headers: { "x-forwarded-for": nextIp(), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    });
+    const bytes = Buffer.from(await res.arrayBuffer());
+    return {
+      status: res.status,
+      type: res.headers.get("content-type"),
+      disposition: res.headers.get("content-disposition"),
+      bytes,
+      // Both ends, because a truncated PDF has a valid header and opens as a
+      // corrupt file — which is the failure a size check alone would miss.
+      isPdf: bytes.subarray(0, 5).toString("latin1") === "%PDF-" && bytes.subarray(-6).toString("latin1").includes("%%EOF"),
+    };
+  }
+
+  const pdf = await fetchPdf(`/admin/orders/${orderId}/invoice/pdf`, adminToken);
+  check("the invoice downloads as a PDF", pdf.status === 200 && pdf.isPdf, { status: pdf.status, head: pdf.bytes.subarray(0, 8).toString("latin1") });
+  check("it is served as a PDF, named after the invoice", pdf.type === "application/pdf" && pdf.disposition?.includes(invoice.body.data.invoiceNumber), { type: pdf.type, disposition: pdf.disposition });
+
+  const storedAfterIssue = await prisma.invoice.findUnique({ where: { orderId }, select: { pdfUrl: true } });
+  check("a live invoice keeps its rendered copy", Boolean(storedAfterIssue?.pdfUrl), storedAfterIssue);
+
+  const pdfDenied = await fetchPdf(`/admin/orders/${orderId}/invoice/pdf`, custToken);
+  check("a customer cannot download the invoice", [403, 404].includes(pdfDenied.status), pdfDenied.status);
+
   const voided = await api(`/admin/orders/${orderId}/invoice/void`, {
     method: "POST",
     token: adminToken,
     body: { reason: "Wrong tax id" },
   });
   check("an invoice can be voided", voided.status === 200 && voided.body.data.isVoid === true, voided.body?.data);
+
+  /*
+   * The stored copy has to go with it. That PDF was rendered while the invoice
+   * was live, so it carries no VOID banner, and it sits at a URL anyone with
+   * the link can fetch — which is exactly how a voided invoice keeps
+   * circulating as a valid one.
+   */
+  const storedAfterVoid = await prisma.invoice.findUnique({ where: { orderId }, select: { id: true, pdfUrl: true } });
+  check("voiding drops the rendered copy", storedAfterVoid?.pdfUrl === null, storedAfterVoid);
+  const assetAfterVoid = await prisma.mediaAsset.count({ where: { ownerType: "Invoice", ownerId: storedAfterVoid.id } });
+  check("and the stored file with it", assetAfterVoid === 0, assetAfterVoid);
+
+  const voidPdf = await fetchPdf(`/admin/orders/${orderId}/invoice/pdf`, adminToken);
+  check("a voided invoice still renders, for anyone reconciling the series", voidPdf.status === 200 && voidPdf.isPdf, voidPdf.status);
 
   const reissued = await api(`/admin/orders/${orderId}/invoice`, { method: "POST", token: adminToken, body: { taxId: "TAX-1" } });
   check("a voided invoice can be replaced with a new number", reissued.status === 201 && reissued.body.data.invoiceNumber !== invoice.body.data.invoiceNumber, {

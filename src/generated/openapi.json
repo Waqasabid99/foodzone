@@ -22954,6 +22954,110 @@
         "x-source": "src/app/api/v1/admin/leave-types/[id]/route.js"
       }
     },
+    "/api/v1/admin/media/sweep": {
+      "post": {
+        "operationId": "postAdminMediaSweep",
+        "summary": "Sweep uploads that were never confirmed",
+        "description": "Lists, and optionally deletes, objects in storage that no media record points to. Defaults to a dry run. Only keys this system generated, older than the grace window and with no media row, are ever eligible.\n\nRequires an authenticated caller. Requires the permission `media.delete`. Rate limit: 60 requests per 1m (`write` class).",
+        "tags": [
+          "Media"
+        ],
+        "parameters": [
+          {
+            "name": "dryRun",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": "true",
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          },
+          {
+            "name": "minAgeMinutes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 15,
+              "maximum": 100000
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "data"
+                  ],
+                  "properties": {
+                    "success": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-permissions": [
+          "media.delete"
+        ],
+        "x-rate-limit": {
+          "limit": 60,
+          "window": "1m"
+        },
+        "x-source": "src/app/api/v1/admin/media/sweep/route.js"
+      }
+    },
     "/api/v1/admin/menus": {
       "get": {
         "operationId": "getAdminMenus",
@@ -28598,6 +28702,67 @@
         "x-source": "src/app/api/v1/admin/orders/[id]/invoice/route.js"
       }
     },
+    "/api/v1/admin/orders/{id}/invoice/pdf": {
+      "get": {
+        "operationId": "getAdminOrdersByIdInvoicePdf",
+        "summary": "Download the invoice as a PDF",
+        "description": "Renders the issued invoice to A4. A voided invoice still renders, carrying a VOID banner. The rendered file is stored and linked from the invoice's pdfUrl unless it has been voided.\n\nRequires an authenticated caller. Requires the permission `invoices.read`. Rate limit: 300 requests per 1m (`read` class).",
+        "tags": [
+          "Invoices"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw response — see the endpoint notes; not the JSON envelope."
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-permissions": [
+          "invoices.read"
+        ],
+        "x-rate-limit": {
+          "limit": 300,
+          "window": "1m"
+        },
+        "x-source": "src/app/api/v1/admin/orders/[id]/invoice/pdf/route.js"
+      }
+    },
     "/api/v1/admin/orders/{id}/invoice/void": {
       "post": {
         "operationId": "postAdminOrdersByIdInvoiceVoid",
@@ -31818,6 +31983,67 @@
           "payslips.view_all"
         ],
         "x-source": "src/app/api/v1/admin/payslips/[id]/route.js"
+      }
+    },
+    "/api/v1/admin/payslips/{id}/pdf": {
+      "get": {
+        "operationId": "getAdminPayslipsByIdPdf",
+        "summary": "Download a payslip as a PDF",
+        "description": "Renders the payslip to A4, showing earnings, deductions and the attendance they were computed from. A draft or cancelled payslip renders with a banner saying so. Approved and paid slips are stored and linked from pdfUrl.\n\nRequires an authenticated caller. Requires the permission `payslips.view_all`. Rate limit: 300 requests per 1m (`read` class).",
+        "tags": [
+          "Payroll"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw response — see the endpoint notes; not the JSON envelope."
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-permissions": [
+          "payslips.view_all"
+        ],
+        "x-rate-limit": {
+          "limit": 300,
+          "window": "1m"
+        },
+        "x-source": "src/app/api/v1/admin/payslips/[id]/pdf/route.js"
       }
     },
     "/api/v1/admin/permissions": {
@@ -55430,6 +55656,96 @@
         "x-source": "src/app/api/v1/branches/[id]/menu/route.js"
       }
     },
+    "/api/v1/branches/{id}/slots": {
+      "get": {
+        "operationId": "getBranchesByIdSlots",
+        "summary": "Scheduling slots for a branch",
+        "description": "The pickup and delivery slots for one local date, built from the branch's trading hours, its closures and how many orders already hold each slot. Slots inside the kitchen's lead time are not offered; full ones are returned marked unavailable.\n\nPublic — no authentication required. Rate limit: 120 requests per 1m (`public` class).",
+        "tags": [
+          "Branches"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "WEB",
+                "MOBILE_APP",
+                "QR",
+                "POS",
+                "PHONE",
+                "AGGREGATOR"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "data"
+                  ],
+                  "properties": {
+                    "success": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [],
+        "x-rate-limit": {
+          "limit": 120,
+          "window": "1m"
+        },
+        "x-source": "src/app/api/v1/branches/[id]/slots/route.js"
+      }
+    },
     "/api/v1/cart": {
       "get": {
         "operationId": "getCart",
@@ -56274,7 +56590,8 @@
                     "type": "string",
                     "minLength": 2,
                     "maxLength": 40
-                  }
+                  },
+                  "scheduledFor": {}
                 }
               }
             }
@@ -61032,6 +61349,61 @@
           }
         ],
         "x-source": "src/app/api/v1/me/payslips/route.js"
+      }
+    },
+    "/api/v1/me/payslips/{id}/pdf": {
+      "get": {
+        "operationId": "getMePayslipsByIdPdf",
+        "summary": "Download your own payslip as a PDF",
+        "description": "Only the signed-in employee's own payslips, and only once approved or paid.\n\nRequires an authenticated caller. Rate limit: 300 requests per 1m (`read` class).",
+        "tags": [
+          "Me"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw response — see the endpoint notes; not the JSON envelope."
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-rate-limit": {
+          "limit": 300,
+          "window": "1m"
+        },
+        "x-source": "src/app/api/v1/me/payslips/[id]/pdf/route.js"
       }
     },
     "/api/v1/me/reviews": {

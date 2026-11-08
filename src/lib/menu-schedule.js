@@ -89,8 +89,19 @@ function offsetAt(timezone, at) {
   return asUtc - Math.floor(at.getTime() / 1000) * 1000;
 }
 
-/** "2026-10-01" → the instant it becomes that date in `timezone`. Null if not a date. */
-export function localMidnight(dateInput, timezone) {
+/**
+ * "2026-10-01" plus a wall-clock time → the instant it really is.
+ *
+ * `minutes` is minutes past local midnight and may exceed 1440, which is how
+ * this codebase writes past-midnight service: "closes at 02:00" is 1560.
+ *
+ * The two passes matter. Adding minutes to midnight is only correct while the
+ * offset holds for the whole day, and on a daylight-saving Sunday it does not:
+ * 19:00 would land an hour out. Re-deriving the offset *at the answer* fixes
+ * it. Pakistan has no daylight saving, so this is invisible here and would be
+ * a twice-yearly hour of wrong pickup times for a branch anywhere that does.
+ */
+export function zonedInstant(dateInput, minutes = 0, timezone = "UTC") {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateInput ?? ""));
   if (!match) return null;
   const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
@@ -98,11 +109,15 @@ export function localMidnight(dateInput, timezone) {
   const check = new Date(guess);
   if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null;
 
-  // Two passes: the offset at the first estimate can differ from the offset at
-  // the answer when a daylight-saving change falls in between.
-  let instant = guess - offsetAt(timezone, new Date(guess));
-  instant = guess - offsetAt(timezone, new Date(instant));
+  const wanted = guess + Number(minutes || 0) * 60_000;
+  let instant = wanted - offsetAt(timezone, new Date(wanted));
+  instant = wanted - offsetAt(timezone, new Date(instant));
   return new Date(instant);
+}
+
+/** "2026-10-01" → the instant it becomes that date in `timezone`. Null if not a date. */
+export function localMidnight(dateInput, timezone) {
+  return zonedInstant(dateInput, 0, timezone);
 }
 
 /** The date `instant` falls on in `timezone`, as a date input value. */

@@ -3,6 +3,7 @@ import { ApiError } from "@/lib/api";
 import { withTransaction } from "@/server/utils/db";
 import { changeOrderStatus } from "@/server/services/order.service";
 import { recordAudit } from "@/server/utils/audit";
+import { getSettings } from "@/server/services/setting.service";
 
 /**
  * The kitchen display.
@@ -41,7 +42,18 @@ export function canTransitionItem(from, to) {
  * One query for the orders and their items — a per-ticket query would be a
  * hundred round trips on a Friday night.
  */
-export async function stationQueue({ branchId, stationId = null, includeReady = true, limit = 50 }) {
+export async function stationQueue({ branchId, stationId = null, includeReady = true, limit = 50, at = new Date() }) {
+  /*
+   * How far ahead the board looks for pre-orders.
+   *
+   * An order placed at ten in the morning for seven in the evening must not
+   * print at ten: it would sit on the board all day, go red, and bury the
+   * tickets actually owed. It appears once there is roughly enough time left
+   * to cook it, which is the same prep allowance an ASAP order gets.
+   */
+  const settings = await getSettings({ branchId });
+  const dueBy = new Date(at.getTime() + Number(settings["ordering.default_prep_minutes"] ?? 30) * 60_000);
+
   const orders = await prisma.order.findMany({
     where: {
       branchId,
@@ -50,6 +62,14 @@ export async function stationQueue({ branchId, stationId = null, includeReady = 
       // decides what happens to it. The order is untouched and still owed —
       // this is a view, not a state.
       setAsideAt: null,
+      /*
+       * Bound as a parameter, never `now()` in SQL. `scheduledFor` is
+       * `timestamp without time zone` holding UTC, and comparing one against a
+       * real instant makes Postgres reinterpret the column in the session's
+       * timezone — only one side moves. Both sides of a bound comparison shift
+       * together and cancel.
+       */
+      OR: [{ scheduledFor: null }, { scheduledFor: { lte: dueBy } }],
     },
     select: {
       id: true,
@@ -476,23 +496,37 @@ export async function setAsideTickets({ branchId, limit = 50 }) {
 }
 
 /** How the kitchen is doing right now — the number on the wall. */
-export async function kitchenSummary({ branchId }) {
-  const [queued, preparing, ready, orders] = await Promise.all([
-    prisma.orderItem.count({ where: { order: { branchId }, status: "QUEUED" } }),
-    prisma.orderItem.count({ where: { order: { branchId }, status: "PREPARING" } }),
-    prisma.orderItem.count({ where: { order: { branchId }, status: "READY" } }),
+export async function kitchenSummary({ branchId, at = new Date() }) {
+  const settings = await getSettings({ branchId });
+  const dueBy = new Date(at.getTime() + Number(settings["ordering.default_prep_minutes"] ?? 30) * 60_000);
+
+  // What the kitchen is holding *now*. A pre-order for tonight is a real
+  // order, but counting it here would report fourteen active tickets at
+  // eleven in the morning with an empty pass.
+  const dueNow = [{ scheduledFor: null }, { scheduledFor: { lte: dueBy } }];
+
+  const [queued, preparing, ready, orders, scheduledLater] = await Promise.all([
+    prisma.orderItem.count({ where: { order: { branchId, OR: dueNow }, status: "QUEUED" } }),
+    prisma.orderItem.count({ where: { order: { branchId, OR: dueNow }, status: "PREPARING" } }),
+    prisma.orderItem.count({ where: { order: { branchId, OR: dueNow }, status: "READY" } }),
     prisma.order.findMany({
-      where: { branchId, status: { in: ACTIVE_ORDER_STATUSES } },
+      where: { branchId, status: { in: ACTIVE_ORDER_STATUSES }, OR: dueNow },
       select: { promisedAt: true },
+    }),
+    // Its own number, because a quiet board with eleven pre-orders landing at
+    // seven is not the same kitchen as a quiet board with none.
+    prisma.order.count({
+      where: { branchId, status: { in: ACTIVE_ORDER_STATUSES }, scheduledFor: { gt: dueBy } },
     }),
   ]);
 
-  const now = Date.now();
+  const nowMs = at.getTime();
 
   return {
     branchId,
     items: { queued, preparing, ready },
     activeOrders: orders.length,
-    lateOrders: orders.filter((order) => order.promisedAt && new Date(order.promisedAt).getTime() < now).length,
+    scheduledLater,
+    lateOrders: orders.filter((order) => order.promisedAt && new Date(order.promisedAt).getTime() < nowMs).length,
   };
 }

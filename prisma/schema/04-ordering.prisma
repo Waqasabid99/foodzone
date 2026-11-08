@@ -169,6 +169,14 @@ model Order {
 
   placedAt    DateTime  @default(now())
   confirmedAt DateTime?
+  /// The slot a customer chose, for an order placed ahead of time. Null means
+  /// as soon as possible, which is almost every order.
+  ///
+  /// Deliberately separate from `promisedAt`: that is when we expect the food
+  /// to be ready and is always populated, so it cannot also mean "this one is
+  /// not for now". The kitchen board holds a ticket back until its slot is
+  /// close, and that needs a column it can ask about.
+  scheduledFor DateTime?
   promisedAt  DateTime?
   preparedAt  DateTime?
   completedAt DateTime?
@@ -196,6 +204,9 @@ model Order {
   @@index([branchId, status])
   /// The kitchen board asks which live orders are not set aside, every poll.
   @@index([branchId, setAsideAt])
+  /// Both halves of scheduling: the kitchen asks which pre-orders are due, and
+  /// the slot grid counts how many are already booked into each one.
+  @@index([branchId, scheduledFor])
   /// The till asks which tables are waiting to pay, every poll.
   @@index([branchId, billRequestedAt])
   @@index([userId, placedAt])

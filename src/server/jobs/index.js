@@ -13,6 +13,7 @@ import { expireAttributions } from "@/server/services/creator-attribution.servic
 import { expireCredit } from "@/server/services/creator-wallet.service";
 import { liftLapsedSuspensions } from "@/server/services/creator.service";
 import { pruneViewEvents, rollUpDay } from "@/server/services/creator-engagement.service";
+import { sweepOrphanedUploads } from "@/server/services/media.service";
 
 
 /**
@@ -58,6 +59,24 @@ export async function runMaintenanceCycle() {
   ]);
 
   /*
+   * Objects uploaded but never confirmed.
+   *
+   * Not inside the `Promise.all` above: this one talks to a storage provider
+   * rather than the database, and a provider that is slow or rate-limiting
+   * would hold the whole cycle open. It is also the only step here that
+   * deletes something a database row does not describe, which is reason enough
+   * for it to run on its own and fail on its own — a bucket that cannot be
+   * listed must not stop the ledger housekeeping that follows.
+   */
+  let uploadsSwept;
+  try {
+    uploadsSwept = await sweepOrphanedUploads();
+  } catch (error) {
+    logger.error("the orphaned upload sweep failed", { error: error.message });
+    uploadsSwept = { failedToRun: true, reason: error.message };
+  }
+
+  /*
    * These two are ordered, not raced.
    *
    * The warning counts the postings that are waiting, and the release empties
@@ -80,6 +99,7 @@ export async function runMaintenanceCycle() {
     cartsPruned,
     trackPointsPruned,
     batchesExpired,
+    uploadsSwept,
     postingsReleased,
     fiscalRunway: {
       state: fiscalWarning.state,
