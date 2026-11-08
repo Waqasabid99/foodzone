@@ -369,6 +369,28 @@ export const attachAssetSchema = z.object({
   ownerId: cuidSchema,
 });
 
+/**
+ * The orphan sweep's knobs.
+ *
+ * `dryRun` defaults to **true**: this endpoint deletes files from a bucket,
+ * and a caller who forgets the parameter should get a list, not a deletion.
+ * The maintenance job asks for a live run explicitly.
+ *
+ * `minAgeMinutes` has a floor of 15 — the longest an upload ticket can live —
+ * because a smaller window could sweep an upload that is still arriving.
+ */
+export const uploadSweepSchema = z.object({
+  // Never `z.coerce.boolean()`: the string "false" is truthy, so a caller
+  // explicitly asking for a live run would get a dry one — and worse, the
+  // reverse shape of that mistake elsewhere is a flag that is permanently on.
+  dryRun: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  minAgeMinutes: z.coerce.number().int().min(15).max(100_000).optional(),
+  limit: z.coerce.number().int().min(1).max(2_000).optional(),
+});
+
 export const mediaQuerySchema = z.object({
   ownerType: z.string().trim().min(1).max(60).optional(),
   ownerId: cuidSchema.optional(),

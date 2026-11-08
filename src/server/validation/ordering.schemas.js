@@ -123,6 +123,18 @@ export const guestSchema = z.object({
   email: emailSchema.optional(),
 });
 
+/**
+ * Asking for a day's slots.
+ *
+ * The date is a plain local date, not an instant: "what is open on the 12th"
+ * is a question about the branch's calendar, and sending a timestamp would
+ * make the answer depend on the caller's own timezone.
+ */
+export const slotQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD").optional(),
+  channel: z.enum(["WEB", "MOBILE_APP", "QR", "POS", "PHONE", "AGGREGATOR"]).optional(),
+});
+
 export const checkoutSchema = z.object({
   branchId: cuidSchema.optional(),
   type: orderTypeSchema.optional(),
@@ -147,6 +159,14 @@ export const checkoutSchema = z.object({
    * customer invents cannot conjure a payment route.
    */
   payWith: z.string().trim().min(2).max(40).optional(),
+  /**
+   * A slot chosen for later, as an instant.
+   *
+   * Absent means as soon as possible, which is almost every order. The value
+   * is checked against the branch's own grid at checkout, so sending a time
+   * that was never offered is refused rather than quietly accepted.
+   */
+  scheduledFor: z.coerce.date().optional(),
 });
 
 export const quoteSchema = z.object({

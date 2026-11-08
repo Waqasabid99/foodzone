@@ -229,6 +229,85 @@ async function main() {
   const goneRes = await fetch(confirmed.body.data.url);
   check("deleting the asset removes the file too", goneRes.status === 404, goneRes.status);
 
+  // ===================== ORPHANED UPLOAD SWEEP =====================
+  //
+  // The case the sweep exists for cannot be reached through the API: a client
+  // asks for a ticket, sends the bytes and never confirms, so there is a file
+  // in storage and no row anywhere that mentions it. Nothing will ever read it
+  // and nothing will ever delete it.
+  //
+  // This runs against the local driver, so the test can age a file on disk and
+  // watch the window work. The rules themselves are unit-tested; what is being
+  // proved here is that the driver really lists what it stored, that the
+  // database lookup matches keys correctly, and above all that the sweep takes
+  // the abandoned file and *only* the abandoned file.
+  const uploadRoot = path.resolve(process.cwd(), process.env.UPLOAD_DIR ?? "./storage/uploads");
+  const isLocalDriver = (process.env.STORAGE_DRIVER ?? "local") === "local";
+
+  if (!isLocalDriver) {
+    console.log("SKIP  orphaned upload sweep (driver is not local)");
+  } else {
+    async function uploadOne({ confirm }) {
+      const ticketed = await api("/media/uploads", {
+        method: "POST",
+        token: adminToken,
+        body: { mimeType: "image/png", sizeBytes: png.byteLength, ownerType: "Branch", ownerId: branchId },
+      });
+      const issued = ticketed.body.data;
+      await api(null, { method: "PUT", absolute: `${BASE}${issued.upload.url}`, raw: true, body: png, headers: { "content-type": "image/png" } });
+      if (confirm) await api("/media/uploads/confirm", { method: "POST", token: adminToken, body: { ticket: issued.ticket } });
+      created.assetKeys.add(issued.storageKey);
+      return issued.storageKey;
+    }
+
+    const orphanKey = await uploadOne({ confirm: false });
+    const confirmedKey = await uploadOne({ confirm: true });
+    const recentKey = await uploadOne({ confirm: false });
+
+    // A file nothing in this system wrote. It is the one the sweep must never
+    // touch however old it is — a bucket is shared, and deleting somebody
+    // else's export is not housekeeping.
+    const foreignPath = path.join(uploadRoot, `e2e2-${stamp}-not-ours.txt`);
+    fs.writeFileSync(foreignPath, "belongs to somebody else");
+    const ancient = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(foreignPath, ancient, ancient);
+
+    // Age the two unconfirmed uploads past the window; the "recent" one stays
+    // where it is, standing in for an upload that is still in flight.
+    const aged = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    for (const key of [orphanKey, confirmedKey]) {
+      fs.utimesSync(path.join(uploadRoot, key), aged, aged);
+    }
+
+    const onDisk = (key) => fs.existsSync(path.join(uploadRoot, key));
+
+    const dry = await api("/admin/media/sweep", { method: "POST", token: adminToken });
+    check("a dry run reports the abandoned upload", dry.status === 200 && dry.body?.data?.removed?.includes(orphanKey), dry.body?.data);
+    check("a dry run names the keys rather than counting them", Array.isArray(dry.body?.data?.removed), dry.body?.data?.removed);
+    check("a dry run deletes nothing", onDisk(orphanKey), { orphanKey });
+    check("a dry run says so in its own result", dry.body?.data?.dryRun === true, dry.body?.data);
+
+    const denied = await api("/admin/media/sweep?dryRun=false", { method: "POST", token: custToken });
+    check("a customer cannot sweep the bucket", denied.status === 403, denied.body?.error);
+
+    const live = await api("/admin/media/sweep?dryRun=false", { method: "POST", token: adminToken });
+    check("a live sweep runs", live.status === 200 && live.body?.data?.dryRun === false, live.body?.data);
+    // `dryRun=false` is the string "false": `z.coerce.boolean()` would have
+    // made that truthy and quietly performed a dry run instead.
+    check("the sweep takes the abandoned upload", !onDisk(orphanKey), { orphanKey });
+    check("a confirmed upload is left alone", onDisk(confirmedKey), { confirmedKey });
+    check("an upload still inside its window is left alone", onDisk(recentKey), { recentKey });
+    check("a file this system did not write is left alone", fs.existsSync(foreignPath), { foreignPath });
+    check("the foreign file is reported as ignored, not swept", live.body?.data?.counts?.ignored >= 1, live.body?.data?.counts);
+    check("the bytes freed are reported", live.body?.data?.bytes >= png.byteLength, live.body?.data);
+
+    const second = await api("/admin/media/sweep?dryRun=false", { method: "POST", token: adminToken });
+    check("a second sweep finds nothing left to take", second.body?.data?.deleted === 0, second.body?.data);
+
+    fs.rmSync(foreignPath, { force: true });
+    for (const key of [confirmedKey, recentKey]) fs.rmSync(path.join(uploadRoot, key), { force: true });
+  }
+
   // ===================== NOTIFICATIONS =====================
   const sendDenied = await api("/admin/notifications", { method: "POST", token: custToken, body: { userIds: [custId], title: "Nope" } });
   check("a customer cannot send notifications", sendDenied.status === 403);

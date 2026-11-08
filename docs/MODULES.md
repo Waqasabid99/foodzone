@@ -27,7 +27,7 @@ npm run test:unit          # pure logic, no server or database writes
 APP_URL=http://localhost:3100 CRON_SECRET=phase2-test-secret \
   npx next dev -p 3100 > /tmp/foodzone-e2e-server.log 2>&1 &
 
-npm run test:e2e           # phases 1 to 13 in sequence
+npm run test:e2e           # all 22 phase suites in sequence
 ```
 
 Four details are easy to trip over, and each one fails as a confusing
@@ -38,7 +38,11 @@ assertion rather than an obvious error:
 - **`CRON_SECRET` must be set.** Without it the internal job endpoints
   deliberately run open in development, so Phase 2's "hidden without the secret"
   checks cannot pass. Use the same value the suite sends (`E2E_CRON_SECRET`,
-  default `phase2-test-secret`).
+  default `phase2-test-secret`). Note what the suites deliberately do *not*
+  read: `CRON_SECRET` from `.env`. A test helper that falls back to it sends
+  the real secret to a server started with the e2e one, and the drain returns
+  401 — which surfaces as every ledger assertion after it failing, as though
+  nothing posted.
 - **Phase 1 reads emailed codes from the server's log**, because codes are
   hashed in the database. Redirect the server's output to the path above, or
   point `E2E_LOG` somewhere else.
@@ -129,8 +133,9 @@ seeded baseline.
 
 ### Deferred from Phase 4
 
-- [ ] **Table ordering** — a scan currently views the menu; ordering from the
-      table lands with the cart in Phase 5
+- [x] **Table ordering** — a `DINE_IN` checkout takes a `tableId`, which is
+      checked against the branch before the order is written, so a scan now
+      orders rather than only viewing
 - [ ] **Table state** — occupied/free, party size, server assignment *(needs orders)*
 - [ ] **Batch print sheet** — a single PDF of every code for a branch, laid out
       for a sticker sheet
@@ -154,13 +159,15 @@ seeded baseline.
 
 ### Deferred from Phase 5
 
-- [ ] **Stock reservation at checkout** — needs the inventory ledger (Phase 9);
-      `costTotal` is already snapshotted per line, so depletion can be added
-      without touching the order write
+- [x] **Depletion at checkout** — the ledger landed in Phase 9 and
+      `depleteForOrder` now runs off the order event, with `reverseDepletion`
+      on cancel. *Holding* stock for an unmade order is still open — see
+      Phase 9's **Stock reservation at checkout**, which is the same item
 - [x] **Discounts at checkout** — delivered in Phase 6
-- [ ] **Editing a placed order** — `orders.edit_items` exists as a permission but
-      adding or removing lines after placement needs the payment and refund
-      flows to reconcile against (Phase 7)
+- [x] **Editing a placed order** — `addCourse` and `removeOrderItem` add and
+      remove lines after placement behind `orders.edit_items`, and re-run
+      `syncOrderPaymentState` so a bill settled and then added to reads
+      correctly
 - [ ] **Scheduled orders** — `ordering.max_scheduled_days_ahead` is defined and
       `promisedAt` is populated, but choosing a future slot is not exposed yet
 - [ ] **Invoice PDF rendering** — the receipt payload is complete; turning it
@@ -221,9 +228,11 @@ one it turns out to be.
 
 ### Deferred from Phase 7
 
-- [ ] **A real acquirer** — implement the adapter for whichever gateway is
-      chosen (Safepay, JazzCash/Easypaisa, or another). Nothing outside
-      `src/server/payments/providers/` changes
+- [x] **A real acquirer** — Safepay, implemented in
+      `src/server/payments/providers/safepay.js`: hosted checkout, the
+      `x-sfpy-signature` webhook, refunds with the gateway's own 90-day limit,
+      and declared credentials. Nothing outside `providers/` changed, as
+      predicted. A second gateway is another file, not another feature
 - [ ] **Store credit as tender** — `STORE_CREDIT` is in the method enum and the
       wallet is modelled, but spending creator credit at checkout depends on
       Phase 12
@@ -269,8 +278,11 @@ one it turns out to be.
       returned but nothing computes them; they need a routing provider
 - [ ] **Driver ratings** — `ratingAverage` is on the model and `Review` already
       relates to a driver; surfacing a per-driver rating flow is its own feature
-- [ ] **Proof-of-delivery signatures** — `signatureUrl` is modelled; the photo
-      path works today through the existing media uploads
+- [ ] **Proof of delivery** — not modelled. `Delivery` records
+      `recipientName` and nothing else: there is no signature or photo column
+      and no media link, so a disputed drop has only the driver's word and the
+      status timestamps. *(This entry previously claimed `signatureUrl` was
+      modelled. It never was.)*
 
 ## Phase 9 — Inventory & Procurement
 
@@ -303,18 +315,21 @@ one it turns out to be.
 - [ ] **Stock reservation at checkout** — `StockLevel.reservedQuantity` is
       modelled and read by `onHand`, but holding stock for confirmed-but-unmade
       orders needs a release-on-cancel path and a timeout sweeper
-- [ ] **Supplier bills and AP** — `SupplierBill` relates to a GRN; turning a
-      receipt into a payable belongs with finance in Phase 11
-- [ ] **Journal postings** — every movement here has a ledger consequence
-      (COGS, stock asset, wastage expense); the posting rules land in Phase 11
+- [x] **Supplier bills and AP** — built in Phase 11: a bill is raised from a
+      receipt (`supplier-bills/from-receipt/:goodsReceiptId`), submitted,
+      approved, paid against, and aged by `ageBalances`
+- [x] **Journal postings** — the posting rules landed in Phase 11 and every
+      movement type is wired through `posting.service` off its outbox event:
+      COGS, stock asset, wastage and GRNI all post
 - [ ] **Purchase requisitions** — an internal "we need this" step before a PO
       is not modelled
 - [ ] **Batch-level valuation report** — valuation runs at average cost for
       speed; a lot-by-lot report is a separate read
 - [ ] **Barcode scanning flows** — `barcode` is stored and searchable, but
       scan-to-receive and scan-to-count are client concerns
-- [ ] **Recipe management** — recipes are *read* here for depletion; their CRUD,
-      versioning and costing roll-up are Phase 10
+- [x] **Recipe management** — Phase 10 delivered all three: CRUD with a cycle
+      guard, versioning (`revise`, `activate`, `versions`) and the costing
+      roll-up (`cost`, `recost`, `menu-cost`)
 
 ## Phase 10 — Production
 
@@ -345,10 +360,13 @@ one it turns out to be.
 
 ### Deferred from Phase 10
 
-- [ ] **Journal postings for production** — a run turns raw-material asset into
-      WIP and then finished-goods asset, with labour and overhead absorbed and
-      yield loss expensed. The quantities and costs are all correct here; the
-      accounts they belong in are Phase 11
+- [x] **Journal postings for production** — `postProductionRun` posts off
+      `finance.production_completed`: the output is debited to inventory at
+      what the run cost, the materials are credited out of it, labour and
+      overhead are absorbed (credited, not charged twice) and yield loss is
+      expensed to wastage. There is no WIP leg — a run is atomic here, so
+      stock never sits in progress — which is why this entry's earlier
+      description of one was wrong
 - [ ] **Recipe allergens and nutrition** — modelled on the catalog side, but
       rolling them up through a recipe tree is its own piece of work
 - [ ] **Production scheduling** — `scheduledFor` is stored and filterable, but
@@ -419,7 +437,10 @@ one it turns out to be.
 
 - [x] **Payroll postings** — built in Phase 12: approval posts the wage bill
       gross, payment clears the payable
-- [ ] **Creator and HR operational reports** — Phases 12 and 13
+- [x] **HR operational report** — built as the Attendance report
+      (`/dashboard/reports/attendance`, gated on `reports.view_hr`)
+- [ ] **Creator operational report** — still open; tracked under Phase 13's
+      **Creator report**
 - [ ] **Year-end close** — periods close and lock, but rolling income and
       expense into retained earnings and opening the next year is not built.
       The balance sheet carries current earnings into equity instead, which is
@@ -718,8 +739,9 @@ calendar screen; nothing creates next year automatically.
       correction for a supervisor to approve; today only a supervisor can
       correct a day
 - [ ] **Shift swaps and open shifts** — the roster is assigned, not bid on
-- [ ] **HR operational report** — the `reports.view_hr` key exists and the data
-      is all here; the report itself is not built
+- [x] **HR operational report** — the Attendance report, branch-scoped on
+      `reports.view_hr`, showing days worked, hours and unapproved days per
+      employee
 
 ## Phase 13 — Creator Program
 

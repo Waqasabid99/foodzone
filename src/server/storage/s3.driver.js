@@ -69,6 +69,24 @@ export const s3Driver = {
     };
   },
 
+  /**
+   * Writes bytes we produced ourselves — a rendered PDF, not a client upload.
+   *
+   * A plain `PutObject` rather than a presigned URL: there is no browser in
+   * this path, and signing a URL for ourselves only to call it would be a
+   * round trip for nothing.
+   */
+  async putObject({ storageKey, buffer, mimeType = "application/octet-stream" }) {
+    const config = env();
+    const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+
+    await (await client()).send(
+      new PutObjectCommand({ Bucket: config.S3_BUCKET, Key: storageKey, Body: buffer, ContentType: mimeType }),
+    );
+
+    return { sizeBytes: buffer.byteLength, url: this.publicUrl({ storageKey }) };
+  },
+
   async statObject({ storageKey }) {
     const config = env();
     const { HeadObjectCommand } = await import("@aws-sdk/client-s3");
@@ -92,6 +110,37 @@ export const s3Driver = {
     const config = env();
     const { DeleteObjectCommand } = await import("@aws-sdk/client-s3");
     await (await client()).send(new DeleteObjectCommand({ Bucket: config.S3_BUCKET, Key: storageKey }));
+  },
+
+  /**
+   * One page of the bucket, for the orphan sweep.
+   *
+   * Paged rather than exhaustive on purpose: `ListObjectsV2` returns at most
+   * 1000 keys per call, and a bucket with a hundred thousand objects would
+   * otherwise be a single request that times out. The caller passes the cursor
+   * back to continue, and a sweep that stops early simply resumes next run.
+   */
+  async listObjects({ limit = 1000, cursor = null } = {}) {
+    const config = env();
+    const { ListObjectsV2Command } = await import("@aws-sdk/client-s3");
+
+    const result = await (await client()).send(
+      new ListObjectsV2Command({
+        Bucket: config.S3_BUCKET,
+        MaxKeys: Math.min(limit, 1000),
+        ...(cursor ? { ContinuationToken: cursor } : {}),
+      }),
+    );
+
+    return {
+      objects: (result.Contents ?? []).map((object) => ({
+        storageKey: object.Key,
+        uploadedAt: object.LastModified ?? null,
+        sizeBytes: Number(object.Size ?? 0),
+      })),
+      // Absent when the listing is complete, which is how the sweep knows to stop.
+      cursor: result.IsTruncated ? (result.NextContinuationToken ?? null) : null,
+    };
   },
 
   publicUrl({ storageKey }) {

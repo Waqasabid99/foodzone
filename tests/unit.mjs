@@ -191,6 +191,11 @@ const { NO_ACCOUNTING_PERIOD, isMissingAccountingPeriod, missingPeriodError } = 
 );
 const { bootstrapSchema } = await import("@/server/validation/bootstrap.schemas");
 const { backupName, backupTakenAt, planRetention } = await import("@/server/ops/backup-policy");
+const { isSweepableKey, planUploadSweep, SWEEP_GRACE_MINUTES } = await import("@/server/ops/upload-sweep");
+const { safeText, toWinAnsi } = await import("@/server/documents/text");
+const { invoiceDocument } = await import("@/server/documents/invoice-document");
+const { buildSlots, findSlot, schedulableDates } = await import("@/server/ordering/slots");
+const { payslipDocument } = await import("@/server/documents/payslip-document");
 const { setupTokenMatches } = await import("@/server/services/bootstrap.service");
 const {
   addDays,
@@ -12788,6 +12793,491 @@ check("the verdict says how long is left, so a screen can warn before it lapses"
   // Zero means lapsed, and nothing else does.
   assert.equal(refundability({ capturedAt: captured(95), now, maxAgeDays: 90 }).daysLeft, 0);
   assert.equal(refundability({ capturedAt: captured(10), now, maxAgeDays: null }).daysLeft, null);
+});
+
+// --- Orphaned upload sweep ---------------------------------------------------
+//
+// The sweep deletes files out of a bucket with no transaction to roll back and
+// no undo, so every rule here exists to make it refuse rather than guess.
+
+const key = (name) => `product/2026/11/${name.padEnd(32, "0")}.jpg`;
+const minutesAgo = (now, minutes) => new Date(now.getTime() - minutes * 60_000);
+
+check("only keys this system generated are ever sweepable", () => {
+  /*
+   * A bucket is shared. Somebody's export, a logo uploaded by hand, a folder
+   * from another app — none of it was written by `buildStorageKey`, and a
+   * sweep that cannot prove it wrote a file must leave it alone.
+   */
+  assert.equal(isSweepableKey("product/2026/11/0123456789abcdef0123456789abcdef.jpg"), true);
+  assert.equal(isSweepableKey("misc/2026/01/ffffffffffffffffffffffffffffffff.webp"), true);
+
+  assert.equal(isSweepableKey("logo.png"), false);
+  assert.equal(isSweepableKey("backups/foodzone-2026-11-07T02-00-00Z.dump"), false);
+  assert.equal(isSweepableKey("product/2026/11/not-a-hex-id.jpg"), false);
+  assert.equal(isSweepableKey("product/26/11/0123456789abcdef0123456789abcdef.jpg"), false);
+  assert.equal(isSweepableKey("../../etc/passwd"), false);
+  assert.equal(isSweepableKey(""), false);
+  assert.equal(isSweepableKey(null), false);
+});
+
+check("a confirmed upload is never swept", () => {
+  // The whole point of confirm is that the row and the object belong together.
+  const now = new Date("2026-11-08T12:00:00Z");
+  const confirmed = key("aa");
+  const plan = planUploadSweep({
+    objects: [{ storageKey: confirmed, uploadedAt: minutesAgo(now, 10_000), sizeBytes: 500 }],
+    knownKeys: new Set([confirmed]),
+    now,
+  });
+
+  assert.deepEqual(plan.remove, []);
+  assert.equal(plan.counts.confirmed, 1);
+});
+
+check("an upload still inside its window is left alone", () => {
+  /*
+   * The failure this prevents: sweeping an upload that is mid-flight. The
+   * client asked for a ticket, the bytes are landing now, and confirm has not
+   * run yet — deleting it here breaks a working upload.
+   */
+  const now = new Date("2026-11-08T12:00:00Z");
+  const plan = planUploadSweep({
+    objects: [{ storageKey: key("bb"), uploadedAt: minutesAgo(now, SWEEP_GRACE_MINUTES - 1), sizeBytes: 500 }],
+    knownKeys: new Set(),
+    now,
+  });
+
+  assert.deepEqual(plan.remove, []);
+  assert.equal(plan.counts.tooNew, 1);
+});
+
+check("an object the provider cannot date is never swept", () => {
+  // No timestamp means no evidence of abandonment. Keep it and say so.
+  const now = new Date("2026-11-08T12:00:00Z");
+  const plan = planUploadSweep({
+    objects: [{ storageKey: key("cc"), uploadedAt: null, sizeBytes: 500 }],
+    knownKeys: new Set(),
+    now,
+  });
+
+  assert.deepEqual(plan.remove, []);
+  assert.equal(plan.counts.undated, 1);
+});
+
+check("an upload abandoned past the window is swept", () => {
+  const now = new Date("2026-11-08T12:00:00Z");
+  const abandoned = key("dd");
+  const plan = planUploadSweep({
+    objects: [{ storageKey: abandoned, uploadedAt: minutesAgo(now, SWEEP_GRACE_MINUTES + 1), sizeBytes: 2048 }],
+    knownKeys: new Set(),
+    now,
+  });
+
+  assert.deepEqual(plan.remove, [abandoned]);
+  assert.equal(plan.bytes, 2048);
+});
+
+check("the sweep is capped, and spends its budget on the oldest first", () => {
+  /*
+   * A bucket that has never been swept can hold thousands of orphans, and
+   * deleting all of them in one job is a long-running request against a
+   * provider that rate-limits. Capping means the next run continues; taking
+   * the oldest first means the cap cannot starve anything forever.
+   */
+  const now = new Date("2026-11-08T12:00:00Z");
+  // Hex, because a generated key is hex — "oldest" would be refused as a key
+  // this system could not have written, which is a different test.
+  const [newest, oldest, middle] = [key("ace0"), key("ace1"), key("ace2")];
+  const objects = [
+    { storageKey: newest, uploadedAt: minutesAgo(now, 100), sizeBytes: 1 },
+    { storageKey: oldest, uploadedAt: minutesAgo(now, 10_000), sizeBytes: 1 },
+    { storageKey: middle, uploadedAt: minutesAgo(now, 5_000), sizeBytes: 1 },
+  ];
+  const plan = planUploadSweep({ objects, knownKeys: new Set(), now, limit: 2 });
+
+  assert.deepEqual(plan.remove, [oldest, middle]);
+  assert.equal(plan.deferred, 1);
+});
+
+check("a sweep of an empty bucket is a no-op, not an error", () => {
+  const plan = planUploadSweep({ objects: [], knownKeys: new Set(), now: new Date() });
+  assert.deepEqual(plan.remove, []);
+  assert.equal(plan.bytes, 0);
+  assert.equal(plan.deferred, 0);
+});
+
+check("a foreign key in the bucket is counted as ignored, never removed", () => {
+  const now = new Date("2026-11-08T12:00:00Z");
+  const plan = planUploadSweep({
+    objects: [
+      { storageKey: "someone-elses-report.pdf", uploadedAt: minutesAgo(now, 100_000), sizeBytes: 9_000 },
+      { storageKey: key("ee"), uploadedAt: minutesAgo(now, 100_000), sizeBytes: 10 },
+    ],
+    knownKeys: new Set(),
+    now,
+  });
+
+  assert.deepEqual(plan.remove, [key("ee")]);
+  assert.equal(plan.counts.ignored, 1);
+  // The bytes figure is what the sweep frees, so a file it refuses to touch
+  // must not be counted into it.
+  assert.equal(plan.bytes, 10);
+});
+
+// --- printable documents -----------------------------------------------------
+//
+// The models are pure, so everything that could be *wrong* about an invoice or
+// a payslip is asserted here rather than by reading bytes out of a PDF.
+
+check("a currency symbol the font cannot print becomes its code", () => {
+  /*
+   * The documents use Helvetica, which has no rupee sign. Handed one, pdfkit
+   * writes a byte that means something else and the customer gets mojibake
+   * where the total should be. PKR already formats as a code, so this only
+   * ever bites a deployment in another currency — which is exactly the kind of
+   * thing nobody tests until a customer finds it.
+   */
+  assert.equal(safeText("\u20B91,234"), "INR1,234");
+  assert.equal(safeText("\u20A8500"), "PKR500");
+  // In WinAnsi, so left exactly as Intl wrote it.
+  assert.equal(safeText("$1,234"), "$1,234");
+  assert.equal(safeText("\u00A31,234"), "\u00A31,234");
+});
+
+check("typography that turns up in product names is folded, not mangled", () => {
+  assert.equal(safeText("Chef\u2019s \u201CSpecial\u201D \u2013 today\u2026"), "Chef's \"Special\" - today...");
+  // A non-breaking space is what Intl puts between "PKR" and the number.
+  assert.equal(safeText("PKR\u00A01,234"), "PKR 1,234");
+});
+
+check("text the font cannot write is marked, not silently dropped", () => {
+  /*
+   * A name quietly shortened is worse than a name with a visible gap: nobody
+   * notices the first one, and a payslip goes out addressed to somebody else.
+   */
+  // Seven Arabic letters across two words; the space between them survives.
+  const urdu = toWinAnsi("\u0645\u062D\u0645\u062F \u0639\u0645\u0631");
+  assert.equal(urdu.substitutions, 7);
+  assert.equal(urdu.text, "? ?");
+  // A run collapses to one marker rather than a row of them.
+  assert.equal(toWinAnsi("\u0645\u062D\u0645\u062F").text, "?");
+});
+
+const receiptFixture = {
+  branch: { name: "FoodZone", legalName: "FoodZone (Pvt) Ltd", timezone: "Asia/Karachi", city: "Lahore" },
+  order: { orderNumber: "FZ-1", type: "DINE_IN", table: { name: "T-1" }, placedAt: new Date("2026-11-08T07:00:00Z") },
+  customer: { name: "A Customer" },
+  lines: [{ name: "Naan", quantity: 2, unitPrice: 90, lineTotal: 180, modifiers: [] }],
+  discounts: [],
+  taxLines: [],
+  totals: { currency: "PKR", subtotal: 180, grandTotal: 180, paidTotal: 180 },
+};
+
+check("an invoice states the legal entity, not the trading name", () => {
+  // The invoice is from whoever owes the tax, not the brand over the door.
+  const doc = invoiceDocument({ invoice: { invoiceNumber: "INV-1" }, receipt: receiptFixture });
+  assert.equal(doc.issuer.name, "FoodZone (Pvt) Ltd");
+});
+
+check("an order type is written the way a customer reads it", () => {
+  const doc = invoiceDocument({ invoice: { invoiceNumber: "INV-1" }, receipt: receiptFixture });
+  const against = doc.parties.find((party) => party.title === "Against");
+  assert.ok(against.lines.some((line) => line.startsWith("Dine-in")), against.lines);
+  assert.ok(!against.lines.some((line) => line.includes("DINE_IN")), against.lines);
+});
+
+check("a voided invoice renders, and says so unmissably", () => {
+  /*
+   * It has to render: somebody reconciling a gap in the number series needs to
+   * see what the number was spent on. What must never happen is a voided copy
+   * passing for a live one on a desk.
+   */
+  const doc = invoiceDocument({
+    invoice: { invoiceNumber: "INV-2", isVoid: true, voidReason: "Wrong tax number" },
+    receipt: receiptFixture,
+  });
+  assert.equal(doc.banner, "VOID - Wrong tax number");
+  assert.equal(doc.table.rows.length, 1);
+});
+
+check("a void with no reason recorded still says it is void", () => {
+  const doc = invoiceDocument({ invoice: { invoiceNumber: "INV-3", isVoid: true }, receipt: receiptFixture });
+  assert.ok(doc.banner.startsWith("VOID"), doc.banner);
+});
+
+check("charges that did not happen are left off the invoice", () => {
+  // "Delivery: PKR 0" on a dine-in bill is noise, and noise is what stops
+  // people reading the figures that matter.
+  const doc = invoiceDocument({ invoice: { invoiceNumber: "INV-4" }, receipt: receiptFixture });
+  const labels = doc.totals.map((total) => total.label);
+  assert.ok(!labels.includes("Delivery"), labels);
+  assert.ok(!labels.includes("Tip"), labels);
+  assert.ok(labels.includes("Subtotal") && labels.includes("Total"));
+});
+
+check("a rounding adjustment is shown even though it is tiny", () => {
+  /*
+   * The one charge that is *more* confusing when hidden: an unexplained
+   * difference between the lines and the total reads as an arithmetic error.
+   */
+  const doc = invoiceDocument({
+    invoice: { invoiceNumber: "INV-5" },
+    receipt: { ...receiptFixture, totals: { ...receiptFixture.totals, roundOff: -0.4, grandTotal: 179.6 } },
+  });
+  assert.ok(doc.totals.some((total) => total.label === "Rounding"), doc.totals);
+});
+
+check("tax is broken down per rate when the lines are there", () => {
+  // "Tax: 240" tells a filer nothing; a return is built from rate and base.
+  const doc = invoiceDocument({
+    invoice: { invoiceNumber: "INV-6" },
+    receipt: {
+      ...receiptFixture,
+      taxLines: [{ name: "GST", rate: 16, taxableAmount: 180, amount: 28.8 }],
+      totals: { ...receiptFixture.totals, taxTotal: 28.8, grandTotal: 208.8 },
+    },
+  });
+  assert.ok(doc.totals.some((total) => total.label === "GST (16%) on PKR 180"), doc.totals);
+});
+
+check("an unpaid invoice shows what is owed, an overpaid one does not", () => {
+  const owed = invoiceDocument({
+    invoice: { invoiceNumber: "INV-7" },
+    receipt: { ...receiptFixture, totals: { ...receiptFixture.totals, paidTotal: 100 } },
+  });
+  assert.ok(owed.totals.some((total) => total.label === "Balance due"), owed.totals);
+
+  // An overpayment is a refund to arrange, not a negative balance to print.
+  const over = invoiceDocument({
+    invoice: { invoiceNumber: "INV-8" },
+    receipt: { ...receiptFixture, totals: { ...receiptFixture.totals, paidTotal: 300 } },
+  });
+  assert.ok(!over.totals.some((total) => total.label === "Balance due"), over.totals);
+});
+
+const payslipFixture = {
+  branch: { name: "FoodZone", legalName: "FoodZone (Pvt) Ltd", timezone: "Asia/Karachi" },
+  period: { name: "October 2026", startDate: new Date("2026-10-01"), endDate: new Date("2026-10-31"), payDate: new Date("2026-11-05") },
+  payslip: {
+    status: "APPROVED",
+    payableDays: 27, presentDays: 25, leaveDays: 2, absentDays: 2,
+    workedMinutes: 12_240, overtimeMinutes: 430,
+    grossAmount: 74_500, deductionAmount: 9_320, netAmount: 65_180,
+    employee: { firstName: "A", lastName: "Worker", employeeCode: "EMP-1", currency: "PKR", salaryType: "MONTHLY" },
+    lines: [
+      { code: "BASIC", label: "Basic salary", isEarning: true, quantity: 27, rate: 2200, amount: 59_400 },
+      { code: "PF", label: "Provident fund", isEarning: false, quantity: 1, rate: 4455, amount: 4_455 },
+    ],
+  },
+};
+
+check("a deduction is drawn as a negative", () => {
+  // A column of positive numbers that happen to be subtracted is how somebody
+  // reads their own net pay wrongly.
+  const doc = payslipDocument(payslipFixture);
+  const pf = doc.table.rows.find((row) => row.component === "Provident fund");
+  assert.ok(pf.amount.startsWith("-"), pf);
+  assert.ok(doc.totals.find((total) => total.label === "Deductions").value.startsWith("-"));
+});
+
+check("a payslip shows the arithmetic, not just the answer", () => {
+  const doc = payslipDocument(payslipFixture);
+  const basic = doc.table.rows.find((row) => row.component === "Basic salary");
+  assert.equal(basic.basis, "27 x 2,200");
+  // A fixed allowance has no basis to show, and inventing one would be a lie.
+  const noBasis = payslipDocument({
+    ...payslipFixture,
+    payslip: { ...payslipFixture.payslip, lines: [{ code: "HRA", label: "House rent", isEarning: true, amount: 9000 }] },
+  });
+  assert.equal(noBasis.table.rows[0].basis, "");
+});
+
+check("attendance is printed beside the pay it explains", () => {
+  const doc = payslipDocument(payslipFixture);
+  const period = doc.parties.find((party) => party.title === "Period");
+  assert.ok(period.lines.some((line) => line.includes("absent 2")), period.lines);
+  assert.ok(period.lines.some((line) => line.includes("204h")), period.lines);
+  assert.ok(period.lines.some((line) => line.includes("overtime 7h 10m")), period.lines);
+});
+
+check("a draft payslip cannot be mistaken for a final one", () => {
+  /*
+   * A payslip is a statement of fact about money owed. One generated from
+   * numbers that may still be regenerated must not circulate as final.
+   */
+  const draft = payslipDocument({ ...payslipFixture, payslip: { ...payslipFixture.payslip, status: "DRAFT" } });
+  assert.ok(draft.banner.startsWith("DRAFT"), draft.banner);
+
+  const approved = payslipDocument(payslipFixture);
+  assert.equal(approved.banner, null);
+
+  const cancelled = payslipDocument({ ...payslipFixture, payslip: { ...payslipFixture.payslip, status: "CANCELLED" } });
+  assert.equal(cancelled.banner, "CANCELLED");
+});
+
+check("a bank account is never printed in full", () => {
+  // The last four are enough to recognise the account; the rest is a credential.
+  const doc = payslipDocument({
+    ...payslipFixture,
+    payslip: {
+      ...payslipFixture.payslip,
+      employee: { ...payslipFixture.payslip.employee, bankAccountNumber: "PK36HABB0000001234567890" },
+    },
+  });
+  const note = doc.notes.find((line) => line.startsWith("Credited"));
+  assert.equal(note, "Credited to account ending 7890");
+  assert.ok(!doc.notes.some((line) => line.includes("PK36HABB")), doc.notes);
+});
+
+// --- scheduled order slots ---------------------------------------------------
+
+const KHI = "Asia/Karachi";
+// 11:00 to 23:00 every day, and Friday trades until 02:00.
+const WEEK_HOURS = Array.from({ length: 7 }, (_, dayOfWeek) => ({ dayOfWeek, opensAt: 660, closesAt: dayOfWeek === 5 ? 1560 : 1380 }));
+// 2026-11-12 is a Thursday; 2026-11-13 is the Friday.
+const EARLY = new Date("2026-11-11T04:00:00Z");
+
+check("slots are the branch's own trading hours, in its own clock", () => {
+  const grid = buildSlots({ date: "2026-11-12", timeZone: KHI, hours: WEEK_HOURS, now: EARLY });
+  assert.equal(grid.slots[0].label, "11:00");
+  // 23:00 close, 30-minute slots: the last one a kitchen can finish is 22:30.
+  assert.equal(grid.slots.at(-1).label, "22:30");
+  // 11:00 in Karachi is 06:00Z.
+  assert.equal(grid.slots[0].at.toISOString(), "2026-11-12T06:00:00.000Z");
+});
+
+check("the last slot leaves a full slot of kitchen time", () => {
+  /*
+   * Offering 22:55 to a kitchen that shuts at 23:00 promises food nobody is
+   * going to cook.
+   */
+  const grid = buildSlots({ date: "2026-11-12", timeZone: KHI, hours: WEEK_HOURS, now: EARLY, slotMinutes: 60 });
+  assert.equal(grid.slots.at(-1).label, "22:00");
+
+  /*
+   * The case that actually proves the rule: a closing time that is not a whole
+   * number of slots after opening. 11:00 to 22:50 in half hours must stop at
+   * 22:00 — stopping at 22:30 would leave the kitchen twenty minutes, and a
+   * window that happens to divide evenly hides the difference entirely.
+   */
+  const ragged = buildSlots({
+    date: "2026-11-12", timeZone: KHI, now: EARLY,
+    hours: [{ dayOfWeek: 4, opensAt: 660, closesAt: 1370 }],
+  });
+  assert.equal(ragged.slots.at(-1).label, "22:00");
+});
+
+check("a kitchen that trades past midnight can be booked past midnight", () => {
+  // Friday closes at 02:00, written as 1560 minutes past Friday midnight.
+  const grid = buildSlots({ date: "2026-11-13", timeZone: KHI, hours: WEEK_HOURS, now: EARLY });
+  assert.equal(grid.slots.at(-1).label, "01:30");
+  // Which really is Saturday morning.
+  assert.equal(grid.slots.at(-1).at.toISOString(), "2026-11-13T20:30:00.000Z");
+});
+
+check("a day the branch does not trade has no slots, and says so", () => {
+  const grid = buildSlots({ date: "2026-11-12", timeZone: KHI, hours: [{ dayOfWeek: 0, opensAt: 660, closesAt: 1380 }], now: EARLY });
+  assert.deepEqual(grid.slots, []);
+  assert.equal(grid.reason, "CLOSED");
+});
+
+check("nothing inside the lead time is offered at all", () => {
+  /*
+   * Not offered-and-rejected: a slot a customer can pick and then be refused
+   * teaches them to try again, which is worse than never showing it.
+   */
+  const now = new Date("2026-11-12T13:10:00Z"); // 18:10 in Karachi
+  const grid = buildSlots({ date: "2026-11-12", timeZone: KHI, hours: WEEK_HOURS, now, leadMinutes: 45 });
+  assert.equal(grid.slots[0].label, "19:00");
+  assert.ok(!grid.slots.some((slot) => slot.label === "18:30"), grid.slots.slice(0, 3));
+});
+
+check("a closure takes its slots off the grid", () => {
+  // Shut from 18:00 to 20:00 for a private function.
+  const grid = buildSlots({
+    date: "2026-11-12", timeZone: KHI, hours: WEEK_HOURS, now: EARLY,
+    closures: [{ startsAt: "2026-11-12T13:00:00Z", endsAt: "2026-11-12T15:00:00Z" }],
+  });
+  const labels = grid.slots.map((slot) => slot.label);
+  assert.ok(!labels.includes("18:00") && !labels.includes("19:30"), labels);
+  // The boundary belongs to the next slot, not the closure.
+  assert.ok(labels.includes("20:00"), labels);
+  assert.ok(labels.includes("17:30"), labels);
+});
+
+check("a full slot is shown as full rather than hidden", () => {
+  /*
+   * Hiding it reads as "no slots". Showing it with nothing left reads as
+   * "that one is taken, pick another" — and a customer who can see the shape
+   * of the evening picks a workable time without being told to.
+   */
+  const at = new Date("2026-11-12T14:00:00Z").toISOString(); // 19:00 local
+  const grid = buildSlots({
+    date: "2026-11-12", timeZone: KHI, hours: WEEK_HOURS, now: EARLY,
+    capacity: 10, counts: new Map([[at, 10]]),
+  });
+  const full = grid.slots.find((slot) => slot.label === "19:00");
+  assert.equal(full.available, false);
+  assert.equal(full.remaining, 0);
+  assert.equal(grid.slots.find((slot) => slot.label === "19:30").remaining, 10);
+});
+
+check("no ceiling means every slot is open", () => {
+  const grid = buildSlots({ date: "2026-11-12", timeZone: KHI, hours: WEEK_HOURS, now: EARLY, capacity: 0 });
+  assert.ok(grid.slots.every((slot) => slot.available && slot.remaining === null));
+});
+
+check("two trading windows that touch do not produce the slot twice", () => {
+  // A lunch service and a dinner service that meet at 16:00.
+  const hours = [
+    { dayOfWeek: 4, opensAt: 660, closesAt: 960 },
+    { dayOfWeek: 4, opensAt: 960, closesAt: 1380 },
+  ];
+  const grid = buildSlots({ date: "2026-11-12", timeZone: KHI, hours, now: EARLY });
+  const labels = grid.slots.map((slot) => slot.label);
+  assert.equal(new Set(labels).size, labels.length);
+  assert.ok(labels.includes("16:00"));
+  // And they come back in time order, not window order.
+  assert.deepEqual([...labels].sort(), labels);
+});
+
+check("a channel's own hours win over the all-channel default", () => {
+  const hours = [
+    { dayOfWeek: 4, opensAt: 660, closesAt: 1380, channel: null },
+    { dayOfWeek: 4, opensAt: 720, closesAt: 900, channel: "WEB" },
+  ];
+  const web = buildSlots({ date: "2026-11-12", timeZone: KHI, hours, now: EARLY, channel: "WEB" });
+  // Both windows apply to WEB: the general one and its own.
+  assert.equal(web.slots[0].label, "11:00");
+
+  const pos = buildSlots({ date: "2026-11-12", timeZone: KHI, hours, now: EARLY, channel: "POS" });
+  // The WEB-only window is not offered to the till.
+  assert.equal(pos.slots.at(-1).label, "22:30");
+});
+
+check("checkout re-checks the slot rather than trusting the page", () => {
+  /*
+   * The grid the browser was shown may be an hour old, the slot may have
+   * filled since, and a request can arrive without the page ever being
+   * loaded. Each refusal names its own reason so the message can be true.
+   */
+  const at = new Date("2026-11-12T14:00:00Z");
+  const grid = buildSlots({
+    date: "2026-11-12", timeZone: KHI, hours: WEEK_HOURS, now: EARLY,
+    capacity: 2, counts: new Map([[at.toISOString(), 2]]),
+  });
+
+  assert.equal(findSlot(at, grid).reason, "SLOT_FULL");
+  assert.equal(findSlot(new Date("2026-11-12T14:07:00Z"), grid).reason, "NOT_A_SLOT");
+  assert.equal(findSlot("not a date", grid).reason, "INVALID_TIME");
+  assert.equal(findSlot(new Date("2026-11-12T14:30:00Z"), grid).ok, true);
+});
+
+check("the calendar runs from today to the limit, inclusive", () => {
+  const dates = schedulableDates({ now: new Date("2026-11-11T19:00:00Z"), timeZone: KHI, maxDaysAhead: 3 });
+  // 19:00Z is already the 12th in Karachi, which is what "today" means here.
+  assert.deepEqual(dates, ["2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15"]);
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

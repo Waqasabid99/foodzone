@@ -171,6 +171,9 @@ model EmployeeSalaryComponent {
   effectiveTo   DateTime?
 
   @@index([employeeId])
+  /// As on PayslipLine: created by migration 20261102100000 and declared here
+  /// so a later migration does not propose dropping it.
+  @@index([accountId])
 }
 
 model Shift {
@@ -432,4 +435,8 @@ model PayslipLine {
   accountId String?
 
   @@index([payslipId])
+  /// Declared because migration 20261102100000 created it. Left undeclared, the
+  /// next migration generated against this schema proposes dropping it — which
+  /// is how an index somebody added on purpose quietly disappears.
+  @@index([accountId])
 }

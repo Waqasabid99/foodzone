@@ -28,8 +28,18 @@ const OUT_FILE = path.join(ROOT, "src", "generated", "openapi.json");
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
-/** The documentation endpoints describe the API; they are not part of it. */
-const EXCLUDED = [/^\/api\/docs(\/|$)/];
+/**
+ * Not part of the API this document describes.
+ *
+ *   * `/api/docs` describes the API; it is not in it.
+ *   * `/api/health` is an operational probe outside `/api/v1`, deliberately
+ *     unversioned and unauthenticated. It is not a contract the apps build
+ *     against, and listing it would invite a client to depend on its shape.
+ *
+ * The internal job endpoints are deliberately *not* excluded: they are part of
+ * what somebody deploying this has to wire up, so they belong in the document.
+ */
+const EXCLUDED = [/^\/api\/docs(\/|$)/, /^\/api\/health$/];
 
 const warnings = [];
 const usedOverrides = new Set();

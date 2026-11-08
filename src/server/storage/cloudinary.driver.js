@@ -78,6 +78,28 @@ export const cloudinaryDriver = {
     };
   },
 
+  /**
+   * Writes bytes we produced ourselves — a rendered PDF, not a client upload.
+   *
+   * Sent as a data URI because the SDK's buffer path is a stream API, and the
+   * documents here are tens of kilobytes. `resource_type: raw` for anything
+   * that is not an image: Cloudinary would otherwise try to decode a PDF as a
+   * picture and rasterise page one.
+   */
+  async putObject({ storageKey, buffer, mimeType = "application/octet-stream", kind }) {
+    const cloudinary = await sdk();
+    const type = resourceType(kind);
+
+    const result = await cloudinary.uploader.upload(`data:${mimeType};base64,${buffer.toString("base64")}`, {
+      public_id: toPublicId(storageKey),
+      resource_type: type,
+      overwrite: true,
+      invalidate: true,
+    });
+
+    return { sizeBytes: Number(result.bytes ?? buffer.byteLength), url: result.secure_url };
+  },
+
   async statObject({ storageKey, kind }) {
     const cloudinary = await sdk();
     try {
@@ -104,6 +126,59 @@ export const cloudinaryDriver = {
       resource_type: resourceType(kind),
       invalidate: true,
     });
+  },
+
+  /**
+   * One page of our folder, for the orphan sweep.
+   *
+   * Cloudinary partitions by resource type — an image, a video and a raw file
+   * live in three separate listings — so a complete sweep has to walk all
+   * three. The cursor carries both which listing we are in and Cloudinary's
+   * own position inside it, so the caller still sees a single paged stream.
+   *
+   * The listing is narrowed to `CLOUDINARY_FOLDER`. A cloud shared with
+   * another app therefore never appears here at all, which is one more layer
+   * between the sweep and somebody else's files.
+   */
+  async listObjects({ limit = 500, cursor = null } = {}) {
+    const cloudinary = await sdk();
+    const config = env();
+    const types = ["image", "video", "raw"];
+
+    const [cursorType, cursorNext = null] = cursor ? String(cursor).split("|") : [];
+    const type = types.includes(cursorType) ? cursorType : types[0];
+
+    const result = await cloudinary.api.resources({
+      type: "upload",
+      resource_type: type,
+      prefix: `${config.CLOUDINARY_FOLDER}/`,
+      // Cloudinary's own ceiling for this call.
+      max_results: Math.min(limit, 500),
+      ...(cursorNext ? { next_cursor: cursorNext } : {}),
+    });
+
+    const prefix = `${config.CLOUDINARY_FOLDER}/`;
+    const objects = (result.resources ?? []).map((resource) => {
+      const publicId = String(resource.public_id ?? "");
+      // Reverse of `toPublicId`: drop our folder, put the extension back.
+      // Anything that is not under our folder is handed back untouched, so the
+      // sweep's own key check is what refuses it.
+      const withoutFolder = publicId.startsWith(prefix) ? publicId.slice(prefix.length) : publicId;
+      const format = resource.format ? String(resource.format) : null;
+      const storageKey = format && !withoutFolder.endsWith(`.${format}`) ? `${withoutFolder}.${format}` : withoutFolder;
+
+      return {
+        storageKey,
+        uploadedAt: resource.created_at ? new Date(resource.created_at) : null,
+        sizeBytes: Number(resource.bytes ?? 0),
+      };
+    });
+
+    // Finish this listing, then move to the next type, then stop.
+    const nextInType = result.next_cursor ? `${type}|${result.next_cursor}` : null;
+    const nextType = types[types.indexOf(type) + 1] ?? null;
+
+    return { objects, cursor: nextInType ?? nextType };
   },
 
   publicUrl({ storageKey, kind, width, quality = "auto" }) {

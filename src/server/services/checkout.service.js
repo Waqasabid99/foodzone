@@ -3,6 +3,7 @@ import { ApiError } from "@/lib/api";
 import { phoneKey } from "@/lib/phone-key";
 import { withRetryingTransaction } from "@/server/utils/db";
 import { getSettings } from "@/server/services/setting.service";
+import { resolveScheduledSlot } from "@/server/services/slot.service";
 import { getBranch } from "@/server/services/branch.service";
 import { nextDocumentNumber, dayPeriodKey } from "@/server/utils/sequence";
 import { priceOrder } from "@/server/pricing/engine";
@@ -255,12 +256,26 @@ export async function placeOrder({
   placedById = null,
   cartId = null,
   couponCode = null,
+  scheduledFor = null,
   at = new Date(),
 }) {
   if (!items?.length) throw ApiError.validation("Your cart is empty", { items: ["Add at least one item"] });
 
   const settings = await getSettings({ branchId });
   const branch = await assertCanOrder({ branchId, type, at, settings });
+
+  /*
+   * A slot chosen for later.
+   *
+   * Checked here, before anything is priced or written, because the answer
+   * can be "that time is fully booked" and the customer needs to hear it
+   * before a payment is attempted rather than after.
+   *
+   * Re-derived from the branch's hours rather than taken on trust: the
+   * checkout page may have been open for an hour, the slot may have filled
+   * since, and the request can arrive without the page ever being loaded.
+   */
+  const slotAt = await resolveScheduledSlot({ branchId, scheduledFor, channel, now: at });
 
   const priced = await priceForCheckout({
     branchId,
@@ -372,7 +387,12 @@ export async function placeOrder({
         kitchenNote,
         placedById,
         placedAt: at,
-        promisedAt: new Date(at.getTime() + prepMinutes * 60_000),
+        scheduledFor: slotAt,
+        // A pre-order is promised for its slot, not for twenty minutes from
+        // now. `promisedAt` drives the kitchen's late warning, so leaving it
+        // at the ASAP value would have every pre-order show as overdue from
+        // the moment it was placed.
+        promisedAt: slotAt ?? new Date(at.getTime() + prepMinutes * 60_000),
       },
       select: { id: true },
     });
@@ -602,6 +622,7 @@ export async function checkoutCart({ cart, userId, guest, input, channel = "WEB"
     guestCount: input.guestCount ?? null,
     customerNote: input.customerNote ?? null,
     tipAmount: input.tipAmount ?? 0,
+    scheduledFor: input.scheduledFor ?? null,
     cartId: cart.id,
     // The code lives on the cart, so a customer who applied it on the website
     // and checks out from the app still gets it.

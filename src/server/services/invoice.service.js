@@ -122,11 +122,28 @@ export async function voidInvoice({ orderId, reason, actorId = null }) {
   if (!invoice) throw ApiError.notFound("No invoice has been issued for this order");
   if (invoice.isVoid) throw ApiError.conflict("This invoice is already void");
 
-  return prisma.invoice.update({
+  const voided = await prisma.invoice.update({
     where: { id: invoice.id },
     data: { isVoid: true, voidReason: reason },
     select: SELECT,
   });
+
+  /*
+   * Drop any rendered copy.
+   *
+   * A stored PDF was produced while this invoice was live, so it does not
+   * carry the VOID banner — and it sits at a URL anyone with the link can
+   * fetch. Leaving it there is how a voided invoice keeps circulating as a
+   * valid one, which is the whole failure the banner exists to prevent.
+   *
+   * Imported here rather than at the top: the document service renders PDFs
+   * and pulls in pdfkit, and nothing else in this module needs it.
+   */
+  const { discardStoredDocument } = await import("@/server/services/document.service");
+  await discardStoredDocument({ ownerType: "Invoice", ownerId: invoice.id });
+  await prisma.invoice.update({ where: { id: invoice.id }, data: { pdfUrl: null } });
+
+  return { ...voided, pdfUrl: null };
 }
 
 /**

@@ -154,6 +154,8 @@ const ORDER_SELECT = {
   externalRef: true,
   placedAt: true,
   confirmedAt: true,
+  /// Null on an ASAP order, which is almost all of them.
+  scheduledFor: true,
   promisedAt: true,
   preparedAt: true,
   completedAt: true,
@@ -292,6 +294,7 @@ export async function trackOrder({ orderNumber, userId = null, phone = null }) {
       type: true,
       placedAt: true,
       confirmedAt: true,
+      scheduledFor: true,
       promisedAt: true,
       preparedAt: true,
       completedAt: true,
@@ -316,6 +319,9 @@ export async function trackOrder({ orderNumber, userId = null, phone = null }) {
     branch: order.branch,
     placedAt: order.placedAt,
     confirmedAt: order.confirmedAt,
+    // A customer tracking a pre-order needs to see the slot they chose, not
+    // just a promise time that looks oddly far away.
+    scheduledFor: order.scheduledFor,
     promisedAt: order.promisedAt,
     preparedAt: order.preparedAt,
     completedAt: order.completedAt,

@@ -9,7 +9,9 @@ import { env } from "@/lib/env";
  *
  *   createUploadTarget → where and how the client should send the bytes
  *   statObject         → does it exist, and how big is it really
+ *   putObject          → write bytes we produced ourselves (a rendered PDF)
  *   deleteObject       → remove it
+ *   listObjects        → one page of what is really stored, for the orphan sweep
  *   publicUrl          → the URL to serve it from
  *
  * Drivers are imported lazily and cached: without that, every route that

@@ -41,6 +41,33 @@ function check(name, condition, detail) {
 let ipCounter = 0;
 const nextIp = () => `10.91.${(++ipCounter >> 8) & 255}.${ipCounter & 255}`;
 
+const CRON = process.env.E2E_CRON_SECRET ?? "phase2-test-secret";
+
+/**
+ * Drains the outbox until it goes quiet.
+ *
+ * Looped rather than called once: a handler may enqueue a follow-up event, and
+ * a single pass leaves that generation unprocessed — which fails the assertion
+ * for a reason that has nothing to do with the ledger.
+ */
+async function drainOutbox() {
+  let status = 0;
+
+  for (let cycle = 0; cycle < 40; cycle += 1) {
+    const res = await fetch(`${BASE}/api/internal/jobs/outbox`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${CRON}` },
+    });
+    status = res.status;
+    if (!res.ok) return status;
+
+    const body = await res.json().catch(() => null);
+    if ((body?.data?.processed ?? 0) === 0 && (body?.data?.failed ?? 0) === 0) return status;
+  }
+
+  return status;
+}
+
 async function api(pathname, { method = "GET", body, token, ip } = {}) {
   const res = await fetch(`${BASE}/api/v1${pathname}`, {
     method,
@@ -543,6 +570,52 @@ async function main() {
   check("the batch holds only what survived", round(num(batch?.remainingQuantity)) === 1.8, batch);
   check("the batch is priced at what the run actually cost", num(batch?.unitCost) === 440, batch);
   check("a perishable output gets an expiry from its shelf life", Boolean(batch?.expiryDate), batch);
+
+  // ================= PRODUCTION: THE LEDGER CONSEQUENCE =================
+  //
+  // The arithmetic of the entry is pinned in tests/unit.mjs. What only a
+  // database and a running worker can prove is that completing a run actually
+  // *reaches* the ledger: the posting rule was written, wired to
+  // `finance.production_completed` and then never exercised end to end, so
+  // nothing caught the handler being unsubscribed, the event never enqueued,
+  // or the entry parked for want of an accounting period.
+  check("the outbox drains", (await drainOutbox()) === 200);
+
+  const prodEntry = await prisma.journalEntry.findFirst({
+    where: { source: "PRODUCTION", sourceId: runId },
+    select: {
+      id: true,
+      totalDebit: true,
+      totalCredit: true,
+      productionOrderId: true,
+      lines: { select: { debit: true, credit: true, account: { select: { code: true } } } },
+    },
+  });
+  check("completing a run posts to the ledger", Boolean(prodEntry), prodEntry);
+  check("the entry balances", num(prodEntry?.totalDebit) === num(prodEntry?.totalCredit), {
+    debit: prodEntry?.totalDebit,
+    credit: prodEntry?.totalCredit,
+  });
+  check("the entry is linked back to the run", prodEntry?.productionOrderId === runId, prodEntry?.productionOrderId);
+
+  const lineFor = (code, side) => num(prodEntry?.lines.find((line) => line.account.code === code && num(line[side]) > 0)?.[side]);
+  // 1.8 litres at 440 stays in stock; the 0.2 that was lost is expensed.
+  check("the finished output is debited to inventory at cost", lineFor("1400", "debit") === 792, prodEntry?.lines);
+  check("yield loss is expensed to wastage", lineFor("5200", "debit") === 88, prodEntry?.lines);
+  check("the raw materials are relieved from inventory", lineFor("1400", "credit") === 800, prodEntry?.lines);
+  check("labour is absorbed, not charged twice", lineFor("5300", "credit") === 60, prodEntry?.lines);
+  check("overhead is absorbed, not charged twice", lineFor("5350", "credit") === 20, prodEntry?.lines);
+
+  // The run's own wastage row must not post a second time: the loss is already
+  // inside the entry above, and posting it again would expense it twice and
+  // relieve inventory for stock that was never there.
+  const wastageEntries = await prisma.journalEntry.count({ where: { source: "WASTAGE", productionOrderId: runId } });
+  check("yield loss is not also posted as standalone wastage", wastageEntries === 0, wastageEntries);
+
+  // Redelivery is normal in an at-least-once queue.
+  await drainOutbox();
+  const prodEntries = await prisma.journalEntry.count({ where: { source: "PRODUCTION", sourceId: runId } });
+  check("a redelivered event does not post a second time", prodEntries === 1, prodEntries);
 
   const recomplete = await api(`/admin/production-orders/${runId}/complete`, {
     method: "POST",
