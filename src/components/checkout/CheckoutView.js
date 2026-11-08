@@ -89,6 +89,16 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
   const [tipCustom, setTipCustom] = useState("");
   const [quote, setQuote] = useState({ key: null, totals: null, error: null });
   /*
+   * Bumped to force a re-quote when the inputs have not changed.
+   *
+   * The quote effect keys off `quoteKey`, so clearing the quote after a failed
+   * checkout was not enough on its own: the basket is usually identical, the
+   * key is therefore identical, the effect never re-runs, and `quoting` stays
+   * true for good — a dimmed total and a dead Place order button until the
+   * customer thinks to reload. Any failure did this, whatever its cause.
+   */
+  const [requote, setRequote] = useState(0);
+  /*
    * Store credit: the server's quote, and the customer's answer to it.
    *
    * The offer carries the total it was quoted for, the same way `quote` does,
@@ -190,7 +200,7 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [quoteKey]);
+  }, [quoteKey, requote]);
 
   /*
    * What the wallet can put toward this bill.
@@ -358,6 +368,8 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
       // the button again against figures that are now wrong.
       loadCart({ force: true });
       setQuote({ key: null, totals: null, error: null });
+      // ...and actually ask again, which an unchanged basket would not.
+      setRequote((n) => n + 1);
     } finally {
       setPlacing(false);
     }
@@ -541,6 +553,7 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
           available={credit.available}
           redeemable={credit.redeemable}
           maxPercent={credit.maxPercent}
+          orderTotal={Number(quote.totals?.grandTotal ?? 0)}
           currency={lineCurrency}
           applied={creditToSpend > 0}
           onChange={setCreditApplied}

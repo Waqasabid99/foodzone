@@ -22,10 +22,19 @@ import { formatMoney } from "@/lib/format";
  * that is said plainly. A customer with 500 who can only use 300 and is told
  * nothing concludes the balance is wrong.
  */
-export default function StoreCreditPicker({ available, redeemable, maxPercent, currency, applied, onChange }) {
+export default function StoreCreditPicker({ available, redeemable, maxPercent, orderTotal = 0, currency, applied, onChange }) {
   if (!(redeemable > 0)) return null;
 
+  /*
+   * Why the whole balance is not on offer, which is not always the same
+   * reason. A balance bigger than the bill is limited by the bill; a balance
+   * bigger than the cap allows is limited by the cap. Naming a percentage
+   * that is not actually binding — "up to 100%" on a 690 bill against 2,110
+   * of credit — explains nothing and sounds like a restriction that is not
+   * there.
+   */
   const capped = available > redeemable;
+  const coversBill = orderTotal > 0 && redeemable >= orderTotal;
 
   return (
     <fieldset className="flex flex-col gap-3 rounded-card bg-surface-container-lowest p-6">
@@ -51,9 +60,11 @@ export default function StoreCreditPicker({ available, redeemable, maxPercent, c
 
       {capped ? (
         <p className="text-label-bold text-on-surface-variant">
-          {maxPercent
-            ? `Up to ${maxPercent}% of an order can be paid with credit, so the rest stays in your wallet.`
-            : "The rest stays in your wallet for another order."}
+          {coversBill
+            ? "That covers this order in full. The rest stays in your wallet."
+            : maxPercent
+              ? `Up to ${maxPercent}% of an order can be paid with credit, so the rest stays in your wallet.`
+              : "The rest stays in your wallet for another order."}
         </p>
       ) : null}
     </fieldset>
