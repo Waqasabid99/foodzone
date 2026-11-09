@@ -10,6 +10,7 @@ import ArtworkField from "@/components/dashboard/hero/ArtworkField";
 import FormAlert from "@/components/ui/FormAlert";
 import Chip from "@/components/dashboard/inventory/Chip";
 import { dateLabel } from "@/lib/finance";
+import StoredImage from "@/components/ui/StoredImage";
 
 /**
  * The home page's front window.
@@ -288,8 +289,11 @@ export default function HeroSlides({ slides, canManage, timeZone = "UTC" }) {
           return (
             <li key={slide.id} className="flex flex-wrap items-start gap-4 rounded-card bg-surface-container-lowest p-5">
               {slide.imageUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={slide.imageUrl} alt="" className="h-20 w-32 shrink-0 rounded-field object-cover" />
+                <StoredImage
+                  src={slide.imageUrl}
+                  loading="eager"
+                  className="h-20 w-32 shrink-0 rounded-field object-cover"
+                />
               ) : (
                 <span
                   aria-hidden="true"

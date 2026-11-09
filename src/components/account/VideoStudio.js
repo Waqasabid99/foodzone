@@ -8,6 +8,7 @@ import { uploadFile } from "@/lib/image-upload";
 import Field from "@/components/ui/Field";
 import FormAlert from "@/components/ui/FormAlert";
 import { REJECTION_REASONS, attemptsLeft, chipClass, durationLabel, videoState } from "@/lib/creator";
+import StoredImage from "@/components/ui/StoredImage";
 
 /**
  * Filming, uploading and submitting.
@@ -286,8 +287,7 @@ export default function VideoStudio({ videos, filmable, limits }) {
                       ) : null}
                     </div>
                     {video.thumbnailUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={video.thumbnailUrl} alt="" className="h-28 w-20 shrink-0 rounded-field object-cover" loading="lazy" />
+                      <StoredImage src={video.thumbnailUrl} className="h-28 w-20 shrink-0 rounded-field object-cover" />
                     ) : null}
                   </div>
 

@@ -7,6 +7,7 @@ import { ImagePlus, Loader2, Trash2 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { uploadImage } from "@/lib/image-upload";
 import FormAlert from "@/components/ui/FormAlert";
+import StoredImage from "@/components/ui/StoredImage";
 
 const sizeLabel = (bytes) => (bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`);
 const when = (date) => new Date(date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
@@ -94,8 +95,7 @@ export default function MediaLibrary({ assets, canDelete, currentUserId }) {
                   {asset.mimeType?.startsWith("image/") ? (
                     // Any configured storage host may serve these, and an
                     // unlisted host would make next/image throw.
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={asset.url} alt="" loading="lazy" className="size-full object-cover" />
+                    <StoredImage src={asset.url} className="size-full object-cover" />
                   ) : (
                     <span className="p-4 text-center text-body-md text-on-surface-variant">{asset.mimeType}</span>
                   )}

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import ImageField from "@/components/ui/ImageField";
 import { cropReport, HERO_BAND_RATIO, TIGHT_CROP } from "@/lib/hero-crop";
+import StoredImage from "@/components/ui/StoredImage";
 
 /**
  * A banner's artwork, shown at the shape it will actually be seen in.
@@ -67,12 +68,11 @@ export default function ArtworkField({
             className="relative isolate w-full max-w-md overflow-hidden rounded-field bg-surface-container-high"
             style={{ aspectRatio: HERO_BAND_RATIO }}
           >
-            {/* A plain img: in the workspace the file can be on any configured
-                storage host, and an unlisted host would throw in next/image. */}
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
+            {/* The artwork's own dimensions come off the loaded element, so
+                the field can warn about a file too small for the band. */}
+            <StoredImage
               src={value}
-              alt=""
+              loading="eager"
               onLoad={(event) =>
                 setSize({
                   width: event.currentTarget.naturalWidth,

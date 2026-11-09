@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Play } from "lucide-react";
 import VideoViewer from "@/components/videos/VideoViewer";
 import { durationLabel } from "@/lib/creator";
+import StoredImage from "@/components/ui/StoredImage";
 
 /**
  * Customer videos on a product page.
@@ -65,11 +66,9 @@ export default function VideoRail({ videos, productName }) {
                 /* The file lives on whichever storage this install is
                    configured with, so there is no loader that can be trusted
                    to optimise it. */
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
+                 
+                <StoredImage
                   src={video.thumbnailUrl}
-                  alt=""
-                  loading="lazy"
                   className="size-full object-cover transition-transform group-hover:scale-105"
                 />
               ) : (

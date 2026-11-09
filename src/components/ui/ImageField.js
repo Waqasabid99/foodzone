@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ImagePlus, Trash2 } from "lucide-react";
 import MediaPicker from "@/components/ui/MediaPicker";
+import StoredImage from "@/components/ui/StoredImage";
 
 /**
  * An image picker, backed by the media library.
@@ -16,9 +17,11 @@ import MediaPicker from "@/components/ui/MediaPicker";
  * The field's value is still only ever a finished URL, so no parent form has to
  * know any of this.
  *
- * The preview is a plain `<img>`, not `next/image`: in the workspace the source
- * can be any configured storage host, and an unlisted host would throw rather
- * than render.
+ * The preview goes through `StoredImage` rather than `next/image`: in the
+ * workspace the source can be any configured storage host, and an unlisted
+ * host would throw rather than render. It retries a load that fails, so a
+ * blink of bad connection does not leave the field looking empty when it is
+ * not.
  */
 export default function ImageField({
   id,
@@ -42,8 +45,7 @@ export default function ImageField({
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex size-24 shrink-0 items-center justify-center overflow-hidden rounded-field bg-surface-container-low">
           {value ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={value} alt="" className="size-full object-cover" />
+            <StoredImage src={value} loading="eager" className="size-full object-cover" />
           ) : (
             <ImagePlus
               aria-hidden="true"

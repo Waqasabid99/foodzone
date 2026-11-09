@@ -24,6 +24,7 @@ import {
 } from "@/lib/creator";
 import { hasPermission } from "@/lib/dashboard-nav";
 import { loginHref } from "@/lib/redirects";
+import StoredImage from "@/components/ui/StoredImage";
 
 export const metadata = { title: "Creator videos — FoodZone", robots: { index: false, follow: false } };
 export const dynamic = "force-dynamic";
@@ -217,12 +218,10 @@ export default async function CreatorVideosPage({ searchParams }) {
                         className="h-56 w-40 shrink-0 rounded-field bg-surface-container-highest object-cover"
                       />
                     ) : video.thumbnailUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
+                       
+                      <StoredImage
                         src={video.thumbnailUrl}
-                        alt=""
                         className="h-28 w-20 shrink-0 rounded-field object-cover"
-                        loading="lazy"
                       />
                     ) : (
                       <p className="shrink-0 rounded-field bg-surface-container-high px-4 py-3 text-body-md text-on-surface-variant">

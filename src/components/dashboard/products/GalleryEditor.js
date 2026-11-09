@@ -8,6 +8,7 @@ import { api } from "@/lib/api-client";
 import ImageField from "@/components/ui/ImageField";
 import FormAlert from "@/components/ui/FormAlert";
 import { Section } from "@/components/dashboard/products/ProductDetailsForm";
+import StoredImage from "@/components/ui/StoredImage";
 
 const MAX_IMAGES = 12;
 
@@ -65,8 +66,7 @@ export default function GalleryEditor({ productId, images, productName, canUploa
         <ul className="grid gap-3 sm:grid-cols-2">
           {items.map((item, index) => (
             <li key={`${item.url}-${index}`} className="flex gap-3 rounded-field bg-surface-container-low p-3">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={item.url} alt="" className="size-20 shrink-0 rounded-field object-cover" />
+              <StoredImage src={item.url} loading="eager" className="size-20 shrink-0 rounded-field object-cover" />
               <div className="flex min-w-0 flex-1 flex-col gap-2">
                 <label htmlFor={`alt-${index}`} className="text-label-bold text-on-surface">
                   Photo {index + 1} description

@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Loader2, Search, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { formatMoney } from "@/lib/format";
+import StoredImage from "@/components/ui/StoredImage";
 
 /**
  * Search, answered as you type.
@@ -224,11 +225,8 @@ export default function SiteSearch({ currency = "PKR", onNavigate = null }) {
                       {row.product ? (
                         <>
                           {row.product.imageUrl ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
+                            <StoredImage
                               src={row.product.imageUrl}
-                              alt=""
-                              loading="lazy"
                               className="size-10 shrink-0 rounded-field object-cover"
                             />
                           ) : (

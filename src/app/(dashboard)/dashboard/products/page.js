@@ -17,6 +17,7 @@ import { formatMoney } from "@/lib/format";
 import { loginHref } from "@/lib/redirects";
 import { getAuthContext } from "@/lib/api/auth";
 import { branchScope } from "@/lib/api/permissions";
+import StoredImage from "@/components/ui/StoredImage";
 
 export const metadata = {
   title: "Products — FoodZone",
@@ -146,8 +147,8 @@ export default async function ProductsPage({ searchParams }) {
                       <div className="flex items-center gap-3">
                         <div className="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-field bg-surface-container-low">
                           {product.imageUrl ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img src={product.imageUrl} alt="" className="size-full object-cover" loading="lazy" />
+                             
+                            <StoredImage src={product.imageUrl} className="size-full object-cover" />
                           ) : (
                             <ImageOff aria-hidden="true" className="size-4 text-on-surface-variant" />
                           )}

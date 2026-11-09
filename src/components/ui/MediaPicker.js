@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ImagePlus, Loader2, Upload, X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { uploadImage, uploadFile } from "@/lib/image-upload";
+import StoredImage from "@/components/ui/StoredImage";
 
 /**
  * The media library, as a chooser.
@@ -201,13 +202,8 @@ export default function MediaPicker({ kind = "image", ownerType = null, onPick, 
                       {kind === "video" ? (
                         <video src={asset.url} muted playsInline preload="metadata" className="size-full object-cover" />
                       ) : (
-                        // A plain img: the file can be on any configured storage
-                        // host, and an unlisted host would throw in next/image.
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
+                        <StoredImage
                           src={asset.url}
-                          alt=""
-                          loading="lazy"
                           className="size-full object-cover transition-transform duration-200 group-hover:scale-105"
                         />
                       )}

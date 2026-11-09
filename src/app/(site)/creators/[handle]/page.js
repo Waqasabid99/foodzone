@@ -5,6 +5,7 @@ import { getSiteIdentity } from "@/server/content/site";
 import { serialize } from "@/lib/api/serialize";
 import { initials } from "@/lib/format";
 import { dateLabel } from "@/lib/finance";
+import StoredImage from "@/components/ui/StoredImage";
 
 export const dynamic = "force-dynamic";
 
@@ -47,10 +48,10 @@ export default async function CreatorProfilePage({ params }) {
         {creator.avatarUrl ? (
           /* Stored on whichever storage this install is configured with, so
              there is no loader that can be trusted to optimise it. */
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
+           
+          <StoredImage
             src={creator.avatarUrl}
-            alt=""
+            loading="eager"
             className="size-20 shrink-0 rounded-full object-cover"
           />
         ) : (

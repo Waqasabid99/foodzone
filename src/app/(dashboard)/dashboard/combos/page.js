@@ -13,6 +13,7 @@ import { productSaleState } from "@/lib/product-form";
 import { hasPermission } from "@/lib/dashboard-nav";
 import { formatMoney } from "@/lib/format";
 import { loginHref } from "@/lib/redirects";
+import StoredImage from "@/components/ui/StoredImage";
 
 export const metadata = { title: "Combos — FoodZone", robots: { index: false, follow: false } };
 export const dynamic = "force-dynamic";
@@ -66,8 +67,8 @@ export default async function CombosPage({ searchParams }) {
                 <div className="flex items-start gap-3">
                   <div className="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-field bg-surface-container-low">
                     {combo.imageUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={combo.imageUrl} alt="" className="size-full object-cover" loading="lazy" />
+                       
+                      <StoredImage src={combo.imageUrl} className="size-full object-cover" />
                     ) : (
                       <ImageOff aria-hidden="true" className="size-4 text-on-surface-variant" />
                     )}

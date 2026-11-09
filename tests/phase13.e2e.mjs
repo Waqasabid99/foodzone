@@ -777,6 +777,31 @@ async function main() {
   const ceiling = num(quoted.body?.data?.redeemable);
   check("the wallet quotes a ceiling for this basket", ceiling > 0 && ceiling <= spendTotal, { spendTotal, body: quoted.body?.data });
 
+  /*
+   * The same ceiling rides on the price quote, which is what a checkout page
+   * actually reads. Asking for it separately means a second round trip and a
+   * window where the two disagree: the ceiling is a percentage of the total,
+   * so a tip added between the calls leaves a figure on screen that belongs
+   * to a bill that no longer exists.
+   */
+  const pricedQuote = await api("/checkout/quote", {
+    method: "POST",
+    token: creatorToken,
+    body: {
+      branchId,
+      type: "DINE_IN",
+      items: [{ productId, quantity: 1 }],
+    },
+  });
+  check("the price quote carries the credit ceiling with it", num(pricedQuote.body?.data?.storeCredit?.redeemable) === ceiling, {
+    fromQuote: pricedQuote.body?.data?.storeCredit,
+    fromWallet: ceiling,
+  });
+  check("and quotes it against its own total", num(pricedQuote.body?.data?.grandTotal) === spendTotal, {
+    quoteTotal: pricedQuote.body?.data?.grandTotal,
+    spendTotal,
+  });
+
   // Asking for a rupee more than the cap allows is refused outright rather
   // than quietly reduced: the difference would land on a card the customer
   // did not expect to use.

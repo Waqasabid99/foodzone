@@ -99,158 +99,15 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
    */
   const [requote, setRequote] = useState(0);
   /*
-   * Store credit: the server's quote, and the customer's answer to it.
+   * Store credit: the customer's answer to what the quote offered.
    *
-   * The offer carries the total it was quoted for, the same way `quote` does,
-   * so a stale ceiling is spotted by comparison rather than cleared by a
-   * `setState` in an effect body. The amount sent at checkout is always the
-   * current ceiling, never a figure this page worked out, and the server
-   * checks it again before spending anything.
+   * The ceiling arrives with the totals rather than from a call of its own.
+   * It is a percentage of the total, so quoting it separately meant a second
+   * round trip and a window where the two disagreed — a tip added between the
+   * calls moves the total, and the figure on screen was then a ceiling for a
+   * bill that no longer existed.
    */
-  const [creditOffer, setCreditOffer] = useState({ key: null, available: 0, redeemable: 0, maxPercent: null });
   const [creditApplied, setCreditApplied] = useState(false);
-  const [placing, setPlacing] = useState(false);
-  const [order, setOrder] = useState(null);
-  /*
-   * What the order that was just placed paid with credit.
-   *
-   * Held separately from `credit`, because placing empties the cart, which
-   * re-quotes, which clears the offer — and the receipt still has to say what
-   * was spent. A 201 means the server accepted exactly this amount; anything
-   * above the ceiling would have been refused.
-   */
-  const [placedCredit, setPlacedCredit] = useState(0);
-  const [switching, setSwitching] = useState(false);
-
-  const signedIn = sessionStatus === "authenticated";
-  const sessionResolved = sessionStatus !== "loading";
-  const type = cart?.type ?? "DELIVERY";
-  const requirements = checkoutRequirements({ type, signedIn });
-
-  /**
-   * The inputs a quote depends on, as one string.
-   *
-   * Comparing this against the key the current quote was produced for is what
-   * says whether the figures on screen are stale, without a `setState` in an
-   * effect body to mark a load as started.
-   */
-  const quoteKey = useMemo(() => {
-    if (!cart?.branchId || !cart.items?.length) return null;
-
-    // Nothing sellable left — every line was refused by the branch's menu. The
-    // quote endpoint requires at least one item, so asking would trade a clear
-    // "these items aren't available" for a validation error about the request.
-    const items = quoteItems(cart);
-    if (!items.length) return null;
-
-    return JSON.stringify({
-      branchId: cart.branchId,
-      type: cart.type,
-      // Omitted rather than sent as null when there is no code: the schema
-      // accepts the key missing, not the key present and empty.
-      ...(cart.couponCode ? { couponCode: cart.couponCode } : {}),
-      tipAmount: requirements.acceptsTip ? tip : 0,
-      items,
-    });
-  }, [cart, tip, requirements.acceptsTip]);
-
-  // Saved addresses, once we know who is asking.
-  useEffect(() => {
-    if (!signedIn) return undefined;
-
-    let cancelled = false;
-    (async () => {
-      try {
-        const list = await api.get("/addresses");
-        if (cancelled) return;
-        setAddresses({ status: "ready", list });
-        // Pre-select the default, which is the one they almost always want.
-        const preferred = list.find((address) => address.isDefault) ?? list[0];
-        if (preferred) setAddressId((current) => current ?? preferred.id);
-      } catch {
-        if (!cancelled) setAddresses({ status: "error", list: [] });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [signedIn]);
-
-  // Re-quote whenever anything priced changes. Debounced, because the tip box
-  // fires on every keystroke and each quote is a full pricing run server-side.
-  useEffect(() => {
-    if (!quoteKey) return undefined;
-
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      const body = JSON.parse(quoteKey);
-      try {
-        const totals = await api.post("/checkout/quote", body);
-        if (!cancelled) setQuote({ key: quoteKey, totals, error: null });
-      } catch (error) {
-        // A quote failure is a real blocker — branch closed, ordering paused,
-        // an item sold out since the basket was filled — so it is surfaced
-        // rather than swallowed, and the Place order button stays shut.
-        if (!cancelled) setQuote({ key: quoteKey, totals: null, error: quoteMessage(error) });
-      }
-    }, 300);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [quoteKey, requote]);
-
-  /*
-   * What the wallet can put toward this bill.
-   *
-   * Keyed on the quoted total, because the ceiling is a percentage of it: a
-   * tip or a coupon moves the total, which moves the most credit this order
-   * may take. Asked only of a signed-in customer, and any failure — no wallet,
-   * no permission, the program switched off — leaves the offer empty and the
-   * control hidden rather than interrupting a checkout over an optional way
-   * to pay.
-   */
-  const creditKey = signedIn && quote.totals?.grandTotal ? String(quote.totals.grandTotal) : null;
-
-  useEffect(() => {
-    if (!creditKey) return undefined;
-
-    let cancelled = false;
-    (async () => {
-      try {
-        const offer = await api.get(`/me/creator/wallet/redeemable?orderTotal=${encodeURIComponent(creditKey)}`);
-        if (cancelled) return;
-        setCreditOffer({
-          key: creditKey,
-          available: Number(offer.available ?? 0),
-          redeemable: Number(offer.redeemable ?? 0),
-          maxPercent: offer.maxPercent ?? null,
-        });
-      } catch {
-        if (!cancelled) setCreditOffer({ key: creditKey, available: 0, redeemable: 0, maxPercent: null });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [creditKey]);
-
-  /*
-   * Only an offer quoted for the total now on screen counts. While a re-quote
-   * is in flight the control disappears rather than offering a ceiling that
-   * belonged to a different bill.
-   *
-   * `applied` survives the total moving — a customer who said yes stays
-   * said-yes and the amount follows the new ceiling — but it can only ever
-   * spend what the current offer allows.
-   */
-  const credit = creditOffer.key === creditKey && creditKey
-    ? creditOffer
-    : { available: 0, redeemable: 0, maxPercent: null };
-  const creditToSpend = creditApplied && credit.redeemable > 0 ? credit.redeemable : 0;
 
   if (order) {
     return (
@@ -299,6 +156,15 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
   const accountBlocker = blockers.find((blocker) => blocker.fix === "account");
 
   const totals = quote.totals ?? { ...(cart.totals ?? {}), discounts: cart.discounts ?? [] };
+
+  /*
+   * Only a ceiling the server quoted for the total now on screen counts. It
+   * rides on `quote.totals`, so while a re-quote is in flight the control
+   * disappears rather than offering a figure that belonged to a different
+   * bill, and `applied` can only ever spend what the current offer allows.
+   */
+  const credit = quote.totals?.storeCredit ?? { available: 0, redeemable: 0, maxPercent: null };
+  const creditToSpend = creditApplied && credit.redeemable > 0 ? credit.redeemable : 0;
   const quoting = quoteKey !== null && quote.key !== quoteKey;
   const lineCurrency = cart.branch?.currency || currency;
 

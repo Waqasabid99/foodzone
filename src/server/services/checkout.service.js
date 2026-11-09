@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/api";
+import { logger } from "@/lib/logger";
 import { phoneKey } from "@/lib/phone-key";
 import { withRetryingTransaction } from "@/server/utils/db";
 import { getSettings } from "@/server/services/setting.service";
@@ -808,5 +809,39 @@ export async function quoteOrder({
     discounts: priced.discounts,
     rejectedDiscounts: priced.rejectedDiscounts ?? [],
     minimumOrderAmount: settings["ordering.min_order_amount"] ?? 0,
+    storeCredit: await creditCeiling({ userId, orderTotal: priced.grandTotal }),
   };
+}
+
+/**
+ * How much store credit this quote could take, quoted with the total it
+ * belongs to.
+ *
+ * Here rather than left to the client because the ceiling is a percentage of
+ * the total: asking separately means a second round trip and a window where
+ * the two disagree — a tip added between the calls moves the total, and the
+ * figure on screen is then a ceiling for a bill that no longer exists.
+ *
+ * Null for a guest, who has no wallet to spend from, and null if working it
+ * out fails at all. An optional way to pay must never take the prices down
+ * with it: the same reason the cart wraps its offers.
+ */
+async function creditCeiling({ userId, orderTotal }) {
+  if (!userId) return null;
+
+  try {
+    const quote = await redeemableFor({ userId, orderTotal });
+    // Nothing to offer is the same as nothing to say — a customer who is not
+    // a creator should not see an empty credit control on their checkout.
+    if (!(Number(quote.redeemable) > 0)) return null;
+
+    return {
+      available: quote.available,
+      redeemable: quote.redeemable,
+      maxPercent: quote.maxPercent ?? null,
+    };
+  } catch (error) {
+    logger.warn({ err: error, userId }, "could not quote store credit for a checkout");
+    return null;
+  }
 }
