@@ -380,7 +380,7 @@ why they are listed here rather than left to be inferred.
 | Job | When `vercel.json` runs it | What stops if it does not run |
 | --- | --- | --- |
 | `outbox` | every minute | emails, push and ledger postings never leave the queue |
-| `maintenance` | 03:00 | nothing is pruned, and nobody is told about low stock |
+| `maintenance` | 03:00 | nothing is pruned, nobody is told about low stock, and stock held by abandoned orders is never released |
 | `creator-credit` | 03:15 | earnings never become spendable credit |
 | `attendance` | 03:30 | absences never become rows, and payroll is built without them |
 | `creator-rollup` | 03:45 | the creator funnel stops gaining days |
@@ -400,6 +400,19 @@ trains people to ignore all of them.
 **The nightly maintenance job** prunes delivered outbox events, clears expired
 timed 86s, prunes `QrScan` rows older than 180 days, and deletes carts past
 their 7-day expiry.
+
+**The nightly maintenance job also releases stock nobody is coming to collect.**
+A placed order holds its ingredients and gives them back when the food is made
+or the order is cancelled. An order that reaches neither — a table that walked
+out, a pre-order left open, a status change lost to a crash — would hold them
+forever, and where a branch enforces availability that is stock quietly
+withdrawn from sale. The sweep releases two kinds: a hold on an order that has
+already finished, which is wrong *now* whatever its age and which is the net
+under every path that should have released and did not, and a hold on an order
+still nominally live past `inventory.reservation_stale_hours` (24 by default,
+per branch, zero to switch it off). The second is logged as a warning rather
+than done quietly — an order still `PREPARING` a day later is a problem the
+kitchen has, not housekeeping.
 
 **The nightly maintenance job also alerts on low stock**, to whoever holds
 `purchase_orders.create` — the grant that can actually raise an order, because
@@ -1617,6 +1630,12 @@ ledger and every level is provably correct again. It reports what it corrected �
 a non-empty `drift` means something wrote around `postMovement`, which is a bug
 to chase rather than a number to fix quietly.
 
+`StockLevel` caches **two** numbers and the rebuild checks both. `quantity` is
+the sum of the movements; `reservedQuantity` is the sum of the holds still held
+(see *Stock reservation* below), reported separately under `reservations`.
+Checking one and not the other would leave half the row unprovable — and it is
+the reserved half that silently withdraws stock from sale when it drifts.
+
 **Direction comes from the movement type, never the caller's sign.** A wastage
 sent as a positive number still removes stock. `COUNT_CORRECTION` and
 `OPENING_BALANCE` are the two exceptions, where the sign *is* the finding.
@@ -1791,6 +1810,83 @@ ledger. Wastage is kept separate from a negative adjustment because **it is a
 number a kitchen is managed on**: burying spoiled food inside "adjustments"
 destroys the only signal that a fridge is failing.
 
+## Stock reservation
+
+`StockLevel.reservedQuantity` was in the schema, read by `onHand`, and printed
+on every stock screen as `available = quantity - reserved` from the day
+inventory was built — and nothing ever wrote it. So "available" always equalled
+on-hand, which is the worst kind of wrong: a number that looks like it is
+answering the question and is not. Two customers could each be sold the last
+portion, and the second found out in the kitchen.
+
+A placed order now **holds** what it is going to be made of, through the same
+recipe explosion depletion uses later. One explosion, two callers, deliberately:
+a hold for 200g against a deduction of 180g would leave 20g held forever with
+nothing to point at the cause.
+
+`StockReservation` stands to `reservedQuantity` exactly as `StockMovement`
+stands to `quantity` — the truth behind a cache, which is what makes the cache
+rebuildable. There is a table rather than just a column because releasing a
+hold means knowing what was held: re-deriving it from the recipes at release
+time looks cheaper and is wrong, since a recipe revised between the placing and
+the cancelling would give back a different number than was taken, and the
+column would drift by the difference permanently. The invariant, in one line:
+**for any item at any location, `reservedQuantity` is the sum of the
+reservations still `HELD`.**
+
+Four moments, and the design falls out of them:
+
+- **placed** — the order holds its ingredients, inside the order's own
+  transaction. An order that exists without its holds oversells the next
+  customer; holds without an order are stock nobody can ever release.
+- **changed** — a second round or a removed line *moves* the hold to match,
+  which is why reserving reconciles rather than adds. It explodes the order as
+  it now stands and applies the difference, so calling it twice changes nothing
+  the second time and a table on its fourth round holds four rounds' worth.
+- **made** — depletion turns the hold into the deduction, in the same
+  transaction as the `SALE_OUT` movements. A crash between them would leave
+  stock both gone and spoken for, which reads as negative availability until
+  somebody rebuilds.
+- **not made** — the hold is released, by cancellation or by the nightly sweep.
+
+### Holding is not the same as refusing
+
+`inventory.reservation` is `off`, `hold` or `enforce`, per branch, defaulting to
+`hold`:
+
+| Mode | What a placed order does | What a sale it cannot cover does |
+| --- | --- | --- |
+| `off` | nothing; `available` equals on-hand, as before | nothing |
+| `hold` | holds its ingredients | proceeds |
+| `enforce` | holds its ingredients | **409**, and the order never exists |
+
+The default is the one that cannot cost a sale. `enforce` is opt-in because it
+is only honest where somebody actually keeps the counts right: a branch that
+has not received a delivery into the system has food in the fridge the database
+does not know about, and enforcing there turns away orders for stock that is
+physically present. The cost of being wrong is wildly asymmetric, which is why
+it is not the starting position — and why it is per branch, since the flagship
+with a storeman counting every morning and the satellite that has never done a
+stock count cannot share an answer.
+
+Under `enforce`, **the write decides, not the check.** Two tills asking for the
+last portion at the same moment both pass any test made beforehand, so the
+increment is conditional on there still being room (`quantity -
+reservedQuantity >= needed`) — the same way a limited promotion's last
+redemption is settled by a conditional increment rather than by the eligibility
+test that preceded it. One wins, one is told, and the shelf is never oversold.
+
+A refusal names the **dish**, not the ingredient: "we cannot make your Burger"
+is something a customer can act on, where the SKU that ran out is a name they
+have never heard. The shortfall itself — item, required, on hand, already held
+— rides in `error.details.shortages` for whoever has to decide what to do, and
+`GET /admin/orders/{id}/reservations` (`stock.read`) is where they see that nine
+portions are on the shelf and eight orders are ahead of them.
+
+Reservations are not posted for a branch with no stock location or an order
+whose variants have no recipe. Those are branches part-way through setting
+inventory up, not refusals.
+
 ## Sale-time depletion
 
 The join between the catalog and the store room, and what makes
@@ -1813,9 +1909,12 @@ Two decisions shape it:
   already-deducted order is skipped, so a redelivered event cannot empty a store
   room twice.
 
-Cancelling an order that was already deducted posts a `CUSTOMER_RETURN` rather
-than deleting the original movements — the ledger is append-only, and a sale that
-happened and was reversed is two facts, not zero.
+Cancelling an order frees its stock by whichever of two routes applies, and
+both are called because exactly one of them finds anything to do. An order that
+was never cooked is still only *holding* its ingredients, and releasing the hold
+is what puts them back on sale. One that was already deducted posts a
+`CUSTOMER_RETURN` rather than deleting the original movements — the ledger is
+append-only, and a sale that happened and was reversed is two facts, not zero.
 
 `GET /admin/stock/usage-variance` compares what the recipes say should have been
 used against what the ledger says left the shelf. A persistent gap is portioning

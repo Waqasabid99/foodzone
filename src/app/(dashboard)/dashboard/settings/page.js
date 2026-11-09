@@ -21,6 +21,7 @@ const GROUPS = [
   { prefix: "pricing", title: "Discounts", description: "The ceiling on what staff can give away by hand." },
   { prefix: "payments", title: "Payments", description: "How customers may pay, and what must be paid up front." },
   { prefix: "delivery", title: "Delivery", description: "What a driver must do to complete a delivery, and what they earn." },
+  { prefix: "inventory", title: "Stock", description: "Whether a placed order holds the stock it will use, and whether a sale it cannot cover is refused." },
   { prefix: "payroll", title: "Payroll", description: "Who has to sign a pay run off before the money is released." },
   { prefix: "notifications", title: "Notifications", description: "What the system tells customers, and what it may not send without asking." },
   { prefix: "maintenance", title: "Maintenance mode", description: "Takes the website out of service with a message. Staff screens keep working." },

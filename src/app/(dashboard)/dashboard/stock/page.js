@@ -78,6 +78,15 @@ export default async function StockPage({ searchParams }) {
   ]);
 
   const rows = serialize(page.items);
+  /*
+   * The "free" column appears only when something is actually promised.
+   *
+   * A branch with reservations switched off, or one whose orders are all made
+   * and gone, would otherwise carry a column repeating "on hand" in different
+   * words down every row — and a column that never says anything new teaches
+   * people to stop reading the ones beside it.
+   */
+  const anyHeld = rows.some((row) => Number(row.reserved) > 0);
   const batches = serialize(expiring);
   const multiBranch = branches.length > 1;
   const filtered = Boolean(q || low || location || category || branch);
@@ -162,6 +171,7 @@ export default async function StockPage({ searchParams }) {
                   <th scope="col" className="px-4 py-3 font-normal">Item</th>
                   <th scope="col" className="hidden px-4 py-3 font-normal sm:table-cell">Location</th>
                   <th scope="col" className="px-4 py-3 text-right font-normal">On hand</th>
+                  {anyHeld ? <th scope="col" className="px-4 py-3 text-right font-normal">Free</th> : null}
                   <th scope="col" className="hidden px-4 py-3 text-right font-normal md:table-cell">Low at</th>
                   {showCost ? <th scope="col" className="hidden px-4 py-3 text-right font-normal lg:table-cell">Worth</th> : null}
                 </tr>
@@ -187,6 +197,14 @@ export default async function StockPage({ searchParams }) {
                         {qty(row.quantity)}
                         {row.isLow ? <span className="mt-1 flex justify-end"><Chip tone="bg-warning-container text-on-warning-container">Low</Chip></span> : null}
                       </td>
+                      {anyHeld ? (
+                        <td className="px-4 py-3 text-right tabular-nums text-on-surface">
+                          {qty(row.available)}
+                          {Number(row.reserved) > 0 ? (
+                            <span className="block text-label-md text-on-surface-variant">{qty(row.reserved)} promised</span>
+                          ) : null}
+                        </td>
+                      ) : null}
                       <td className="hidden px-4 py-3 text-right tabular-nums text-on-surface-variant md:table-cell">{row.reorderLevel == null ? "—" : qty(row.reorderLevel)}</td>
                       {showCost ? (
                         <td className="hidden px-4 py-3 text-right tabular-nums text-on-surface-variant lg:table-cell">{formatMoney(Number(row.quantity) * Number(row.averageCost), currency)}</td>

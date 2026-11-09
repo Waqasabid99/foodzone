@@ -3,8 +3,9 @@ import { Prisma } from "@/generated/prisma";
 import { logger } from "@/lib/logger";
 import { withTransaction } from "@/server/utils/db";
 import { postMovement } from "@/server/inventory/ledger";
-import { convertQuantity, grossUpForYield, quantity as q } from "@/server/inventory/uom";
-import { explodeRecipe, mergeLines } from "@/server/production/explode";
+import { quantity as q } from "@/server/inventory/uom";
+import { explodeOrder } from "@/server/inventory/order-explosion";
+import { consumeForOrder, releaseForOrder } from "@/server/services/reservation.service";
 import { defaultLocationFor } from "@/server/services/inventory-item.service";
 
 /**
@@ -34,94 +35,6 @@ import { defaultLocationFor } from "@/server/services/inventory-item.service";
 
 const D = (value) => new Prisma.Decimal(value ?? 0);
 
-const UOM_SELECT = { id: true, code: true, type: true, factor: true, baseUnitId: true, precision: true };
-
-/** The live recipe for a variant, if one exists. */
-async function recipeForVariant(variantId, tx) {
-  if (!variantId) return null;
-
-  return tx.recipe.findFirst({
-    where: { variantId, isActive: true },
-    select: { id: true },
-    orderBy: { version: "desc" },
-  });
-}
-
-/**
- * Works out everything one order consumed.
- *
- * Exported separately from the posting so a "what would this cost" preview can
- * use it without touching the ledger.
- */
-export async function explodeOrder({ orderId, tx = prisma }) {
-  const order = await tx.order.findUnique({
-    where: { id: orderId },
-    select: {
-      id: true,
-      branchId: true,
-      items: {
-        where: { status: { not: "CANCELLED" } },
-        select: {
-          id: true,
-          variantId: true,
-          quantity: true,
-          nameSnapshot: true,
-          modifiers: { select: { optionId: true, quantity: true } },
-        },
-      },
-    },
-  });
-  if (!order) return { branchId: null, lines: [] };
-
-  // Collected flat and merged at the end, so an item used by both a recipe and
-  // a modifier is deducted once rather than twice.
-  const collected = [];
-  const add = (line) => collected.push(line);
-
-  for (const orderItem of order.items) {
-    const recipe = await recipeForVariant(orderItem.variantId, tx);
-
-    if (recipe) {
-      const lines = await explodeRecipe({ recipeId: recipe.id, multiplier: orderItem.quantity, tx });
-      lines.forEach(add);
-    }
-
-    // Modifiers consume stock whether or not the dish has a recipe — a plain
-    // product with "extra cheese" still uses cheese.
-    for (const modifier of orderItem.modifiers) {
-      const ingredients = await tx.modifierOptionIngredient.findMany({
-        where: { optionId: modifier.optionId },
-        select: {
-          itemId: true,
-          quantity: true,
-          uom: { select: UOM_SELECT },
-          item: { select: { id: true, name: true, yieldPercent: true, uom: { select: UOM_SELECT } } },
-        },
-      });
-
-      for (const ingredient of ingredients) {
-        const required = D(ingredient.quantity)
-          .times(D(modifier.quantity ?? 1))
-          .times(D(orderItem.quantity));
-
-        const inStockingUnit = convertQuantity({
-          quantity: required,
-          from: ingredient.uom,
-          to: ingredient.item.uom,
-        });
-
-        add({
-          itemId: ingredient.itemId,
-          quantity: grossUpForYield({ net: inStockingUnit, yieldPercent: ingredient.item.yieldPercent }),
-          name: ingredient.item.name,
-        });
-      }
-    }
-  }
-
-  return { branchId: order.branchId, lines: mergeLines(collected) };
-}
-
 /**
  * Deducts an order's ingredients from stock.
  *
@@ -136,6 +49,12 @@ export async function depleteForOrder({ orderId, locationId = null, actor = null
   if (!branchId || !lines.length) {
     // Most restaurants run without recipes for a while. That is a valid state,
     // not an error — there is simply nothing to deduct yet.
+    //
+    // The holds still have to end. An order whose recipe was deleted between
+    // the placing and the cooking has nothing to deduct and a hold that is
+    // now permanent, and under `enforce` that is stock quietly withdrawn from
+    // sale for good.
+    await releaseForOrder({ orderId, reason: "Order completed with nothing to deduct" });
     return { orderId, skipped: true, reason: "NO_RECIPES", lines: 0 };
   }
 
@@ -145,6 +64,7 @@ export async function depleteForOrder({ orderId, locationId = null, actor = null
 
   if (!location) {
     logger.warn("no stock location for branch; skipping depletion", { orderId, branchId });
+    await releaseForOrder({ orderId, reason: "Order completed with no stock location" });
     return { orderId, skipped: true, reason: "NO_LOCATION", lines: 0 };
   }
 
@@ -169,6 +89,16 @@ export async function depleteForOrder({ orderId, locationId = null, actor = null
 
       if (result) results.push({ itemId: line.itemId, quantity: line.quantity });
     }
+
+    /*
+     * The hold this order was carrying becomes the deduction just posted.
+     *
+     * In the same transaction, because on-hand falling and the hold on it
+     * being given back are one event. A crash between them leaves stock both
+     * gone and spoken for, which shows up as negative availability and stays
+     * that way until somebody rebuilds the cache.
+     */
+    await consumeForOrder({ orderId, tx });
 
     return results;
   });

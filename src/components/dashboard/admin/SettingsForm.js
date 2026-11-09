@@ -151,6 +151,39 @@ function Control({ setting, value, onChange, disabled }) {
     );
   }
 
+  /*
+   * One of a fixed few. A radio group rather than a select because there are
+   * three of them and each needs its label read before it is chosen —
+   * "hold stock but never refuse a sale" is not a thing to recognise from a
+   * collapsed list. Free text here would let a manager save "enfroce" and find
+   * out from a validation error what the options were.
+   */
+  if (setting.type === "string" && setting.options) {
+    return (
+      <ul className="flex flex-col gap-2" id={id}>
+        {setting.options.map((option) => {
+          const checked = value === option.value;
+          return (
+            <li key={option.value}>
+              <label className={`flex min-h-11 cursor-pointer items-center gap-2 rounded-field px-4 text-body-md ${checked ? "bg-secondary-container text-on-secondary-container" : "bg-surface-container-low text-on-surface"} ${disabled ? "opacity-60" : "hover:bg-surface-container"}`}>
+                <input
+                  type="radio"
+                  name={id}
+                  value={option.value}
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={() => onChange(option.value)}
+                  className="size-4 accent-primary"
+                />
+                {option.label}
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  }
+
   if (setting.type === "json" && setting.options) {
     const list = Array.isArray(value) ? value : [];
     return (

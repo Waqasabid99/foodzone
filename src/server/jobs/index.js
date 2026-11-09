@@ -8,6 +8,7 @@ import { pruneExpiredCarts } from "@/server/services/cart.service";
 import { pruneTrackPoints } from "@/server/services/driver.service";
 import { flagExpiredBatches } from "@/server/services/stock.service";
 import { alertLowStock } from "@/server/services/inventory-item.service";
+import { sweepStaleReservations } from "@/server/services/reservation.service";
 import { warnAboutFiscalRunway } from "@/server/services/fiscal.service";
 import { creditDueEarnings } from "@/server/services/creator-earning.service";
 import { expireAttributions } from "@/server/services/creator-attribution.service";
@@ -96,6 +97,24 @@ export async function runMaintenanceCycle() {
   }
 
   /*
+   * Stock held by orders that were never made.
+   *
+   * On its own line and after the alert above, not inside the race: both touch
+   * `StockLevel`, and a sweep that releases a hold can take an item back above
+   * its reorder level — so the warning should see the stock as it stood during
+   * service rather than after the housekeeping. Wrapped like the others
+   * because a branch with an unreachable setting must not take the rest of the
+   * cycle down with it.
+   */
+  let reservationsSwept;
+  try {
+    reservationsSwept = await sweepStaleReservations();
+  } catch (error) {
+    logger.error("the stale reservation sweep failed", { error: error.message });
+    reservationsSwept = { failedToRun: true, reason: error.message };
+  }
+
+  /*
    * These two are ordered, not raced.
    *
    * The warning counts the postings that are waiting, and the release empties
@@ -120,6 +139,7 @@ export async function runMaintenanceCycle() {
     batchesExpired,
     uploadsSwept,
     lowStock,
+    reservationsSwept,
     postingsReleased,
     fiscalRunway: {
       state: fiscalWarning.state,

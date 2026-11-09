@@ -161,9 +161,9 @@ seeded baseline.
 ### Deferred from Phase 5
 
 - [x] **Depletion at checkout** — the ledger landed in Phase 9 and
-      `depleteForOrder` now runs off the order event, with `reverseDepletion`
-      on cancel. *Holding* stock for an unmade order is still open — see
-      Phase 9's **Stock reservation at checkout**, which is the same item
+      `depleteForOrder` runs off the order event, with `reverseDepletion` on
+      cancel. *Holding* stock for an unmade order was the other half and is
+      done too — see Phase 9's **Stock reservation at checkout**
 - [x] **Discounts at checkout** — delivered in Phase 6
 - [x] **Editing a placed order** — `addCourse` and `removeOrderItem` add and
       remove lines after placement behind `orders.edit_items`, and re-run
@@ -319,9 +319,16 @@ one it turns out to be.
 
 ### Deferred from Phase 9
 
-- [ ] **Stock reservation at checkout** — `StockLevel.reservedQuantity` is
-      modelled and read by `onHand`, but holding stock for confirmed-but-unmade
-      orders needs a release-on-cancel path and a timeout sweeper
+- [x] **Stock reservation at checkout** — a placed order holds its ingredients
+      through the same recipe explosion depletion uses later, `StockReservation`
+      is the truth behind `reservedQuantity` the way `StockMovement` is the
+      truth behind `quantity`, reserving *reconciles* so a second round moves
+      the hold instead of stacking one on top, depletion consumes the hold in
+      the same transaction as the `SALE_OUT`, cancellation releases it, and the
+      nightly sweep catches orders that reached neither. `inventory.reservation`
+      is `off`/`hold`/`enforce` per branch, defaulting to the one that cannot
+      cost a sale; under `enforce` a conditional increment means the *write*
+      decides the race for the last portion
 - [x] **Supplier bills and AP** — built in Phase 11: a bill is raised from a
       receipt (`supplier-bills/from-receipt/:goodsReceiptId`), submitted,
       approved, paid against, and aged by `ageBalances`

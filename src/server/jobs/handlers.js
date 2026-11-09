@@ -193,6 +193,21 @@ export function registerJobHandlers() {
       await enqueue({ eventType: "creator.order_completed", payload: { orderId } });
     }
 
+    /*
+     * An order that ended any other way stops holding stock now.
+     *
+     * `CANCELLED` has its own event and `COMPLETED`/`DELIVERED` are handled
+     * above, where the hold becomes the deduction. That leaves rejection and
+     * refund, which reach a terminal status through this handler and nothing
+     * else — and waiting for the nightly sweep to notice would withdraw a
+     * rejected order's ingredients from sale for the rest of the day wherever
+     * availability is enforced.
+     */
+    if (["REJECTED", "REFUNDED"].includes(toStatus)) {
+      const { releaseForOrder } = await import("@/server/services/reservation.service");
+      await releaseForOrder({ orderId, reason: `Order ${toStatus.toLowerCase()}` });
+    }
+
     if (toStatus === "READY" && order.type === "DELIVERY") {
       const { createDelivery } = await import("@/server/services/delivery.service");
       await createDelivery({ orderId });
@@ -315,9 +330,23 @@ export function registerJobHandlers() {
     });
     if (!order) return;
 
-    // An order cancelled after its ingredients were already deducted puts them
-    // back — as a new movement, never by deleting the original. The ledger is
-    // append-only, and a sale that happened and was reversed is two facts.
+    /*
+     * Stock the cancellation frees, by whichever of two routes applies.
+     *
+     * A cancelled order was either never cooked — its ingredients are still
+     * only *held*, and releasing the hold is what puts them back on sale — or
+     * it was already made and deducted, in which case the holds are long
+     * consumed and it takes a movement to undo. Both are called, both are
+     * idempotent, and exactly one of them finds anything to do; neither has to
+     * know which.
+     *
+     * Reversal is posted as a new movement, never by deleting the original.
+     * The ledger is append-only, and a sale that happened and was reversed is
+     * two facts rather than none.
+     */
+    const { releaseForOrder } = await import("@/server/services/reservation.service");
+    await releaseForOrder({ orderId, reason: reason ? `Cancelled: ${reason}` : "Order cancelled" });
+
     const { reverseDepletion } = await import("@/server/services/depletion.service");
     await reverseDepletion({ orderId });
 

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { apiHandler, assertCompanyWide, ok, RateLimits } from "@/lib/api";
 import { cuidSchema } from "@/server/validation/schemas";
 import { rebuildLevels } from "@/server/services/stock.service";
+import { rebuildReservations } from "@/server/services/reservation.service";
 import { assertRecordAccess } from "@/server/inventory/access";
 
 const bodySchema = z
@@ -10,12 +11,18 @@ const bodySchema = z
   .default({});
 
 /**
- * Replays the ledger and rewrites the cached levels.
+ * Replays the ledger and rewrites the cached numbers on `StockLevel`.
  *
  * The safety net under the whole module, and the thing that makes "the ledger
  * is the truth" testable rather than a slogan. It reports what it corrected: a
  * non-empty `drift` means something wrote around `postMovement`, which is a bug
  * worth chasing rather than a number worth fixing quietly.
+ *
+ * Both cached columns, because the row has two and each has its own truth
+ * behind it: `quantity` is the sum of the movements, and `reservedQuantity` is
+ * the sum of the holds still held. Checking one and not the other would leave
+ * half the row unprovable — and it is the reserved half that silently
+ * withdraws stock from sale when it drifts.
  */
 export const POST = apiHandler(
   {
@@ -29,6 +36,9 @@ export const POST = apiHandler(
     // One location is that branch's business; the whole ledger is the company's.
     if (body?.locationId) await assertRecordAccess(auth, "location", body.locationId, "stock_adjustments.approve");
     else assertCompanyWide(auth, "stock_adjustments.approve");
-    return ok(await rebuildLevels(body ?? {}));
+
+    const levels = await rebuildLevels(body ?? {});
+    const reservations = await rebuildReservations(body ?? {});
+    return ok({ ...levels, reservations });
   },
 );

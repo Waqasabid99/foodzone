@@ -29555,6 +29555,80 @@
         "x-source": "src/app/api/v1/admin/orders/[id]/receipt/route.js"
       }
     },
+    "/api/v1/admin/orders/{id}/reservations": {
+      "get": {
+        "operationId": "getAdminOrdersByIdReservations",
+        "summary": "List the reservations of an order",
+        "description": "What stock this order is holding, and what became of it.\n\nNeeded because a refusal at the till is otherwise unanswerable. \"We cannot\nmake that right now\" is the correct thing to tell a customer and useless to\nthe person who has to decide what to do about it — this is where they find\nout that nine portions are on the shelf and eight orders are ahead of them.\n\nBehind `stock.read` rather than `orders.read`: the order is the question but\ningredient quantities are the answer, and a waiter who may look at a bill\nhas no business reading the store room.\n\nRequires an authenticated caller. Requires the permission `stock.read`.",
+        "tags": [
+          "Order operations"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "data"
+                  ],
+                  "properties": {
+                    "success": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-permissions": [
+          "stock.read"
+        ],
+        "x-source": "src/app/api/v1/admin/orders/[id]/reservations/route.js"
+      }
+    },
     "/api/v1/admin/orders/{id}/set-aside": {
       "post": {
         "operationId": "postAdminOrdersByIdSetAside",
@@ -47781,7 +47855,7 @@
       "post": {
         "operationId": "postAdminStockRebuild",
         "summary": "Rebuild stock levels from the ledger",
-        "description": "Replays the ledger and rewrites the cached levels.\n\nThe safety net under the whole module, and the thing that makes \"the ledger\nis the truth\" testable rather than a slogan. It reports what it corrected: a\nnon-empty `drift` means something wrote around `postMovement`, which is a bug\nworth chasing rather than a number worth fixing quietly.\n\nRequires an authenticated caller. Requires the permission `stock_adjustments.approve`. Rate limit: 60 requests per 1m (`write` class). Audited as `stock.rebuild_levels`.",
+        "description": "Replays the ledger and rewrites the cached numbers on `StockLevel`.\n\nThe safety net under the whole module, and the thing that makes \"the ledger\nis the truth\" testable rather than a slogan. It reports what it corrected: a\nnon-empty `drift` means something wrote around `postMovement`, which is a bug\nworth chasing rather than a number worth fixing quietly.\n\nBoth cached columns, because the row has two and each has its own truth\nbehind it: `quantity` is the sum of the movements, and `reservedQuantity` is\nthe sum of the holds still held. Checking one and not the other would leave\nhalf the row unprovable — and it is the reserved half that silently\nwithdraws stock from sale when it drifts.\n\nRequires an authenticated caller. Requires the permission `stock_adjustments.approve`. Rate limit: 60 requests per 1m (`write` class). Audited as `stock.rebuild_levels`.",
         "tags": [
           "Inventory"
         ],

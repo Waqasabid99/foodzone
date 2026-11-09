@@ -705,6 +705,391 @@ async function main() {
   });
   check("so the count of alerts is unchanged", afterSecond === alerts.length, { before: alerts.length, afterSecond });
 
+  // ================= STOCK RESERVATION =================
+  /*
+   * `StockLevel.reservedQuantity` was modelled, read, and printed on every
+   * stock screen as `available = quantity - reserved` from the day inventory
+   * was built — and nothing ever wrote it. So "available" always equalled
+   * on-hand, and two customers could each be sold the last portion.
+   *
+   * What these assertions are really defending is one invariant, stated once:
+   * for any item at any location, `reservedQuantity` equals the sum of the
+   * `StockReservation` rows still HELD. Everything below is a way of trying to
+   * break it — complete the order, cancel it, add a round, remove a line,
+   * abandon it, race two checkouts for the last portion.
+   */
+  const levelOf = async (itemId) => {
+    const row = await prisma.stockLevel.findUnique({
+      where: { itemId_locationId: { itemId, locationId: storeId } },
+      select: { quantity: true, reservedQuantity: true },
+    });
+    return { quantity: num(row?.quantity), reserved: num(row?.reservedQuantity) };
+  };
+
+  const heldSum = async (itemId) => {
+    const rows = await prisma.stockReservation.aggregate({
+      where: { itemId, locationId: storeId, status: "HELD" },
+      _sum: { quantity: true },
+    });
+    return num(rows._sum.quantity);
+  };
+
+  /** The invariant itself, asked of one item. */
+  const invariantHolds = async (itemId) => round(await heldSum(itemId), 6) === round((await levelOf(itemId)).reserved, 6);
+
+  // One burger needs 150g of beef from an item yielding 80% — 187.5g off the
+  // shelf — and one bun.
+  const PER_BURGER_BEEF = 0.1875;
+
+  /*
+   * The order the depletion section just completed held its ingredients while
+   * it was being made. It must not still be holding them: stock that is both
+   * gone and spoken for reads as negative availability and stays that way.
+   */
+  const completedHolds = await prisma.stockReservation.findMany({
+    where: { orderId },
+    select: { status: true, quantity: true, itemId: true },
+  });
+  check("a placed order holds what it is going to be made of", completedHolds.length === 2, {
+    holds: completedHolds.length,
+  });
+  check(
+    "and the hold is consumed when the food is made, not left behind",
+    completedHolds.every((row) => row.status === "CONSUMED"),
+    completedHolds.map((row) => row.status),
+  );
+  check("so nothing is held once an order is complete", (await levelOf(beefId)).reserved === 0, await levelOf(beefId));
+  check("and on-hand and held agree", await invariantHolds(beefId), {
+    held: await heldSum(beefId),
+    level: await levelOf(beefId),
+  });
+
+  // --- holding, and giving it back ----------------------------------------
+  const beefBeforeHold = await levelOf(beefId);
+
+  const holdOrder = await api("/admin/orders", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      branchId,
+      type: "DINE_IN",
+      channel: "POS",
+      items: [{ productId: burgerId, quantity: 2 }],
+      guest: { name: "Holding" },
+    },
+  });
+  const holdOrderId = holdOrder.body?.data?.id;
+  const beefHeld = await levelOf(beefId);
+
+  check("placing an order holds its stock immediately", round(beefHeld.reserved, 6) === round(PER_BURGER_BEEF * 2, 6), beefHeld);
+  check("without touching on-hand, because nothing has been cooked", beefHeld.quantity === beefBeforeHold.quantity, {
+    before: beefBeforeHold.quantity,
+    now: beefHeld.quantity,
+  });
+
+  const levelsWhileHeld = await api(`/admin/stock/levels?itemId=${beefId}&locationId=${storeId}`, { token: adminToken });
+  const shown = levelsWhileHeld.body?.data?.items?.[0];
+  check(
+    "and 'available' on the stock screen finally means something",
+    round(num(shown?.available), 6) === round(num(shown?.quantity) - num(shown?.reserved), 6) &&
+      num(shown?.available) < num(shown?.quantity),
+    shown,
+  );
+
+  const orderHolds = await api(`/admin/orders/${holdOrderId}/reservations`, { token: adminToken });
+  check("what an order is holding can be read back", orderHolds.body?.data?.length === 2, orderHolds.body?.data);
+  check(
+    "named by item, so a refusal at the till is answerable",
+    orderHolds.body?.data?.some((row) => row.item?.name?.includes(`Beef ${stamp}`)),
+    orderHolds.body?.data,
+  );
+
+  // --- a second round moves the hold, it does not stack one on top --------
+  await api(`/admin/orders/${holdOrderId}/items`, {
+    method: "POST",
+    token: adminToken,
+    body: { items: [{ productId: burgerId, quantity: 1 }] },
+  });
+
+  const afterCourse = await levelOf(beefId);
+  check(
+    "a second round holds its share too",
+    round(afterCourse.reserved, 6) === round(PER_BURGER_BEEF * 3, 6),
+    afterCourse,
+  );
+
+  const rowsForBeef = await prisma.stockReservation.count({ where: { orderId: holdOrderId, itemId: beefId } });
+  check("on the one hold the order already had, not a second one beside it", rowsForBeef === 1, { rowsForBeef });
+  check("and the invariant still holds after the round", await invariantHolds(beefId), {
+    held: await heldSum(beefId),
+    level: await levelOf(beefId),
+  });
+
+  // --- cancelling puts it back on sale ------------------------------------
+  await api(`/admin/orders/${holdOrderId}/cancel`, {
+    method: "POST",
+    token: adminToken,
+    body: { reason: "Changed their mind" },
+  });
+  await drainOutbox();
+
+  const afterCancel = await levelOf(beefId);
+  check("cancelling an order that was never cooked releases its hold", afterCancel.reserved === 0, afterCancel);
+  check("and does not invent stock while doing it", afterCancel.quantity === beefBeforeHold.quantity, {
+    before: beefBeforeHold.quantity,
+    now: afterCancel.quantity,
+  });
+
+  const cancelledHolds = await prisma.stockReservation.findMany({
+    where: { orderId: holdOrderId },
+    select: { status: true, endedReason: true },
+  });
+  check(
+    "the release is recorded rather than deleted, with a reason",
+    cancelledHolds.length > 0 &&
+      cancelledHolds.every((row) => row.status === "RELEASED" && row.endedReason?.includes("Changed their mind")),
+    cancelledHolds,
+  );
+
+  // --- the cache is provable, which is the whole reason for the table -----
+  const cleanRebuild = await api("/admin/stock/rebuild", {
+    method: "POST",
+    token: adminToken,
+    body: { locationId: storeId },
+  });
+  check("rebuilding finds no drift in a system nobody wrote around", cleanRebuild.body?.data?.reservations?.corrected === 0, cleanRebuild.body?.data?.reservations);
+
+  // Write the cache by hand — exactly what a future bug would do — and check
+  // that the rebuild notices. A cache nothing can audit is not a cache, it is
+  // a rumour.
+  await prisma.stockLevel.update({
+    where: { itemId_locationId: { itemId: beefId, locationId: storeId } },
+    data: { reservedQuantity: 9 },
+  });
+  const dirtyRebuild = await api("/admin/stock/rebuild", {
+    method: "POST",
+    token: adminToken,
+    body: { locationId: storeId },
+  });
+  check("and reports a hand-written one as drift", dirtyRebuild.body?.data?.reservations?.corrected === 1, dirtyRebuild.body?.data?.reservations);
+  check("naming what it was and what it should have been", dirtyRebuild.body?.data?.reservations?.drift?.[0]?.cached === 9, dirtyRebuild.body?.data?.reservations?.drift);
+  check("after which it is right again", (await levelOf(beefId)).reserved === 0, await levelOf(beefId));
+
+  // --- an order rejected rather than cancelled ----------------------------
+  /*
+   * Rejection and refund reach a terminal status through the status handler
+   * and nothing else. Without their own release the stock would sit held until
+   * the nightly sweep noticed, which under `enforce` is a rejected order's
+   * ingredients withdrawn from sale for the rest of the day.
+   *
+   * Placed on the QR channel because that is the one that stays `PENDING` — a
+   * counter order is accepted the moment staff type it, and `CONFIRMED` cannot
+   * be rejected.
+   */
+  const rejectable = await api("/admin/orders", {
+    method: "POST",
+    token: adminToken,
+    body: { branchId, type: "DINE_IN", channel: "QR", items: [{ productId: burgerId, quantity: 1 }], guest: { name: "To reject" } },
+  });
+  const rejectableId = rejectable.body?.data?.id;
+  check("a QR order is still awaiting acceptance", rejectable.body?.data?.status === "PENDING", rejectable.body?.data?.status);
+  check("and is holding its stock while it waits", round((await levelOf(beefId)).reserved, 6) === round(PER_BURGER_BEEF, 6), await levelOf(beefId));
+
+  await api(`/admin/orders/${rejectableId}/status`, { method: "PUT", token: adminToken, body: { status: "REJECTED" } });
+  await drainOutbox();
+
+  check("rejecting it releases the hold at once, not at 03:00", (await levelOf(beefId)).reserved === 0, await levelOf(beefId));
+  const rejectedReason = await prisma.stockReservation.findFirst({
+    where: { orderId: rejectableId, itemId: beefId },
+    select: { status: true, endedReason: true },
+  });
+  check("and says so", rejectedReason?.status === "RELEASED" && /rejected/i.test(rejectedReason?.endedReason ?? ""), rejectedReason);
+
+  // --- holds nobody will ever collect -------------------------------------
+  /*
+   * An order that reaches neither the kitchen nor a cancellation holds its
+   * ingredients forever. Two shapes, and the sweep has to catch both: an order
+   * that ended by a route that never released (a rejection, a refund), and one
+   * that is still nominally live a day later because somebody walked out.
+   */
+  const rejectedOrder = await api("/admin/orders", {
+    method: "POST",
+    token: adminToken,
+    body: { branchId, type: "DINE_IN", channel: "POS", items: [{ productId: burgerId, quantity: 1 }], guest: { name: "Rejected" } },
+  });
+  const rejectedId = rejectedOrder.body.data.id;
+  // Straight to a terminal status without going through cancellation, which is
+  // what makes this the net rather than a duplicate of the path above.
+  await prisma.order.update({ where: { id: rejectedId }, data: { status: "REJECTED" } });
+
+  const staleOrder = await api("/admin/orders", {
+    method: "POST",
+    token: adminToken,
+    body: { branchId, type: "DINE_IN", channel: "POS", items: [{ productId: burgerId, quantity: 1 }], guest: { name: "Walked out" } },
+  });
+  const staleId = staleOrder.body.data.id;
+  await prisma.stockReservation.updateMany({
+    where: { orderId: staleId },
+    data: { createdAt: new Date(Date.now() - 48 * 3_600_000) },
+  });
+
+  const beforeSweep = await levelOf(beefId);
+  check("both abandoned orders are holding stock to begin with", round(beforeSweep.reserved, 6) === round(PER_BURGER_BEEF * 2, 6), beforeSweep);
+
+  const sweep = await runMaintenance();
+  check("the maintenance job reports on held stock", Boolean(sweep?.reservationsSwept), sweep?.reservationsSwept);
+  check("it releases a hold on an order that is already finished", sweep?.reservationsSwept?.finishedHolds >= 2, sweep?.reservationsSwept);
+  check("and a hold on a live order that has gone stale", sweep?.reservationsSwept?.staleHolds >= 2, sweep?.reservationsSwept);
+  check("after which nothing is held", (await levelOf(beefId)).reserved === 0, await levelOf(beefId));
+
+  const sweptReasons = await prisma.stockReservation.findMany({
+    where: { orderId: { in: [rejectedId, staleId] } },
+    select: { status: true, endedReason: true },
+  });
+  check(
+    "each release says why, so a pattern of them is diagnosable",
+    sweptReasons.length === 4 && sweptReasons.every((row) => row.status === "RELEASED" && Boolean(row.endedReason)),
+    sweptReasons,
+  );
+
+  const quietSweep = await runMaintenance();
+  check("and a sweep with nothing to release stays quiet", quietSweep?.reservationsSwept?.staleHolds === 0, quietSweep?.reservationsSwept);
+
+  // --- refusing a sale, only where the branch asked for it ----------------
+  /*
+   * The default is to hold without refusing, because holding costs nothing
+   * when the counts are wrong and refusing costs a sale: a branch that has not
+   * received a delivery into the system has food in the fridge the database
+   * does not know about. `enforce` is for the branch that actually counts.
+   */
+  // 99 is the most a single line may be, and it is well past what this branch
+  // can make: 99 burgers want 18.5kg of beef and 99 buns against stock that
+  // the wastage and the sale above have already run down.
+  const impossible = {
+    branchId,
+    type: "DINE_IN",
+    channel: "POS",
+    items: [{ productId: burgerId, quantity: 99 }],
+    guest: { name: "Too many" },
+  };
+
+  const allowedByDefault = await api("/admin/orders", { method: "POST", token: adminToken, body: impossible });
+  check("by default a sale is never refused over stock", allowedByDefault.status === 201, allowedByDefault.body?.error);
+  await api(`/admin/orders/${allowedByDefault.body.data.id}/cancel`, {
+    method: "POST",
+    token: adminToken,
+    body: { reason: "Clearing the hold" },
+  });
+  await drainOutbox();
+
+  await api("/admin/settings", {
+    method: "PUT",
+    token: adminToken,
+    body: { branchId, values: { "inventory.reservation": "enforce" } },
+  });
+
+  const beforeRefusal = await levelOf(beefId);
+  const refused = await api("/admin/orders", { method: "POST", token: adminToken, body: impossible });
+  check("a branch that enforces turns away what it cannot make", refused.status === 409, {
+    status: refused.status,
+    body: refused.body?.error,
+  });
+  check(
+    "naming the dish, not the ingredient the customer has never heard of",
+    refused.body?.error?.message?.includes(`Burger ${stamp}`),
+    refused.body?.error?.message,
+  );
+  check(
+    "with the shortfall attached for whoever has to act on it",
+    num(refused.body?.error?.details?.shortages?.[0]?.available) >= 0 &&
+      num(refused.body?.error?.details?.shortages?.[0]?.required) > 0,
+    refused.body?.error?.details?.shortages,
+  );
+
+  const afterRefusal = await levelOf(beefId);
+  check("a refused order holds nothing, because it does not exist", afterRefusal.reserved === beforeRefusal.reserved, {
+    before: beforeRefusal,
+    after: afterRefusal,
+  });
+  const refusedCount = await prisma.order.count({ where: { branchId, guestName: "Too many", status: { not: "CANCELLED" } } });
+  check("and the order was rolled back with it, not left pending", refusedCount === 0, { refusedCount });
+
+  /*
+   * The race the check cannot win on its own.
+   *
+   * Two tills asking for the last portion at the same moment both pass any
+   * test made beforehand, so under `enforce` the *write* decides: the
+   * increment is conditional on there still being room. One wins, one is told,
+   * and the shelf is never oversold. Sent together rather than in sequence
+   * because in sequence this passes without the condition existing at all.
+   */
+  const beefNow = await levelOf(beefId);
+  const bunNow = await levelOf(bunId);
+  // Both ingredients, because the binding one decides: ask for more buns than
+  // exist and *both* tills are refused, which would pass this test for the
+  // wrong reason.
+  const canMake = Math.min(
+    Math.floor((beefNow.quantity - beefNow.reserved) / PER_BURGER_BEEF),
+    Math.floor(bunNow.quantity - bunNow.reserved),
+  );
+  if (canMake >= 1) {
+    const racers = await Promise.all(
+      [1, 2].map((n) =>
+        api("/admin/orders", {
+          method: "POST",
+          token: adminToken,
+          body: {
+            branchId,
+            type: "DINE_IN",
+            channel: "POS",
+            items: [{ productId: burgerId, quantity: canMake }],
+            guest: { name: `Racer ${n}` },
+          },
+        }),
+      ),
+    );
+    const won = racers.filter((res) => res.status === 201);
+    const lost = racers.filter((res) => res.status === 409);
+    check("two tills racing for the last portion: one wins", won.length === 1, racers.map((r) => r.status));
+    check("and the other is told rather than overselling the shelf", lost.length === 1, racers.map((r) => r.status));
+
+    const raced = await levelOf(beefId);
+    check("so held never exceeds what is on the shelf", raced.reserved <= raced.quantity, raced);
+    check("and the invariant survives the race", await invariantHolds(beefId), {
+      held: await heldSum(beefId),
+      level: await levelOf(beefId),
+    });
+
+    for (const res of won) {
+      await api(`/admin/orders/${res.body.data.id}/cancel`, { method: "POST", token: adminToken, body: { reason: "Race over" } });
+    }
+    await drainOutbox();
+  }
+
+  // --- and switched off entirely ------------------------------------------
+  await api("/admin/settings", {
+    method: "PUT",
+    token: adminToken,
+    body: { branchId, values: { "inventory.reservation": "off" } },
+  });
+
+  const offOrder = await api("/admin/orders", {
+    method: "POST",
+    token: adminToken,
+    body: { branchId, type: "DINE_IN", channel: "POS", items: [{ productId: burgerId, quantity: 1 }], guest: { name: "No holds" } },
+  });
+  const offHolds = await prisma.stockReservation.count({ where: { orderId: offOrder.body.data.id } });
+  check("switched off, an order holds nothing at all", offHolds === 0, { offHolds });
+  check("and availability goes back to being on-hand", (await levelOf(beefId)).reserved === 0, await levelOf(beefId));
+
+  await api(`/admin/orders/${offOrder.body.data.id}/cancel`, { method: "POST", token: adminToken, body: { reason: "Done" } });
+  await drainOutbox();
+  await api("/admin/settings", {
+    method: "PUT",
+    token: adminToken,
+    body: { branchId, values: { "inventory.reservation": "hold" } },
+  });
+
   // ================= PERMISSIONS =================
   const custReg = await api("/auth/register", {
     method: "POST",
@@ -778,6 +1163,7 @@ async function cleanup() {
   await prisma.recipeIngredient.deleteMany({ where: { recipe: { name: { contains: String(stamp) } } } });
   await prisma.recipe.deleteMany({ where: { name: { contains: String(stamp) } } });
 
+  await prisma.stockReservation.deleteMany({ where: { OR: [{ locationId: { in: locationIds } }, { itemId: { in: itemIds } }] } });
   await prisma.stockMovement.deleteMany({ where: { OR: [{ locationId: { in: locationIds } }, { itemId: { in: itemIds } }] } });
   await prisma.wastage.deleteMany({ where: { OR: [{ locationId: { in: locationIds } }, { itemId: { in: itemIds } }] } });
   await prisma.stockCountItem.deleteMany({ where: { stockCount: { branchId: { in: branchIds } } } });
@@ -833,6 +1219,7 @@ async function cleanup() {
     locations: await prisma.stockLocation.count(),
     levels: await prisma.stockLevel.count(),
     movements: await prisma.stockMovement.count(),
+    reservations: await prisma.stockReservation.count(),
     batches: await prisma.stockBatch.count(),
     purchaseOrders: await prisma.purchaseOrder.count(),
     receipts: await prisma.goodsReceipt.count(),

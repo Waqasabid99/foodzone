@@ -195,6 +195,7 @@ model Order {
   couponRedemptions         CouponRedemption[]
   reviews                   Review[]
   stockMovements            StockMovement[]
+  stockReservations         StockReservation[]
   journalEntries            JournalEntry[]
   creatorVideos             CreatorVideo[]
   creatorOrderAttributions  CreatorOrderAttribution[]

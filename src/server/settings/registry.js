@@ -404,6 +404,75 @@ export const SETTINGS = [
     branchOverridable: true,
   },
 
+  // --- inventory -----------------------------------------------------------
+  /**
+   * What a placed order does to the stock it is going to consume.
+   *
+   * Three states rather than a boolean, because holding stock and refusing a
+   * sale are genuinely different decisions and most restaurants want the first
+   * without the second:
+   *
+   *   * `off` — nothing is held. On-hand is the only number, and `available`
+   *     on every stock screen equals it. This is what the system did before
+   *     reservations existed.
+   *   * `hold` — a placed order holds its ingredients until it is made or
+   *     cancelled, so `available` finally means something and the manager can
+   *     see that nine buns on the shelf are already eight orders deep. A sale
+   *     is never refused.
+   *   * `enforce` — as `hold`, and a sale that cannot be covered is turned
+   *     away at checkout.
+   *
+   * The default is `hold`, the one that cannot cost a sale. `enforce` is
+   * deliberately opt-in: it is only honest where somebody actually keeps the
+   * counts right, and a branch that has not received a delivery into the
+   * system has stock on the shelf that the database does not know about —
+   * there, enforcing would turn away orders for food that is sitting in the
+   * fridge. The cost of being wrong is wildly asymmetric, which is why it is
+   * not the starting position.
+   *
+   * Per branch, because the honest answer differs by outlet: the flagship with
+   * a storeman counting every morning can enforce, the satellite that has
+   * never done a stock count must not.
+   */
+  {
+    key: "inventory.reservation",
+    label: "Hold stock for placed orders",
+    type: "string",
+    default: "hold",
+    schema: z.enum(["off", "hold", "enforce"]),
+    /** The choices a screen offers; the schema above is what actually decides. */
+    options: [
+      { value: "off", label: "Do not hold stock" },
+      { value: "hold", label: "Hold it, but never refuse a sale" },
+      { value: "enforce", label: "Hold it, and refuse what cannot be covered" },
+    ],
+    isPublic: false,
+    branchOverridable: true,
+  },
+  /**
+   * How long a hold survives on an order that never finished.
+   *
+   * A reservation is released when the order is made or cancelled. An order
+   * that reaches neither — a table that walked out, a pre-order nobody closed,
+   * a status change lost to a crash — would otherwise hold its ingredients
+   * forever, and under `enforce` every stale hold is stock the next customer
+   * cannot be sold. One shift is the unit that matters: a hold older than this
+   * belongs to a service that is over.
+   *
+   * Zero switches the sweep off, for the one case where that is right: a
+   * kitchen running multi-day prep orders through the same mechanism, where a
+   * hold outliving a day is correct rather than abandoned.
+   */
+  {
+    key: "inventory.reservation_stale_hours",
+    label: "Release held stock after (hours)",
+    type: "number",
+    default: 24,
+    schema: z.number().int().min(0).max(720),
+    isPublic: false,
+    branchOverridable: true,
+  },
+
   // --- operational ---------------------------------------------------------
   {
     key: "notifications.order_updates",

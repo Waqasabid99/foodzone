@@ -7,6 +7,7 @@ import { priceForCheckout } from "@/server/services/checkout.service";
 import { recordAudit } from "@/server/utils/audit";
 import { enqueue } from "@/server/jobs/outbox";
 import { syncOrderPaymentState } from "@/server/services/payment.service";
+import { reserveForOrder } from "@/server/services/reservation.service";
 
 /**
  * The second round.
@@ -189,6 +190,18 @@ export async function addCourse({ orderId, items, actorId = null, at = new Date(
     }
 
     await applyTotals(tx, order.id, totals, priced);
+
+    /*
+     * The round that just joined has to be held too.
+     *
+     * `reserveForOrder` reconciles rather than adds — it explodes the order as
+     * it now stands and moves each hold to match — so this is the same call
+     * checkout makes, and a table on its fourth round holds four rounds'
+     * worth rather than one. Under `enforce` a round the kitchen cannot cover
+     * is refused here, which is the right moment: the waiter is standing at
+     * the table and can offer something else.
+     */
+    await reserveForOrder({ orderId: order.id, tx, settings });
   });
 
   await recordAudit({
@@ -247,6 +260,11 @@ export async function removeOrderItem({ orderId, itemId, actorId = null }) {
     await tx.orderItem.delete({ where: { id: itemId } });
     await withdrawTax(tx, orderId, item);
     await applyTotals(tx, order.id, totals);
+
+    // The line is gone, so what it was holding goes back on sale. The same
+    // reconciling call as everywhere else: the hold only ever shrinks here, so
+    // it cannot refuse anything.
+    await reserveForOrder({ orderId: order.id, tx, settings });
   });
 
   await recordAudit({

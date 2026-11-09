@@ -14,6 +14,7 @@ import { buildMenuIndex, resolveLine, attachTaxRates } from "@/server/services/c
 import { enqueue } from "@/server/jobs/outbox";
 import { resolveOrderDiscounts } from "@/server/services/promotion.service";
 import { validateCoupon } from "@/server/services/coupon.service";
+import { reserveForOrder, reservationMode } from "@/server/services/reservation.service";
 
 /**
  * Checkout: turning a cart into an order.
@@ -441,6 +442,13 @@ export async function placeOrder({
     }
   }
 
+  /*
+   * Read before the transaction opens, from settings already in hand: whether
+   * a hold is wanted at all, and whether a shortfall refuses the sale. One
+   * fewer round trip inside a transaction that is holding an order-number row.
+   */
+  const reservations = await reservationMode({ branchId, settings });
+
   const prepMinutes = Math.max(
     Number(settings["ordering.default_prep_minutes"] ?? 30),
     ...priced.lines.map((line) => line.prepTimeMinutes ?? 0),
@@ -655,6 +663,25 @@ export async function placeOrder({
           },
         });
       }
+    }
+
+    /*
+     * Stock held for what this order is going to be made of.
+     *
+     * Inside the order's own transaction, and after the lines are written
+     * because the hold is derived from them. Both halves matter: an order that
+     * exists without its holds oversells the next customer, and holds without
+     * an order are stock nobody can ever release.
+     *
+     * Under `enforce` this throws when the kitchen cannot cover the order,
+     * which rolls the whole checkout back — the refusal and the non-existence
+     * of the order are the same event. Under the default `hold` it cannot
+     * fail; a branch with no recipes or no stock location simply records
+     * nothing. Either way the recipe explosion is the cost, which is the work
+     * `withRetryingTransaction`'s budget was already sized for.
+     */
+    if (reservations !== "off") {
+      await reserveForOrder({ orderId: createdOrder.id, tx, mode: reservations });
     }
 
     await tx.orderStatusEvent.create({

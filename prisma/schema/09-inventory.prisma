@@ -74,6 +74,16 @@ enum StockBatchStatus {
   QUARANTINED
 }
 
+/// What became of a hold placed on stock for an order.
+enum StockReservationStatus {
+  /// Still holding. These, and only these, add up to `StockLevel.reservedQuantity`.
+  HELD
+  /// Given back without being used: the order was cancelled, or went stale.
+  RELEASED
+  /// The food was made, so the hold became a real `SALE_OUT` deduction.
+  CONSUMED
+}
+
 enum WastageReason {
   EXPIRED
   SPOILED
@@ -174,6 +184,7 @@ model InventoryItem {
   updatedAt       DateTime  @updatedAt
 
   stockLevels         StockLevel[]
+  reservations        StockReservation[]
   batches             StockBatch[]
   movements           StockMovement[]
   supplierItems       SupplierItem[]
@@ -205,10 +216,11 @@ model StockLocation {
   isActive  Boolean           @default(true)
 
   levels       StockLevel[]
+  reservations StockReservation[]
   batches      StockBatch[]
   movements    StockMovement[]
-  transfersOut StockTransfer[]   @relation("TransferFrom")
-  transfersIn  StockTransfer[]   @relation("TransferTo")
+  transfersOut StockTransfer[]    @relation("TransferFrom")
+  transfersIn  StockTransfer[]    @relation("TransferTo")
   counts       StockCount[]
   adjustments  StockAdjustment[]
   receipts     GoodsReceipt[]
@@ -304,6 +316,43 @@ model StockMovement {
   @@index([locationId])
   @@index([referenceType, referenceId])
   @@index([orderId])
+}
+
+/// Stock promised to an order that has not been made yet.
+///
+/// The counterpart of `StockMovement` for the time between a sale and the
+/// cooking of it. A movement says the food left the shelf; a reservation says
+/// it is spoken for and the next customer may not be sold it. Nothing else
+/// may write `StockLevel.reservedQuantity`, for exactly the reason nothing
+/// else may write `quantity`: these rows are the truth and that column is a
+/// cache, so `rebuildReservations` can prove the two agree.
+///
+/// The invariant, in one line: for any item and location,
+/// `reservedQuantity` = the sum of `quantity` over the rows here that are
+/// still `HELD`.
+model StockReservation {
+  id          String                 @id @default(cuid())
+  order       Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId     String
+  item        InventoryItem          @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  itemId      String
+  location    StockLocation          @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  locationId  String
+  /// How much is, or was, held. Kept when the hold ends so the record of what
+  /// an order promised survives the releasing of it.
+  quantity    Decimal                @db.Decimal(18, 6)
+  status      StockReservationStatus @default(HELD)
+  /// Why it stopped being held — "Order cancelled", "Stale hold swept".
+  endedReason String?
+  endedAt     DateTime?
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+
+  /// One row per item per location per order, so re-reserving an order whose
+  /// lines changed adjusts a hold instead of stacking a second one on top.
+  @@unique([orderId, itemId, locationId])
+  @@index([itemId, locationId, status])
+  @@index([status, createdAt])
 }
 
 model Supplier {
@@ -548,18 +597,18 @@ model StockCountItem {
 
 /// Manual correction outside of a count (breakage found, opening balance fix).
 model StockAdjustment {
-  id               String         @id @default(cuid())
-  adjustmentNumber String         @unique
-  location         StockLocation  @relation(fields: [locationId], references: [id])
+  id               String              @id @default(cuid())
+  adjustmentNumber String              @unique
+  location         StockLocation       @relation(fields: [locationId], references: [id])
   locationId       String
   type             StockAdjustmentType @default(CORRECTION)
-  status           DocumentStatus @default(DRAFT)
+  status           DocumentStatus      @default(DRAFT)
   reason           String
-  totalValue       Decimal        @default(0) @db.Decimal(18, 4)
+  totalValue       Decimal             @default(0) @db.Decimal(18, 4)
   createdById      String?
   approvedById     String?
   approvedAt       DateTime?
-  createdAt        DateTime       @default(now())
+  createdAt        DateTime            @default(now())
 
   items StockAdjustmentItem[]
 
