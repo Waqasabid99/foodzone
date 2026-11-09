@@ -408,6 +408,78 @@ async function main() {
   check("punches fold into days", derived.status === 200, derived.body);
   check("every rostered day gets a row", derived.body.data.derived >= 20, derived.body?.data);
 
+  // ================= THE NIGHTLY FOLD =================
+  /*
+   * Everything above derives because this suite asks it to. In production
+   * nobody asks: an absence is not pushed by anything, so a day with no punch
+   * becomes a row only when something folds it — and payroll is built from
+   * those rows. This is that something.
+   *
+   * Tested against a real recent day rather than the fixed month above,
+   * because the job folds *yesterday* in each branch's own zone.
+   */
+  const foldJob = async (secret) =>
+    fetch(`${BASE}/api/internal/jobs/attendance`, {
+      method: "POST",
+      ...(secret ? { headers: { authorization: `Bearer ${secret}` } } : {}),
+    });
+
+  const unauthorisedFold = await foldJob(null);
+  check("the fold cannot be triggered without the cron secret", unauthorisedFold.status !== 200, unauthorisedFold.status);
+
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  await api("/admin/roster", {
+    method: "POST",
+    token: adminToken,
+    body: { employeeId: cookId, shiftId: dayShiftId, from: yesterday, to: yesterday },
+  });
+
+  const foldRes = await foldJob(process.env.E2E_CRON_SECRET ?? "phase2-test-secret");
+  const fold = (await foldRes.json().catch(() => null))?.data;
+  check("the nightly fold runs", foldRes.status === 200, foldRes.status);
+  check("and works through every branch", (fold?.branches ?? 0) >= 1, fold);
+
+  const foldedDay = await prisma.attendanceDay.findFirst({
+    where: { employeeId: cookId, workDate: new Date(`${yesterday}T00:00:00.000Z`) },
+    select: { id: true, status: true },
+  });
+  check("yesterday is folded without anyone asking", Boolean(foldedDay), { yesterday, foldedDay });
+  check("an employee who never punched is marked absent, not left missing", foldedDay?.status === "ABSENT", foldedDay);
+
+  /*
+   * The job reaches three days back so a missed night heals itself, which
+   * means most nights re-fold a day that is already done. That recomputes the
+   * row from the same punches rather than skipping it, so what matters is
+   * that the answer does not move — and that the two kinds of day which must
+   * never move are refused outright.
+   */
+  const secondFold = (await (await foldJob(process.env.E2E_CRON_SECRET ?? "phase2-test-secret")).json().catch(() => null))?.data;
+  check("a second fold runs over the same window", (secondFold?.branches ?? 0) >= 1, secondFold);
+
+  const refolded = await prisma.attendanceDay.findFirst({
+    where: { employeeId: cookId, workDate: new Date(`${yesterday}T00:00:00.000Z`) },
+    select: { id: true, status: true },
+  });
+  check("and lands on the same answer", refolded?.status === foldedDay?.status, { before: foldedDay?.status, after: refolded?.status });
+  check("without replacing the row", refolded?.id === foldedDay?.id, { before: foldedDay?.id, after: refolded?.id });
+
+  /*
+   * A day a human corrected by hand is the one the nightly job must never
+   * quietly undo: somebody looked at a missing punch and decided what really
+   * happened, and a machine overwriting that at 3am is how people stop
+   * trusting the payroll.
+   */
+  await prisma.attendanceDay.update({
+    where: { id: refolded.id },
+    data: { status: "PRESENT", isManualOverride: true },
+  });
+  await foldJob(process.env.E2E_CRON_SECRET ?? "phase2-test-secret");
+  const afterOverride = await prisma.attendanceDay.findUnique({
+    where: { id: refolded.id },
+    select: { status: true, isManualOverride: true },
+  });
+  check("a hand-corrected day survives the nightly fold", afterOverride?.status === "PRESENT", afterOverride);
+
   const days = await api(`/admin/attendance?employeeId=${cookId}&from=${dayOf(1)}&to=${dayOf(10)}`, { token: adminToken });
   const byDate = new Map(days.body.data.items.map((day) => [String(day.workDate).slice(0, 10), day]));
 

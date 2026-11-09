@@ -7,6 +7,7 @@ import { pruneQrScans } from "@/server/services/qr.service";
 import { pruneExpiredCarts } from "@/server/services/cart.service";
 import { pruneTrackPoints } from "@/server/services/driver.service";
 import { flagExpiredBatches } from "@/server/services/stock.service";
+import { alertLowStock } from "@/server/services/inventory-item.service";
 import { warnAboutFiscalRunway } from "@/server/services/fiscal.service";
 import { creditDueEarnings } from "@/server/services/creator-earning.service";
 import { expireAttributions } from "@/server/services/creator-attribution.service";
@@ -14,6 +15,9 @@ import { expireCredit } from "@/server/services/creator-wallet.service";
 import { liftLapsedSuspensions } from "@/server/services/creator.service";
 import { pruneViewEvents, rollUpDay } from "@/server/services/creator-engagement.service";
 import { sweepOrphanedUploads } from "@/server/services/media.service";
+import { deriveRange } from "@/server/services/attendance.service";
+import { addDays, zonedDateOf } from "@/server/attendance/shift";
+import { prisma } from "@/lib/prisma";
 
 
 /**
@@ -77,6 +81,21 @@ export async function runMaintenanceCycle() {
   }
 
   /*
+   * Stock at or below its reorder level, told to whoever can raise an order.
+   *
+   * After the prunes rather than inside the race above because it sends
+   * notifications: a fan-out belongs on its own line where a failure is
+   * legible, not buried among the housekeeping it would take down with it.
+   */
+  let lowStock;
+  try {
+    lowStock = await alertLowStock();
+  } catch (error) {
+    logger.error("the low-stock alert failed", { error: error.message });
+    lowStock = { failedToRun: true, reason: error.message };
+  }
+
+  /*
    * These two are ordered, not raced.
    *
    * The warning counts the postings that are waiting, and the release empties
@@ -100,6 +119,7 @@ export async function runMaintenanceCycle() {
     trackPointsPruned,
     batchesExpired,
     uploadsSwept,
+    lowStock,
     postingsReleased,
     fiscalRunway: {
       state: fiscalWarning.state,
@@ -132,6 +152,79 @@ export async function runCreatorCycle() {
   ]);
 
   return { credited, attributionsExpired, creditExpired, suspensionsLifted };
+}
+
+/**
+ * How many days back each nightly fold reaches.
+ *
+ * Three rather than one, because a worker that missed a night must not leave a
+ * hole in somebody's pay — the extra reach heals a gap left by a deploy, an
+ * outage, or a machine that was simply off.
+ *
+ * Re-folding a day recomputes it from the same punches and writes the same
+ * answer, so the repetition is wasted work rather than a hazard. What makes it
+ * safe is narrower than "nothing is rewritten": a day that has been paid is
+ * locked and a day a human corrected is flagged, and derivation refuses both.
+ * Everything else is simply derived again.
+ */
+const FOLD_DAYS = 3;
+
+/**
+ * Turns raw punches into the attendance days payroll is built from.
+ *
+ * Its own cycle rather than part of maintenance, for the reason the creator
+ * cycle is: this decides what people are paid. An absence only becomes a row
+ * when something derives the day — nothing is pushed when a person does not
+ * turn up — so without this a day with no punch stays missing until somebody
+ * happens to touch it, and a payslip is built from attendance that was never
+ * worked out.
+ *
+ * Per branch, because "yesterday" is a different day in Karachi than it is in
+ * Greenwich, and a shift is a wall clock in the branch's own zone.
+ *
+ * Yesterday rather than today: a day still in progress has punches yet to
+ * arrive, and folding it would write a half-day that the next run has to
+ * correct. Running repeatedly is safe because derivation refuses a locked day
+ * (already paid) and one a human corrected by hand; any other day is
+ * recomputed from the same punches and lands on the same answer.
+ */
+export async function runAttendanceCycle({ days = FOLD_DAYS, now = new Date() } = {}) {
+  const branches = await prisma.branch.findMany({
+    where: { isActive: true },
+    select: { id: true, name: true, timezone: true },
+  });
+
+  const branchResults = [];
+  let derived = 0;
+  let skipped = 0;
+
+  for (const branch of branches) {
+    // One branch's bad data must not stop the rest being folded — a payroll
+    // run that silently skipped three outlets would be found at month end.
+    try {
+      const today = zonedDateOf(now, branch.timezone ?? "UTC");
+      const to = addDays(today, -1);
+      const from = addDays(to, -(Math.max(1, days) - 1));
+
+      const result = await deriveRange({ branchId: branch.id, from, to, force: false });
+      derived += result.derived;
+      skipped += result.skipped;
+      branchResults.push({
+        branchId: branch.id,
+        from: from.toISOString().slice(0, 10),
+        to: to.toISOString().slice(0, 10),
+        employees: result.employees,
+        derived: result.derived,
+        skipped: result.skipped,
+        failed: result.failed.length,
+      });
+    } catch (error) {
+      logger.error("attendance fold failed for a branch", { branchId: branch.id, error: error.message });
+      branchResults.push({ branchId: branch.id, failedToRun: true, reason: error.message });
+    }
+  }
+
+  return { branches: branches.length, derived, skipped, perBranch: branchResults };
 }
 
 /**

@@ -4,6 +4,8 @@ import { Prisma } from "@/generated/prisma";
 import { cursorArgs, toPage } from "@/lib/api/pagination";
 import { slugify } from "@/lib/slug";
 import { branchFilter, scopeWhere } from "@/server/inventory/access";
+import { logger } from "@/lib/logger";
+import { notifyPermission, usersWithPermission } from "@/server/services/notification.service";
 
 /**
  * Inventory items — the things a restaurant physically holds.
@@ -307,6 +309,119 @@ const LOCATION_SELECT = {
   isDefault: true,
   isActive: true,
 };
+
+/** The notification a low-stock alert is recorded as. */
+export const LOW_STOCK_NOTIFICATION = "inventory.low_stock";
+
+/*
+ * The grant that can actually do something about it — raising a purchase
+ * order. Telling people who cannot act turns the alert into noise they learn
+ * to dismiss, and the one person who could act never hears it.
+ */
+const LOW_STOCK_GRANT = "purchase_orders.create";
+
+/**
+ * Tells somebody that stock has fallen to its reorder level.
+ *
+ * "Low" means exactly what the item list already means by it — at or below the
+ * reorder level in *some* location — rather than a second definition based on
+ * a branch total. Two notions of low is how a dashboard and an alert come to
+ * disagree, and then neither is believed.
+ *
+ * Inactive items are left out. An item nobody stocks any more is permanently
+ * at zero, and an alert that fires every night about something deliberately
+ * discontinued is the fastest way to train people to ignore the whole channel.
+ *
+ * ## Only when something new goes low
+ *
+ * The hard part of an alert like this is not finding low stock, it is not
+ * saying it every night. Sending daily while the flour is low tells somebody
+ * nothing they did not know yesterday; sending only once means the next item
+ * to run out is never mentioned.
+ *
+ * So each branch's last alert carries the items it was about, and a new one
+ * goes out only when the current set contains something that one did not.
+ * Restocking never triggers a notice — good news needs no alarm — and the
+ * message always lists everything low now, not just the new arrivals, because
+ * that is the list somebody raising an order needs.
+ */
+export async function alertLowStock() {
+  const rows = await prisma.$queryRaw(Prisma.sql`
+    SELECT s."branchId" AS "branchId",
+           i.id         AS "itemId",
+           i.name       AS "name",
+           u.code       AS "unit",
+           i."reorderLevel" AS "reorderLevel",
+           SUM(l.quantity)  AS "onHand"
+    FROM "InventoryItem" i
+    JOIN "UnitOfMeasure" u ON u.id = i."uomId"
+    JOIN "StockLevel" l ON l."itemId" = i.id
+    JOIN "StockLocation" s ON s.id = l."locationId"
+    WHERE i."reorderLevel" IS NOT NULL AND i."isActive" = true
+    GROUP BY s."branchId", i.id, i.name, u.code, i."reorderLevel"
+    HAVING BOOL_OR(l.quantity <= i."reorderLevel")
+    ORDER BY i.name ASC
+  `);
+
+  /*
+   * Counted every cycle rather than only when something is sent. A fan-out
+   * that reaches nobody is the quietest way for an alert to fail: everything
+   * reports success, nothing was sent because there was nobody to send to,
+   * and the first anyone hears of it is an empty shelf.
+   */
+  const audience = (await usersWithPermission(LOW_STOCK_GRANT)).length;
+  if (!audience && rows.length) {
+    logger.error("nobody holds the grant to act on low stock", { permission: LOW_STOCK_GRANT });
+  }
+
+  const byBranch = new Map();
+  for (const row of rows) {
+    if (!byBranch.has(row.branchId)) byBranch.set(row.branchId, []);
+    byBranch.get(row.branchId).push(row);
+  }
+
+  let alerted = 0;
+  const branches = [];
+
+  for (const [branchId, items] of byBranch) {
+    const itemIds = items.map((item) => item.itemId).sort();
+
+    const last = await prisma.notification.findFirst({
+      where: { type: LOW_STOCK_NOTIFICATION, data: { path: ["branchId"], equals: branchId } },
+      orderBy: { createdAt: "desc" },
+      select: { data: true },
+    });
+
+    const told = new Set(last?.data?.itemIds ?? []);
+    const fresh = itemIds.filter((id) => !told.has(id));
+    if (!fresh.length) {
+      branches.push({ branchId, low: itemIds.length, newlyLow: 0, alerted: false });
+      continue;
+    }
+
+    const branch = await prisma.branch.findUnique({ where: { id: branchId }, select: { name: true } });
+    const names = items.map((item) => `${item.name} (${Number(item.onHand)} ${item.unit})`);
+    const title = `${items.length} item${items.length === 1 ? "" : "s"} low at ${branch?.name ?? "a branch"}`;
+    const body = `At or below the reorder level: ${names.join(", ")}. Raise a purchase order before it runs out.`;
+
+    const { created } = await notifyPermission({
+      permissionKey: LOW_STOCK_GRANT,
+      type: LOW_STOCK_NOTIFICATION,
+      title,
+      body,
+      // The set is what the next cycle compares against, so it is stored
+      // whole rather than as a count.
+      data: { branchId, itemIds, newlyLow: fresh },
+      referenceType: "Branch",
+      referenceId: branchId,
+    });
+
+    alerted += created;
+    branches.push({ branchId, low: itemIds.length, newlyLow: fresh.length, alerted: created > 0 });
+  }
+
+  return { audience, branchesWithLowStock: byBranch.size, alerted, branches };
+}
 
 export async function listLocations({ branchId, isActive, scope = null } = {}) {
   return prisma.stockLocation.findMany({

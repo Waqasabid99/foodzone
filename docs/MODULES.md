@@ -825,9 +825,13 @@ calendar screen; nothing creates next year automatically.
 
 ## Phase 14 — Cross-cutting
 
-- [ ] **Background jobs** — scheduler plus: attendance folding, earning crediting,
-      cart and attribution expiry, stat rollups, credit expiry, batch expiry
-      alerts, low-stock alerts, outbox drain
+- [x] **Background jobs** — an interval loop (`WORKER_IN_PROCESS=true`) or cron
+      hitting `/api/internal/jobs/*`, both claiming with `SKIP LOCKED` so they
+      are safe to run at once. Covers the outbox drain, attendance folding,
+      earning crediting, cart and attribution expiry, stat rollups, credit
+      expiry, batch expiry and low-stock alerts. *(`creator-credit` and
+      `creator-rollup` have endpoints but are not in `vercel.json` yet — see
+      Phase 14's **Deployment**.)*
 - [ ] **Realtime** — order status and driver location channels for both clients
 - [ ] **Search** — product and order search
 - [x] **API documentation** — OpenAPI 3.1 generated from the route options by

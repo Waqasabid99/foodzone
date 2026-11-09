@@ -136,6 +136,101 @@
     }
   ],
   "paths": {
+    "/api/internal/jobs/attendance": {
+      "get": {
+        "operationId": "getInternalJobsAttendance",
+        "summary": "Run the attendance job",
+        "description": "Machine-to-machine. Send `Authorization: Bearer $CRON_SECRET`; an unauthorised caller receives 404 rather than 401, so the endpoint's existence is not disclosed.",
+        "tags": [
+          "Internal jobs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "data"
+                  ],
+                  "properties": {
+                    "success": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "cronSecret": []
+          }
+        ],
+        "x-source": "src/app/api/internal/jobs/attendance/route.js"
+      },
+      "post": {
+        "operationId": "postInternalJobsAttendance",
+        "summary": "Run the attendance job",
+        "description": "Machine-to-machine. Send `Authorization: Bearer $CRON_SECRET`; an unauthorised caller receives 404 rather than 401, so the endpoint's existence is not disclosed.",
+        "tags": [
+          "Internal jobs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "data"
+                  ],
+                  "properties": {
+                    "success": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "cronSecret": []
+          }
+        ],
+        "x-source": "src/app/api/internal/jobs/attendance/route.js"
+      }
+    },
     "/api/internal/jobs/creator-credit": {
       "get": {
         "operationId": "getInternalJobsCreatorCredit",

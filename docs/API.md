@@ -349,6 +349,7 @@ later needs no migration and no client change. A token Expo reports as
 | --- | --- | --- |
 | `GET`/`POST` | `/api/internal/jobs/outbox` | `Authorization: Bearer $CRON_SECRET` |
 | `GET`/`POST` | `/api/internal/jobs/maintenance` | `Authorization: Bearer $CRON_SECRET` |
+| `GET`/`POST` | `/api/internal/jobs/attendance` | `Authorization: Bearer $CRON_SECRET` |
 
 Side effects are written to an outbox table **inside the transaction that caused
 them**, so a notification cannot be lost when the process dies after the commit.
@@ -382,6 +383,28 @@ trains people to ignore all of them.
 **The nightly maintenance job** prunes delivered outbox events, clears expired
 timed 86s, prunes `QrScan` rows older than 180 days, and deletes carts past
 their 7-day expiry.
+
+**The nightly maintenance job also alerts on low stock**, to whoever holds
+`purchase_orders.create` — the grant that can actually raise an order, because
+telling people who cannot act turns an alert into noise they learn to dismiss.
+"Low" means what the item list already means by it, at or below the reorder
+level in some location, rather than a second definition nobody can reconcile
+with the screen. Inactive items are left out, and a branch is only told again
+when something has *newly* gone low: restocking raises no alarm, and the
+message always lists everything low now, because that is what somebody raising
+an order needs.
+
+**The nightly attendance job** turns raw punches into the attendance days
+payroll is built from. It runs per branch, because "yesterday" is a different
+day in each branch's own zone, and it reaches three days back rather than one,
+which heals a hole left by a night the worker missed. Re-folding a day
+recomputes it from the same punches and writes the same answer; what keeps
+that safe is that derivation refuses a day already paid and a day a human
+corrected by hand. It is
+separate from maintenance deliberately — an absence becomes a row only when
+something derives the day, so a fold that quietly stopped would be discovered
+on payday. Days already paid, and days a human corrected by hand, are left
+alone.
 
 ## Catalog administration
 

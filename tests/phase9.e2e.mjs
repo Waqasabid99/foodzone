@@ -660,6 +660,51 @@ async function main() {
   const variance = await api(`/admin/stock/usage-variance?branchId=${branchId}`, { token: adminToken });
   check("theoretical usage is reportable", Array.isArray(variance.body.data), variance.body?.data);
 
+  // ================= LOW STOCK ALERT =================
+  /*
+   * Beef has been wasted and cooked with, so it is under its reorder level of
+   * 5. The nightly maintenance job is what notices; nothing in the ordering
+   * path does, which is the point — somebody has to be told before the shelf
+   * is empty, not when a customer orders the thing that ran out.
+   */
+  const runMaintenance = async () => {
+    const res = await fetch(`${BASE}/api/internal/jobs/maintenance`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${process.env.E2E_CRON_SECRET ?? "phase2-test-secret"}` },
+    });
+    return res.ok ? (await res.json().catch(() => null))?.data : null;
+  };
+
+  const firstSweep = await runMaintenance();
+  check("the maintenance job reports on low stock", Boolean(firstSweep?.lowStock), firstSweep?.lowStock);
+  check(
+    "and found somebody who could act on it",
+    (firstSweep?.lowStock?.audience ?? 0) > 0,
+    firstSweep?.lowStock,
+  );
+
+  const alerts = await prisma.notification.findMany({
+    where: { type: "inventory.low_stock", data: { path: ["branchId"], equals: branchId } },
+    select: { id: true, title: true, body: true, data: true },
+  });
+  check("a low-stock alert was raised for the branch", alerts.length > 0, { count: alerts.length });
+  check("it names the item that is short", alerts.some((row) => row.body?.includes(`Beef ${stamp}`)), alerts[0]?.body);
+  check("and says what to do about it", alerts.some((row) => /purchase order/i.test(row.body ?? "")), alerts[0]?.body);
+
+  /*
+   * The hard part of an alert is not raising it, it is not raising it again
+   * every night. Nothing has newly gone low, so a second sweep must stay
+   * quiet — otherwise the channel becomes noise and the next real warning is
+   * dismissed with the rest.
+   */
+  const secondSweep = await runMaintenance();
+  check("a second sweep adds nothing while the same items are low", secondSweep?.lowStock?.alerted === 0, secondSweep?.lowStock);
+
+  const afterSecond = await prisma.notification.count({
+    where: { type: "inventory.low_stock", data: { path: ["branchId"], equals: branchId } },
+  });
+  check("so the count of alerts is unchanged", afterSecond === alerts.length, { before: alerts.length, afterSecond });
+
   // ================= PERMISSIONS =================
   const custReg = await api("/auth/register", {
     method: "POST",
