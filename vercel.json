@@ -10,8 +10,16 @@
       "schedule": "0 3 * * *"
     },
     {
+      "path": "/api/internal/jobs/creator-credit",
+      "schedule": "15 3 * * *"
+    },
+    {
       "path": "/api/internal/jobs/attendance",
       "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/internal/jobs/creator-rollup",
+      "schedule": "45 3 * * *"
     }
   ]
 }

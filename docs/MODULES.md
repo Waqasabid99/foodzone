@@ -829,9 +829,9 @@ calendar screen; nothing creates next year automatically.
       hitting `/api/internal/jobs/*`, both claiming with `SKIP LOCKED` so they
       are safe to run at once. Covers the outbox drain, attendance folding,
       earning crediting, cart and attribution expiry, stat rollups, credit
-      expiry, batch expiry and low-stock alerts. *(`creator-credit` and
-      `creator-rollup` have endpoints but are not in `vercel.json` yet — see
-      Phase 14's **Deployment**.)*
+      expiry, batch expiry and low-stock alerts. Every nightly job is in
+      `vercel.json`; the in-process loop drains the outbox only, so a VPS
+      needs cron for the rest — see the table in `docs/API.md`.
 - [ ] **Realtime** — order status and driver location channels for both clients
 - [ ] **Search** — product and order search
 - [x] **API documentation** — OpenAPI 3.1 generated from the route options by

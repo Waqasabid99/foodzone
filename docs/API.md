@@ -350,6 +350,8 @@ later needs no migration and no client change. A token Expo reports as
 | `GET`/`POST` | `/api/internal/jobs/outbox` | `Authorization: Bearer $CRON_SECRET` |
 | `GET`/`POST` | `/api/internal/jobs/maintenance` | `Authorization: Bearer $CRON_SECRET` |
 | `GET`/`POST` | `/api/internal/jobs/attendance` | `Authorization: Bearer $CRON_SECRET` |
+| `GET`/`POST` | `/api/internal/jobs/creator-credit` | `Authorization: Bearer $CRON_SECRET` |
+| `GET`/`POST` | `/api/internal/jobs/creator-rollup` | `Authorization: Bearer $CRON_SECRET` |
 
 Side effects are written to an outbox table **inside the transaction that caused
 them**, so a notification cannot be lost when the process dies after the commit.
@@ -365,8 +367,23 @@ Two deployment shapes, same code:
 
 - **Docker / VPS**: set `WORKER_IN_PROCESS=true`. `instrumentation.js` starts an
   interval loop once per server instance.
-- **Vercel**: leave it false. `vercel.json` schedules the outbox endpoint every
-  minute and maintenance nightly.
+- **Vercel**: leave it false. `vercel.json` schedules every endpoint below.
+
+**The in-process loop drains the outbox and nothing else.** Every nightly job
+needs a scheduler of its own in *both* shapes — on Vercel that is `vercel.json`,
+on a VPS it is cron or a systemd timer hitting the same endpoints with
+`$CRON_SECRET`. Setting `WORKER_IN_PROCESS=true` and stopping there leaves
+earnings uncredited, attendance unfolded and nothing pruned, and none of it
+announces itself: every one of those failures is silent by nature, which is
+why they are listed here rather than left to be inferred.
+
+| Job | When `vercel.json` runs it | What stops if it does not run |
+| --- | --- | --- |
+| `outbox` | every minute | emails, push and ledger postings never leave the queue |
+| `maintenance` | 03:00 | nothing is pruned, and nobody is told about low stock |
+| `creator-credit` | 03:15 | earnings never become spendable credit |
+| `attendance` | 03:30 | absences never become rows, and payroll is built without them |
+| `creator-rollup` | 03:45 | the creator funnel stops gaining days |
 
 Without `CRON_SECRET` these endpoints return **404** in production rather than
 running unauthenticated — an open job trigger is a free denial of service. In
