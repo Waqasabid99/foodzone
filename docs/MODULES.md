@@ -242,9 +242,13 @@ one it turns out to be.
 - [ ] **Driver cash-in-hand and handover** — COD collected by a driver is
       recorded against a session today; the driver-specific float, reconciliation
       and handover flow belong with drivers in Phase 8
-- [ ] **Prepayment enforcement** — `payments.require_prepayment_for` is defined
-      and defaults to empty; wiring it into checkout as a hard gate needs the
-      hosted-checkout redirect a real provider supplies
+- [x] **Prepayment enforcement** — `payments.require_prepayment_for` is read at
+      checkout, which refuses an order of a listed type unless it is being paid
+      now: a gateway chosen, or store credit already covering the whole bill.
+      Staff-placed orders are exempt, like the minimum order amount, because
+      the till is how a counter takes money. If the gateway then will not
+      start, such an order is cancelled rather than left standing as "pay in
+      person" — which would be the exact thing the setting prevents, quietly
 - [ ] **Settlement reconciliation** — matching a provider's payout file against
       captured payments and fees; belongs with finance in Phase 11
 - [ ] **Payment retries and dunning** — retrying a failed charge is possible

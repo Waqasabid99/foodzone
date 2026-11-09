@@ -41,6 +41,9 @@ import { validateCoupon } from "@/server/services/coupon.service";
  * stopping it being spent, and a customer told the wrong reason contacts
  * support rather than fixing it.
  */
+/** How an order type is said to a customer, for a refusal they have to read. */
+const ORDER_TYPE_WORDS = { DELIVERY: "Delivery", PICKUP: "Pickup", DINE_IN: "Dine-in" };
+
 const REDEMPTION_REFUSALS = {
   NOT_A_CREATOR: "This account has no store credit",
   WALLET_FROZEN: "This wallet is on hold — please contact support",
@@ -277,6 +280,7 @@ export async function placeOrder({
   couponCode = null,
   scheduledFor = null,
   storeCredit = 0,
+  payWith = null,
   at = new Date(),
 }) {
   if (!items?.length) throw ApiError.validation("Your cart is empty", { items: ["Add at least one item"] });
@@ -401,6 +405,38 @@ export async function placeOrder({
         redeemable: quote.redeemable,
         available: quote.available,
         ...(quote.maxPercent ? { maxPercent: quote.maxPercent } : {}),
+      });
+    }
+  }
+
+  /*
+   * Order types the branch will not start without the money.
+   *
+   * The setting has existed and been settable since payments were built, and
+   * nothing read it — so an operator could switch on "delivery must be paid up
+   * front", watch it save, and still have unpaid delivery orders reach the
+   * kitchen. A setting that does nothing is worse than a missing one: the
+   * first is believed.
+   *
+   * Enforced as a *choice* at checkout, because that is the moment the
+   * customer can do something about it. Paying now means either a gateway was
+   * chosen or store credit already covers the whole bill — credit is money the
+   * restaurant is holding, so an order it settles in full is prepaid by any
+   * honest reading.
+   *
+   * Staff-placed orders are exempt, for the same reason the minimum order
+   * amount exempts them: a member of staff is standing at a counter with the
+   * customer in front of them, and the till is how the money is taken.
+   */
+  const prepaidTypes = settings["payments.require_prepayment_for"] ?? [];
+  if (!staffPlaced && Array.isArray(prepaidTypes) && prepaidTypes.includes(type)) {
+    const coveredByCredit = creditRequested >= Number(priced.grandTotal);
+
+    if (!payWith && !coveredByCredit) {
+      throw ApiError.validation(`${ORDER_TYPE_WORDS[type] ?? type} orders must be paid before they are placed`, {
+        payWith: ["Choose how to pay now"],
+        requiresPrepayment: true,
+        grandTotal: priced.grandTotal,
       });
     }
   }
@@ -728,6 +764,21 @@ export async function placeOrder({
  * response the client last saw: between opening the cart and pressing pay, a
  * price can change, an item can be 86'd, or a branch can close.
  */
+/**
+ * Whether this branch will start an order of this type before it is paid.
+ *
+ * Exported because the rule has to be asked twice: once at checkout, where a
+ * customer can still choose how to pay, and once after the gateway leg, where
+ * the honest answer to "the gateway would not start" depends on whether the
+ * order was allowed to exist unpaid in the first place.
+ */
+export async function prepaymentRequired({ branchId, type, staffPlaced = false }) {
+  if (staffPlaced) return false;
+  const settings = await getSettings({ branchId });
+  const types = settings["payments.require_prepayment_for"] ?? [];
+  return Array.isArray(types) && types.includes(type);
+}
+
 export async function checkoutCart({ cart, userId, guest, input, channel = "WEB", at = new Date() }) {
   if (!cart.items.length) throw ApiError.validation("Your cart is empty", { items: ["Add at least one item"] });
 
@@ -759,6 +810,9 @@ export async function checkoutCart({ cart, userId, guest, input, channel = "WEB"
     // and checks out from the app still gets it.
     couponCode: input.couponCode ?? cart.couponCode ?? null,
     storeCredit: input.storeCredit ?? 0,
+    // Not to start the payment — the route does that once the order exists —
+    // but so the prepayment rule can see whether one was chosen at all.
+    payWith: input.payWith ?? null,
     at,
   });
 }

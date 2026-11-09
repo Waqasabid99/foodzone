@@ -575,6 +575,76 @@ async function main() {
   const keptCart = await api("/cart", { token: verifiedToken });
   check("a refused checkout leaves the cart alone", keptCart.body?.data?.items?.length > 0, keptCart.body?.data?.items);
 
+  // ================= PREPAYMENT =================
+  /*
+   * `payments.require_prepayment_for` has been settable since payments were
+   * built and nothing read it, so an operator could switch it on, watch it
+   * save, and still take unpaid orders of that type. A setting that does
+   * nothing is worse than a missing one, because the first is believed.
+   */
+  await api("/admin/settings", {
+    method: "PUT",
+    token: adminToken,
+    body: { branchId, values: { "payments.require_prepayment_for": ["DINE_IN"] } },
+  });
+
+  await api("/cart/items", {
+    method: "POST",
+    token: verifiedToken,
+    body: { productId: drinkId, quantity: 2, branchId, type: "DINE_IN" },
+  });
+
+  const unpaid = await api("/checkout", {
+    method: "POST",
+    token: verifiedToken,
+    body: { type: "DINE_IN", tableId },
+  });
+  check("an order type that must be prepaid is refused without a way to pay", unpaid.status === 400, {
+    status: unpaid.status,
+    error: unpaid.body?.error?.message,
+  });
+  check("and the refusal says what to do", /paid before/i.test(unpaid.body?.error?.message ?? ""), unpaid.body?.error?.message);
+  check("it is flagged as a prepayment rule, not a generic validation error", unpaid.body?.error?.details?.requiresPrepayment === true, unpaid.body?.error?.details);
+
+  const keptForPrepay = await api("/cart", { token: verifiedToken });
+  check("the basket survives a prepayment refusal", keptForPrepay.body?.data?.items?.length > 0, keptForPrepay.body?.data?.items);
+
+  /*
+   * The counter is exempt, for the reason the minimum order amount is: a
+   * member of staff is standing there with the customer in front of them, and
+   * the till is how the money is taken. Enforcing an online prepayment rule
+   * against a walk-in would make the POS refuse cash.
+   */
+  const counterWhilePrepaid = await api("/admin/orders", {
+    method: "POST",
+    token: adminToken,
+    body: {
+      branchId,
+      type: "DINE_IN",
+      channel: "POS",
+      tableId,
+      guest: { name: "Walk-in during prepay" },
+      items: [{ productId: drinkId, quantity: 1 }],
+    },
+  });
+  check("the counter still takes an order while prepayment is required online", counterWhilePrepaid.status === 201, counterWhilePrepaid.body?.error);
+  if (counterWhilePrepaid.body?.data?.id) created.orderIds.add(counterWhilePrepaid.body.data.id);
+
+  // Back off, so the rest of the suite orders the way it did before.
+  await api("/admin/settings", {
+    method: "PUT",
+    token: adminToken,
+    body: { branchId, values: { "payments.require_prepayment_for": [] } },
+  });
+
+  const afterReset = await api("/checkout", {
+    method: "POST",
+    token: verifiedToken,
+    body: { type: "DINE_IN", tableId },
+  });
+  check("and with the rule off the same order goes through", afterReset.status === 201, afterReset.body?.error);
+  if (afterReset.body?.data?.id) created.orderIds.add(afterReset.body.data.id);
+
   const secondOrder = await api("/admin/orders", {
     method: "POST",
     token: adminToken,
