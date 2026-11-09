@@ -13280,6 +13280,185 @@ check("the calendar runs from today to the limit, inclusive", () => {
   assert.deepEqual(dates, ["2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15"]);
 });
 
+// ============================ realtime channels ============================
+/*
+ * The security boundary of the live channel, tested here rather than over HTTP
+ * because it is pure: a principal, a list of strings, and a decision. Over HTTP
+ * each of these cases would be a user, a role, a grant and a connection; here
+ * they are three lines, so all of them get written instead of the easy ones.
+ */
+const { authorizeChannels, orderIdsIn } = await import("@/server/realtime/channels");
+const { channel, parseChannel } = await import("@/lib/realtime");
+
+/**
+ * A principal shaped the way `can()` actually reads one: `allow` and `deny` are
+ * maps from permission key to the set of branches it is held at, where `null`
+ * in the set means company-wide.
+ */
+const principalWith = (userId, grants, { isSuperAdmin = false, denied = [] } = {}) => {
+  const toMap = (entries) => {
+    const map = new Map();
+    for (const { key, branchId } of entries) {
+      const branches = map.get(key) ?? new Set();
+      branches.add(branchId ?? null);
+      map.set(key, branches);
+    }
+    return map;
+  };
+
+  return { userId, isSuperAdmin, allow: toMap(grants), deny: toMap(denied), roles: [] };
+};
+
+check("a channel name survives a round trip", () => {
+  assert.equal(channel.branchKds("abc123"), "branch-kds:abc123");
+  assert.deepEqual(parseChannel("branch-kds:abc123"), { kind: "branch-kds", id: "abc123", name: "branch-kds:abc123" });
+});
+
+check("anything not shaped like a channel is refused rather than guessed", () => {
+  // No separator, unknown kind, empty id, an id with a colon or a wildcard in
+  // it — every one of these is either a typo or somebody probing the endpoint.
+  for (const bad of ["", "branch-kds", ":abc", "branch-kds:", "nonsense:abc", "branch-kds:*", "branch-kds:a b"]) {
+    assert.equal(parseChannel(bad), null, bad);
+  }
+});
+
+check("asking for no channels is an error, not an empty stream", () => {
+  // A held connection that can never deliver is worse than a refusal: the
+  // client waits on it instead of falling back to its poll.
+  assert.throws(() => authorizeChannels({ principal: principalWith("u1", []), requested: [] }), /at least one channel/i);
+});
+
+check("a cook gets the kitchen and is refused the order list", () => {
+  const cook = principalWith("u1", [{ key: "kds.read", branchId: "b1" }]);
+  const { allowed, refused } = authorizeChannels({
+    principal: cook,
+    requested: [channel.branchKds("b1"), channel.branchOrders("b1")],
+  });
+
+  assert.deepEqual(allowed, ["branch-kds:b1"]);
+  // Refused rather than thrown: the board it *may* watch still gets a live
+  // connection, and the one it may not is named so the screen can say why.
+  assert.deepEqual(refused, [{ channel: "branch-orders:b1", reason: "FORBIDDEN" }]);
+});
+
+check("a grant at one branch does not open another branch's kitchen", () => {
+  const manager = principalWith("u1", [{ key: "kds.read", branchId: "b1" }]);
+  const { allowed, refused } = authorizeChannels({
+    principal: manager,
+    requested: [channel.branchKds("b1"), channel.branchKds("b2")],
+  });
+
+  assert.deepEqual(allowed, ["branch-kds:b1"]);
+  assert.equal(refused[0].reason, "FORBIDDEN");
+});
+
+check("a company-wide grant carries to every branch", () => {
+  // A grant with no branch is company-wide, which is how a head-office role is
+  // expressed; it has to reach a branch channel or an owner could watch nothing.
+  const owner = principalWith("u1", [{ key: "kds.read", branchId: null }]);
+  const { allowed } = authorizeChannels({ principal: owner, requested: [channel.branchKds("b9")] });
+  assert.deepEqual(allowed, ["branch-kds:b9"]);
+});
+
+check("a user channel is yourself and nobody else", () => {
+  const someone = principalWith("u1", []);
+  const { allowed, refused } = authorizeChannels({
+    principal: someone,
+    requested: [channel.user("u1"), channel.user("u2")],
+  });
+
+  assert.deepEqual(allowed, ["user:u1"]);
+  assert.deepEqual(refused, [{ channel: "user:u2", reason: "NOT_YOURS" }]);
+});
+
+check("a super admin still cannot read somebody else's notifications", () => {
+  /*
+   * The one place the super-admin bypass deliberately does not reach. Every
+   * other check in the system is a permission, and a super admin holds all of
+   * them; a user channel is not a permission, it is an identity, and nothing
+   * makes it correct to pipe one person's notifications to another's browser.
+   */
+  const root = principalWith("u1", [], { isSuperAdmin: true });
+  const { allowed, refused } = authorizeChannels({ principal: root, requested: [channel.user("u2")] });
+
+  assert.deepEqual(allowed, []);
+  assert.equal(refused[0].reason, "NOT_YOURS");
+});
+
+check("an order channel takes ownership, which a permission cannot give", () => {
+  const customer = principalWith("u1", []);
+  const { allowed, refused } = authorizeChannels({
+    principal: customer,
+    requested: [channel.order("o1"), channel.order("o2")],
+    // Resolved by the route from a database read: ownership is a row.
+    allowedOrderIds: ["o1"],
+  });
+
+  assert.deepEqual(allowed, ["order:o1"]);
+  assert.deepEqual(refused, [{ channel: "order:o2", reason: "NOT_YOURS" }]);
+});
+
+check("a branch-level DENY closes a channel a company-wide grant opened", () => {
+  /*
+   * The asymmetry worth pinning: a head-office grant reaches every branch, and
+   * an explicit refusal at one branch takes it back. `can()` resolves that, and
+   * the point of this test is that the channel check goes through `can()`
+   * rather than reimplementing a simpler version of it.
+   */
+  const manager = principalWith("u1", [{ key: "kds.read", branchId: null }], {
+    denied: [{ key: "kds.read", branchId: "b2" }],
+  });
+
+  const { allowed, refused } = authorizeChannels({
+    principal: manager,
+    requested: [channel.branchKds("b1"), channel.branchKds("b2")],
+  });
+
+  assert.deepEqual(allowed, ["branch-kds:b1"]);
+  assert.equal(refused[0].reason, "FORBIDDEN");
+});
+
+check("a super admin may watch any branch, because that is what the bypass means", () => {
+  // The counterpart of the notification test above: the bypass is about
+  // permissions, and watching a branch is a permission. Watching a person is not.
+  const root = principalWith("u1", [], { isSuperAdmin: true });
+  const { allowed } = authorizeChannels({
+    principal: root,
+    requested: [channel.branchKds("b1"), channel.branchOrders("b2")],
+  });
+  assert.deepEqual(allowed, ["branch-kds:b1", "branch-orders:b2"]);
+});
+
+check("an unauthenticated caller is refused every branch channel", () => {
+  const { allowed, refused } = authorizeChannels({ principal: null, requested: [channel.branchKds("b1")] });
+  assert.deepEqual(allowed, []);
+  assert.equal(refused[0].reason, "UNAUTHENTICATED");
+});
+
+check("a super admin cannot guess an order id into a live channel either", () => {
+  const root = principalWith("u1", [], { isSuperAdmin: true });
+  const { allowed } = authorizeChannels({ principal: root, requested: [channel.order("o9")], allowedOrderIds: [] });
+  assert.deepEqual(allowed, []);
+});
+
+check("only the order channels are handed to the ownership lookup", () => {
+  // The route reads the database for these ids and nothing else, so a branch
+  // channel must never leak into the query.
+  assert.deepEqual(
+    orderIdsIn([channel.order("o1"), channel.branchKds("b1"), channel.user("u1"), channel.order("o1"), "rubbish"]),
+    ["o1"],
+  );
+});
+
+check("duplicates collapse, so one connection cannot be made to hold the same channel twice", () => {
+  const cook = principalWith("u1", [{ key: "kds.read", branchId: "b1" }]);
+  const { allowed } = authorizeChannels({
+    principal: cook,
+    requested: [channel.branchKds("b1"), channel.branchKds("b1"), channel.branchKds("b1")],
+  });
+  assert.deepEqual(allowed, ["branch-kds:b1"]);
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) {
   console.log("Failures:\n - " + failures.join("\n - "));

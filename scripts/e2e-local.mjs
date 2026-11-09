@@ -59,6 +59,9 @@ const env = {
   // The suites drive the drain themselves; an in-process loop racing them
   // makes "did this job run" untestable.
   WORKER_IN_PROCESS: "false",
+  // The live channel is in-process, and so is this single test server, which
+  // is exactly the deployment the flag is an assertion about.
+  REALTIME_ENABLED: process.env.E2E_REALTIME ?? "true",
   SMTP_HOST: "",
   NEXT_TELEMETRY_DISABLED: "1",
 };

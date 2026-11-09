@@ -11,6 +11,7 @@ import { billRequests } from "@/server/services/order.service";
 import { scopedBranches } from "@/server/content/service-admin";
 import { hasPermission } from "@/lib/dashboard-nav";
 import { loginHref } from "@/lib/redirects";
+import { isRealtimeEnabled } from "@/server/realtime/broker";
 
 export const metadata = { title: "The pass — FoodZone", robots: { index: false, follow: false } };
 export const dynamic = "force-dynamic";
@@ -80,6 +81,7 @@ export default async function PassPage({ searchParams }) {
         branchId={branchId}
         initial={serialize(runs)}
         canHandOver={can(principal, "kds.update_item_status", { branchId })}
+        liveEnabled={isRealtimeEnabled()}
       />
 
       {waiting.length ? <BillRequests tickets={serialize(waiting)} canSettle={can(principal, "payments.capture", { branchId })} /> : null}

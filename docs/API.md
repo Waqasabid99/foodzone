@@ -436,6 +436,103 @@ something derives the day, so a fold that quietly stopped would be discovered
 on payday. Days already paid, and days a human corrected by hand, are left
 alone.
 
+## Realtime
+
+`GET /api/v1/realtime/stream?channels=a,b` — server-sent events telling a
+screen when to refetch.
+
+Server-sent events rather than a WebSocket, for three reasons pointing the same
+way. The traffic is one-directional: the client has nothing to say back that an
+ordinary request would not carry better. It is plain HTTP, so it inherits the
+cookie session, the bearer token, the rate limiter and every `apiHandler`
+guard instead of needing a parallel auth path — the website connects with its
+session cookie, which is the one real constraint of the transport (`EventSource`
+cannot set a header), and the app will connect with its bearer token. And the
+browser reconnects on its own, which for a protocol whose every message means
+"refetch" is the entire recovery story.
+
+### A frame carries a hint, never a record
+
+Every frame says *something about this channel changed* and nothing more. The
+client then refetches through the endpoint it already uses.
+
+That looks wasteful and is the most important decision here. It keeps
+authorisation in exactly one place — the existing permissioned endpoint —
+rather than in two, the second being a serialiser with its own ideas about what
+a waiter may see. The first time those disagreed, the quiet one would win, and
+a stream is very quiet. It also makes a dropped connection self-healing: a
+reconnecting client refetches, and refetching is the whole protocol, so there
+is no replay to get right, no `Last-Event-ID` and no gap to detect.
+
+### Channels, and who may listen
+
+| Channel | Who | Checked how |
+| --- | --- | --- |
+| `branch-orders:{branchId}` | the till, the order list, dispatch | `orders.read` **at that branch** |
+| `branch-kds:{branchId}` | the kitchen and pass boards | `kds.read` **at that branch** |
+| `order:{orderId}` | whoever placed it | the row — resolved by a query, not a permission |
+| `user:{userId}` | that person, and only them | identity, which no permission overrides |
+
+The branch checks go through `can()` at the named branch, so a company-wide
+grant reaches every outlet, a branch-level `DENY` closes one again, and a
+manager of one branch cannot watch another's kitchen by editing a query string.
+The super-admin bypass covers the branch channels, because those are
+permissions — and deliberately does **not** cover `user:`, because that is an
+identity and nothing makes piping one person's notifications into another's
+browser correct.
+
+A request naming several channels gets the ones it may have plus a `refused`
+list naming the rest, rather than a 403 — a cook's board should go live even
+though the order list on the same page cannot. A request that may have *none*
+of them gets **204**, because a held connection that can never deliver is worse
+than no connection: the client would wait on it instead of falling back.
+
+### The poll does not go away
+
+The opening `hello` frame carries `authoritative`. True means the operator has
+asserted, through `REALTIME_ENABLED`, that this deployment is a single
+long-lived process — so every publisher and every open stream share one memory
+and a board may safely slow its poll from ten seconds to ninety.
+
+Clients must not assume it, and the boards do not. The broker fans out
+in-process, so two instances behind a load balancer would each hand half the
+staff a connection that misses half the changes; a board that had *stopped*
+polling on the strength of it would go quietly stale, which on a kitchen
+display means food nobody knows to cook. So the poll slows and never stops, and
+the server states the trust level rather than letting the client guess — it is
+the only one of the two that knows which deployment it is.
+
+A stream is held for `REALTIME_MAX_MINUTES` and then closed with a `bye`.
+Connections do not die cleanly — a laptop lid, a sleeping phone, a proxy
+reaping idle sockets — and without a ceiling each becomes a listener the process
+believes is live. A bounded stream turns an unbounded leak into one reconnect
+per half hour, which `EventSource` does unprompted.
+
+### Published from the service, not the outbox
+
+The nudges fire inline, right after the transaction that caused them commits.
+Hanging them off the outbox handlers that already fan out notifications would
+be tidier and wrong: the in-process worker runs on a 20-second timer, so the
+kitchen would learn about a new ticket *later* than the ten-second poll this
+replaces. After the commit, specifically — a frame published inside the
+transaction would arrive before the row it is about is visible to anyone else's
+read, and the refetch would come back without it.
+
+One action is often several changes: bumping a six-line ticket moves every
+line, and each publishes. The client coalesces a burst into one refetch.
+
+### What is not live yet
+
+**Driver positions.** `POST /me/driver/location` and the public tracking
+endpoint both exist; nothing pushes pings until there is an app to push them,
+so position is still read from the dispatch board's poll (kept at 30s for that
+reason, rather than 90). The channel for it lands with the app.
+
+**More than one instance.** The interface is `publish`/`subscribe` and the
+driver underneath is a map. A second instance wants that driver replaced with
+Postgres `NOTIFY` or Redis — one listener per instance rather than per viewer —
+and nothing above it changes.
+
 ## Catalog administration
 
 Products are **global**; a branch decides what it sells by putting a product on

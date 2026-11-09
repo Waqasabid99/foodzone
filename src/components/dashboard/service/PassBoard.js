@@ -5,6 +5,8 @@ import Link from "next/link";
 import { toast } from "react-toastify";
 import { api } from "@/lib/api-client";
 import { KITCHEN_POLL_SECONDS, ORDER_TYPE_LABELS, ticketUrgency } from "@/lib/service";
+import { useLiveRefresh } from "@/hooks/useLiveRefresh";
+import { channel } from "@/lib/realtime";
 
 /**
  * The pass.
@@ -32,7 +34,7 @@ import { KITCHEN_POLL_SECONDS, ORDER_TYPE_LABELS, ticketUrgency } from "@/lib/se
  * that has just come up are genuinely two journeys, and merging them would
  * have somebody carry the cold one.
  */
-export default function PassBoard({ branchId, initial = [], canHandOver = false }) {
+export default function PassBoard({ branchId, initial = [], canHandOver = false, liveEnabled = false }) {
   const [runs, setRuns] = useState(initial);
   const [lastGood, setLastGood] = useState(() => new Date());
   const [offline, setOffline] = useState(false);
@@ -54,16 +56,30 @@ export default function PassBoard({ branchId, initial = [], canHandOver = false 
     }
   }, [branchId]);
 
+  /*
+   * Told when a tray is ready, and asking anyway.
+   *
+   * The poll does not go away — it slows to a minute and a half, and only
+   * while the server has confirmed its frames can be trusted. A pass that
+   * stopped asking on the strength of a connection would show an empty counter
+   * while food went cold on it.
+   */
+  const { live } = useLiveRefresh({
+    channels: [channel.branchKds(branchId)],
+    refresh,
+    fastSeconds: KITCHEN_POLL_SECONDS,
+    enabled: liveEnabled,
+  });
+
   useEffect(() => {
     mounted.current = true;
-    const poll = setInterval(refresh, KITCHEN_POLL_SECONDS * 1000);
+    // The age badges count up between fetches, whether or not anything fetched.
     const clock = setInterval(() => setNow(new Date()), 15_000);
     return () => {
       mounted.current = false;
-      clearInterval(poll);
       clearInterval(clock);
     };
-  }, [refresh]);
+  }, []);
 
   const secondsStale = Math.floor((now.getTime() - lastGood.getTime()) / 1000);
   const reallyStale = offline && secondsStale > KITCHEN_POLL_SECONDS * 3;
@@ -105,7 +121,7 @@ export default function PassBoard({ branchId, initial = [], canHandOver = false 
         <p className="text-body-md text-on-surface-variant" aria-live="polite">
           {reallyStale
             ? `Out of touch for ${Math.floor(secondsStale / 60) || "<1"} min — what is on screen may be out of date.`
-            : `${runs.length} ${runs.length === 1 ? "tray" : "trays"} waiting · refreshing every ${KITCHEN_POLL_SECONDS}s`}
+            : `${runs.length} ${runs.length === 1 ? "tray" : "trays"} waiting · ${live ? "updating as the kitchen bumps" : `refreshing every ${KITCHEN_POLL_SECONDS}s`}`}
         </p>
         <button
           type="button"

@@ -12,6 +12,8 @@ import {
   itemAction,
   ticketUrgency,
 } from "@/lib/service";
+import { useLiveRefresh } from "@/hooks/useLiveRefresh";
+import { channel } from "@/lib/realtime";
 
 /**
  * The kitchen display.
@@ -35,7 +37,7 @@ import {
  *     second for a round trip with six orders up is how tickets get
  *     double-tapped.
  */
-export default function KitchenBoard({ branchId, stationId = "", stationName = null, initial, canBump, canSetAside = false }) {
+export default function KitchenBoard({ branchId, stationId = "", stationName = null, initial, canBump, canSetAside = false, liveEnabled = false }) {
   const [tickets, setTickets] = useState(initial?.tickets ?? []);
   const [lastGood, setLastGood] = useState(() => new Date());
   const [offline, setOffline] = useState(false);
@@ -64,18 +66,31 @@ export default function KitchenBoard({ branchId, stationId = "", stationName = n
     }
   }, [query]);
 
+  /*
+   * Told when a ticket lands, and asking anyway.
+   *
+   * The poll is not replaced, it is slowed — and only once the server has said
+   * its frames can be trusted on this deployment. A board that stopped asking
+   * because a socket was open is a board that shows an empty kitchen while
+   * orders pile up, which is the one failure a kitchen display must not have.
+   */
+  const { live } = useLiveRefresh({
+    channels: [channel.branchKds(branchId)],
+    refresh,
+    fastSeconds: KITCHEN_POLL_SECONDS,
+    enabled: liveEnabled,
+  });
+
   useEffect(() => {
     mounted.current = true;
-    const poll = setInterval(refresh, KITCHEN_POLL_SECONDS * 1000);
-    // A second, slower tick purely so the age badges keep counting up between
-    // polls — otherwise a ticket sits at "11 min" for ten seconds at a time.
+    // A slow tick purely so the age badges keep counting up between fetches —
+    // otherwise a ticket sits at "11 min" for a minute and a half at a time.
     const clock = setInterval(() => setNow(new Date()), 15_000);
     return () => {
       mounted.current = false;
-      clearInterval(poll);
       clearInterval(clock);
     };
-  }, [refresh]);
+  }, []);
 
   const secondsStale = Math.floor((now.getTime() - lastGood.getTime()) / 1000);
   const reallyStale = offline && secondsStale > KITCHEN_POLL_SECONDS * 3;
@@ -175,7 +190,7 @@ export default function KitchenBoard({ branchId, stationId = "", stationName = n
         <p className="text-body-md text-on-surface-variant" aria-live="polite">
           {reallyStale
             ? `Out of touch for ${Math.floor(secondsStale / 60) || "<1"} min — what is on screen may be out of date.`
-            : `${tickets.length} ${tickets.length === 1 ? "ticket" : "tickets"} up · refreshing every ${KITCHEN_POLL_SECONDS}s`}
+            : `${tickets.length} ${tickets.length === 1 ? "ticket" : "tickets"} up · ${live ? "new orders appear as they are placed" : `refreshing every ${KITCHEN_POLL_SECONDS}s`}`}
         </p>
         <button
           type="button"

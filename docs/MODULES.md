@@ -66,8 +66,15 @@ seeded baseline.
 - [x] **RBAC seed** — 294 permissions, 20 system roles, idempotent
 - [x] **API helper layer** — `apiHandler`, errors, validation, tokens, cookies,
       RBAC resolution, rate limiting, pagination, audit, logging, doc numbering
-- [ ] **Bootstrap seed** — owner account + first branch, so the system can be used
-- [x] **Test harness** — `npm test` (59 unit + 385 end-to-end), self-cleaning
+- [x] **Bootstrap seed** — `POST /api/v1/setup` behind `SETUP_TOKEN` creates the
+      owner and the first branch, with `/setup` as its page and
+      `npm run db:bootstrap` for a headless install. `installationNeedsSetup`
+      closes the endpoint once it has run
+- [x] **Test harness** — `npm run test:unit` (1012 assertions) plus 22
+      end-to-end suites driven over HTTP by `scripts/ci-e2e.mjs`, each
+      self-cleaning and failing if it leaves a row behind.
+      `npm run test:e2e:local` builds a throwaway Postgres cluster first, so a
+      run can never reach the database `.env` points at
 
 ---
 
@@ -843,7 +850,19 @@ calendar screen; nothing creates next year automatically.
       expiry, batch expiry and low-stock alerts. Every nightly job is in
       `vercel.json`; the in-process loop drains the outbox only, so a VPS
       needs cron for the rest — see the table in `docs/API.md`.
-- [ ] **Realtime** — order status and driver location channels for both clients
+- [~] **Realtime** — server-sent events on `/api/v1/realtime/stream`, with an
+      in-process broker behind a two-function interface (`publish`,
+      `subscribe`). Frames carry a hint and never a record, so authorisation
+      stays in the endpoint that already has it and a reconnect is
+      self-healing. Channels are per branch (`orders`, `kds`), per order and
+      per user, authorised against the same permission at the same branch the
+      endpoint behind them would ask for. The kitchen, pass and dispatch boards
+      consume it and **slow** their poll rather than stopping — the opening
+      frame says whether the deployment may be trusted that far, because the
+      broker is one process and nothing else could tell the client.
+      `REALTIME_ENABLED` is that assertion. Still open: driver positions, which
+      wait for the app that will push them, and a Postgres `NOTIFY` or Redis
+      driver before a second instance
 - [ ] **Search** — product and order search
 - [x] **API documentation** — OpenAPI 3.1 generated from the route options by
       `npm run docs:api`, served as Swagger UI at `/api/docs`; `docs/API.md`
@@ -851,7 +870,11 @@ calendar screen; nothing creates next year automatically.
 - [ ] **Security hardening** — rate-limit tuning, distributed limiter store,
       CORS review, secret rotation, dependency audit
 - [ ] **Observability** — error tracking, request metrics, slow-query logging
-- [ ] **Deployment** — environments, migration strategy, backups, restore drill
+- [~] **Deployment** — backups and the proof they work are built
+      (`npm run db:backup`, `npm run db:restore-drill`, documented under Phase
+      12), and migrations deploy from `prisma/migrations` with every one
+      hand-written and diff-checked against the schema. Still open:
+      environment promotion, a staging target, and secret rotation
 
 ---
 

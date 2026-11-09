@@ -9,6 +9,7 @@ import { stationQueue } from "@/server/services/kds.service";
 import { scopedBranches, stationOptions } from "@/server/content/service-admin";
 import { hasPermission } from "@/lib/dashboard-nav";
 import { loginHref } from "@/lib/redirects";
+import { isRealtimeEnabled } from "@/server/realtime/broker";
 
 export const metadata = { title: "Kitchen — FoodZone", robots: { index: false, follow: false } };
 export const dynamic = "force-dynamic";
@@ -102,6 +103,7 @@ export default async function KitchenPage({ searchParams }) {
         initial={{ tickets: serialize(initial) }}
         canBump={can(principal, "kds.update_item_status", { branchId })}
         canSetAside={can(principal, "kds.set_aside", { branchId })}
+        liveEnabled={isRealtimeEnabled()}
       />
     </div>
   );

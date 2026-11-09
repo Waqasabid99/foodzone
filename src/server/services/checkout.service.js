@@ -15,6 +15,7 @@ import { enqueue } from "@/server/jobs/outbox";
 import { resolveOrderDiscounts } from "@/server/services/promotion.service";
 import { validateCoupon } from "@/server/services/coupon.service";
 import { reserveForOrder, reservationMode } from "@/server/services/reservation.service";
+import { orderChanged } from "@/server/realtime/notify";
 
 /**
  * Checkout: turning a cart into an order.
@@ -763,6 +764,15 @@ export async function placeOrder({
     eventType: "order.placed",
     payload: { orderId: order.id },
   });
+
+  /*
+   * The frame that matters most: a new ticket on the kitchen board.
+   *
+   * Everything else realtime does is an update to something already on screen.
+   * This is work appearing — and the gap between a customer pressing pay and a
+   * cook seeing it was, until now, however long the poll happened to have left.
+   */
+  orderChanged({ orderId: order.id, branchId, userId, type: "order.placed" });
 
   /*
    * The same announcement a capture at the till raises, so store credit

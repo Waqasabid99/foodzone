@@ -47,7 +47,7 @@ const QUARANTINE = new Map([
  */
 const PHASES = process.env.E2E_PHASES
   ? process.env.E2E_PHASES.split(",").map((value) => Number(value.trim())).filter(Boolean)
-  : Array.from({ length: 22 }, (_, index) => index + 1);
+  : Array.from({ length: 23 }, (_, index) => index + 1);
 
 /** Pulls "123 passed, 4 failed" off the end of a suite's own output. */
 function summarise(output) {

@@ -142,6 +142,29 @@ const schema = z.object({
   WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(200).default(20),
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(8),
 
+  // --- realtime --------------------------------------------------------------
+  /**
+   * Pushes "something changed" to open browsers instead of making them ask.
+   *
+   * Off by default, and the flag means something specific: **this deployment is
+   * one long-lived process.** The broker fans out in memory, so a publish on
+   * one instance never reaches a stream held by another — turning this on
+   * across several instances, or on serverless, would hand clients a
+   * connection that silently misses events.
+   *
+   * It is safe to leave off. Every live screen keeps the poll it has always
+   * had; the stream only lets it poll far less often, and the server says so
+   * in its opening frame rather than letting the client assume.
+   */
+  REALTIME_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  /// How long one stream is held before the client is asked to reconnect.
+  /// Bounded so a proxy, a laptop lid or a sleeping phone cannot leave a dead
+  /// connection counted as live for hours.
+  REALTIME_MAX_MINUTES: z.coerce.number().int().min(1).max(120).default(30),
+
   // --- push -----------------------------------------------------------------
   /// Expo push. Off by default: device tokens are collected either way, so
   /// turning this on later needs no migration.

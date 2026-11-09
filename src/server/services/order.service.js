@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { ApiError, assertBranchAccess, can, cursorArgs, toPage } from "@/lib/api";
 import { withTransaction } from "@/server/utils/db";
 import { enqueue } from "@/server/jobs/outbox";
+import { orderChanged } from "@/server/realtime/notify";
 import { branchFilter } from "@/server/access/scope";
 
 /**
@@ -356,7 +357,7 @@ export async function assertOrderAccess(principal, orderId, permissionKey) {
 export async function changeOrderStatus({ orderId, toStatus, note = null, actorId = null }) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { id: true, type: true, status: true, orderNumber: true, userId: true },
+    select: { id: true, type: true, status: true, orderNumber: true, userId: true, branchId: true },
   });
   if (!order) throw ApiError.notFound("Order not found");
 
@@ -403,6 +404,22 @@ export async function changeOrderStatus({ orderId, toStatus, note = null, actorI
     payload: { orderId, fromStatus: order.status, toStatus },
   });
 
+  /*
+   * Wake the screens that are showing this order.
+   *
+   * Inline rather than from the outbox handler, because the in-process worker
+   * runs on a 20-second timer and the boards poll every ten — routing the
+   * nudge through the queue would make it slower than the thing it replaces.
+   * After the commit, so the refetch it triggers can actually see the new
+   * status.
+   */
+  orderChanged({
+    orderId,
+    branchId: order.branchId,
+    userId: order.userId,
+    type: "order.status",
+  });
+
   return getOrder(orderId);
 }
 
@@ -416,7 +433,7 @@ export async function changeOrderStatus({ orderId, toStatus, note = null, actorI
 export async function cancelOrder({ orderId, reason, actorId = null, byCustomer = false }) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { id: true, type: true, status: true, userId: true },
+    select: { id: true, type: true, status: true, userId: true, branchId: true },
   });
   if (!order) throw ApiError.notFound("Order not found");
 
@@ -455,6 +472,8 @@ export async function cancelOrder({ orderId, reason, actorId = null, byCustomer 
     eventType: "order.cancelled",
     payload: { orderId, reason },
   });
+
+  orderChanged({ orderId, branchId: order.branchId, userId: order.userId, type: "order.cancelled" });
 
   return getOrder(orderId);
 }
@@ -500,7 +519,7 @@ export async function updateOrderNotes({ orderId, kitchenNote, customerNote }) {
 export async function requestBill({ orderId, actorId = null, at = new Date() }) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { id: true, status: true, paymentState: true, billRequestedAt: true, orderNumber: true },
+    select: { id: true, status: true, paymentState: true, billRequestedAt: true, orderNumber: true, branchId: true },
   });
   if (!order) throw ApiError.notFound("Order not found");
   if (TERMINAL_STATUSES.includes(order.status)) {
@@ -519,6 +538,11 @@ export async function requestBill({ orderId, actorId = null, at = new Date() }) 
   // The till may not be looking at the screen. This is the event that makes a
   // waiter's tap reach a person.
   await enqueue({ eventType: "order.bill_requested", payload: { orderId } });
+
+  // The till's own list is the primary signal that a table wants to pay, and
+  // it is a screen nobody may be standing in front of. No kitchen frame: a
+  // request for the bill is not news to whoever is cooking.
+  orderChanged({ orderId, branchId: order.branchId, type: "order.bill_requested", kitchen: false });
 
   return getOrder(orderId);
 }

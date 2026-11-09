@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { deliveryChanged } from "@/server/realtime/notify";
 import { ApiError } from "@/lib/api";
 import { logger } from "@/lib/logger";
 import { Prisma } from "@/generated/prisma";
@@ -232,6 +233,15 @@ export async function assignDriver({ deliveryId, driverId, actor = null, reassig
 
   await enqueue({ eventType: "delivery.assigned", payload: { deliveryId, driverId, orderId: delivery.orderId } });
 
+  // The dispatch board loses a job from the unassigned column, and the
+  // customer's tracking page gains a driver's name.
+  deliveryChanged({
+    orderId: delivery.orderId,
+    branchId: updated.order?.branchId ?? null,
+    userId: updated.order?.user?.id ?? null,
+    type: "delivery.assigned",
+  });
+
   return updated;
 }
 
@@ -375,6 +385,13 @@ export async function setDeliveryStatus({
   await enqueue({
     eventType: "delivery.status_changed",
     payload: { deliveryId, orderId: delivery.orderId, status },
+  });
+
+  deliveryChanged({
+    orderId: delivery.orderId,
+    branchId: updated.order?.branchId ?? null,
+    userId: updated.order?.user?.id ?? null,
+    type: "delivery.status",
   });
 
   return { delivery: updated, changed: true };

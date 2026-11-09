@@ -6,6 +6,8 @@ import { toast } from "react-toastify";
 import { api } from "@/lib/api-client";
 import { formatMoney } from "@/lib/format";
 import { DELIVERY_STATES, DRIVER_STATES, availability, lastSeen, vehicleLabel, waitingSince } from "@/lib/delivery";
+import { useLiveRefresh } from "@/hooks/useLiveRefresh";
+import { channel } from "@/lib/realtime";
 
 /** How often the board re-asks. A rush changes faster than a kitchen does. */
 const POLL_SECONDS = 8;
@@ -28,7 +30,7 @@ const POLL_SECONDS = 8;
  * would leave an empty column that reads as "no drivers" when the truth is
  * "everyone is busy" — and those call for completely different decisions.
  */
-export default function DispatchBoard({ branchId, initial, currency, canAssign }) {
+export default function DispatchBoard({ branchId, initial, currency, canAssign, liveEnabled = false }) {
   const [board, setBoard] = useState(initial);
   const [lastGood, setLastGood] = useState(() => new Date());
   const [offline, setOffline] = useState(false);
@@ -49,17 +51,34 @@ export default function DispatchBoard({ branchId, initial, currency, canAssign }
     }
   }, [branchId]);
 
+  /*
+   * Told when a job appears or a driver takes one.
+   *
+   * Driver *positions* are not on this channel — they are still read from the
+   * poll, because nothing pushes them yet: the producer endpoint exists and
+   * waits for the mobile app. What arrives live is the part that changes in
+   * steps rather than continuously, which is the part a dispatcher is actually
+   * waiting on.
+   */
+  const { live } = useLiveRefresh({
+    channels: [channel.branchOrders(branchId)],
+    refresh,
+    fastSeconds: POLL_SECONDS,
+    // Shorter than the other boards': this one also carries driver positions,
+    // which no frame announces, so the safety net has to stay closer.
+    slowSeconds: 30,
+    enabled: liveEnabled,
+  });
+
   useEffect(() => {
     mounted.current = true;
-    const poll = setInterval(refresh, POLL_SECONDS * 1000);
-    // A slower tick so the waiting times keep counting up between polls.
+    // A slower tick so the waiting times keep counting up between fetches.
     const clock = setInterval(() => setNow(new Date()), 15_000);
     return () => {
       mounted.current = false;
-      clearInterval(poll);
       clearInterval(clock);
     };
-  }, [refresh]);
+  }, []);
 
   const secondsStale = Math.floor((now.getTime() - lastGood.getTime()) / 1000);
   const reallyStale = offline && secondsStale > POLL_SECONDS * 4;

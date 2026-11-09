@@ -63212,6 +63212,58 @@
         "x-source": "src/app/api/v1/qr/[code]/route.js"
       }
     },
+    "/api/v1/realtime/stream": {
+      "get": {
+        "operationId": "getRealtimeStream",
+        "summary": "Subscribe to live change notifications",
+        "description": "Server-sent events. Each frame names a channel that changed; refetch through the ordinary endpoint. Returns 204 when realtime is disabled for this deployment, which tells the client to keep polling.\n\nRequires an authenticated caller. Rate limit: 120 requests per 15m (`session` class).",
+        "tags": [
+          "Realtime"
+        ],
+        "parameters": [
+          {
+            "name": "channels",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw response — see the endpoint notes; not the JSON envelope."
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-rate-limit": {
+          "limit": 120,
+          "window": "15m"
+        },
+        "x-source": "src/app/api/v1/realtime/stream/route.js"
+      }
+    },
     "/api/v1/s/{code}": {
       "get": {
         "operationId": "getSByCode",

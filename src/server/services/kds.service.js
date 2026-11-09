@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { kitchenChanged } from "@/server/realtime/notify";
 import { ApiError } from "@/lib/api";
 import { withTransaction } from "@/server/utils/db";
 import { changeOrderStatus } from "@/server/services/order.service";
@@ -309,6 +310,17 @@ export async function setItemStatus({ itemId, status, actorId = null, reason = n
 
   const orderStatus = await advanceOrderFromItems({ orderId: item.orderId, actorId });
 
+  /*
+   * Every board showing this line, including the one the tap did not come
+   * from. A cook marking a burger ready is what the pass is waiting to see.
+   *
+   * Published even when the order's own status did not move — which is most
+   * taps — because that is precisely the case the boards could not learn about
+   * any other way. Where the order *did* move, `changeOrderStatus` has already
+   * published its own frame; the client coalesces the pair into one refetch.
+   */
+  kitchenChanged({ branchId: item.order.branchId, orderId: item.orderId, type: "kds.item" });
+
   return { itemId, status, orderStatus, changed: true };
 }
 
@@ -445,6 +457,10 @@ export async function setAsideTicket({ orderId, reason, actorId = null }) {
     changes: { reason },
   });
 
+  // A ticket leaving the board is as much news as one joining it — otherwise
+  // two cooks keep making something that has been parked.
+  kitchenChanged({ branchId: order.branchId, orderId, type: "kds.set_aside" });
+
   return { orderId, setAsideAt: updated.setAsideAt, reason: updated.setAsideReason };
 }
 
@@ -469,6 +485,8 @@ export async function recallTicket({ orderId, actorId = null }) {
     entityType: "Order",
     entityId: orderId,
   });
+
+  kitchenChanged({ branchId: order.branchId, orderId, type: "kds.recall" });
 
   return { orderId, recalled: true };
 }

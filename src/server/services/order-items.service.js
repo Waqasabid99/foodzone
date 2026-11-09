@@ -8,6 +8,7 @@ import { recordAudit } from "@/server/utils/audit";
 import { enqueue } from "@/server/jobs/outbox";
 import { syncOrderPaymentState } from "@/server/services/payment.service";
 import { reserveForOrder } from "@/server/services/reservation.service";
+import { orderChanged } from "@/server/realtime/notify";
 
 /**
  * The second round.
@@ -57,7 +58,7 @@ async function openOrderForEdit(orderId) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     select: {
-      id: true, branchId: true, type: true, status: true, orderNumber: true,
+      id: true, branchId: true, userId: true, type: true, status: true, orderNumber: true,
       subtotal: true, discountTotal: true, taxTotal: true, deliveryFee: true,
       packagingFee: true, serviceCharge: true, tipAmount: true, grandTotal: true,
       setAsideAt: true,
@@ -215,6 +216,10 @@ export async function addCourse({ orderId, items, actorId = null, at = new Date(
   // The kitchen has new work it has not been told about, and whoever is
   // watching the order wants to know the bill moved.
   await enqueue({ eventType: "order.course_added", payload: { orderId: order.id, course } });
+
+  // New work on a ticket the kitchen has already seen, which is exactly the
+  // change a board redrawing from a poll is slowest to show.
+  orderChanged({ orderId: order.id, branchId: order.branchId, userId: order.userId ?? null, type: "order.course_added" });
 
   return { orderId: order.id, course, grandTotal: totals.grandTotal };
 }

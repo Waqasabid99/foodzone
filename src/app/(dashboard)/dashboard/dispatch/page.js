@@ -10,6 +10,7 @@ import { driverPositions } from "@/server/services/driver.service";
 import { scopedBranches } from "@/server/content/delivery-admin";
 import { hasPermission } from "@/lib/dashboard-nav";
 import { loginHref } from "@/lib/redirects";
+import { isRealtimeEnabled } from "@/server/realtime/broker";
 
 export const metadata = { title: "Dispatch — FoodZone", robots: { index: false, follow: false } };
 export const dynamic = "force-dynamic";
@@ -97,6 +98,7 @@ export default async function DispatchPage({ searchParams }) {
         initial={serialize(initial)}
         currency={branches.find((row) => row.id === branchId)?.currency ?? "PKR"}
         canAssign={can(principal, "deliveries.assign", { branchId })}
+        liveEnabled={isRealtimeEnabled()}
       />
     </div>
   );
