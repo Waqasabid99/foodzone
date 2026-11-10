@@ -13280,6 +13280,83 @@ check("the calendar runs from today to the limit, inclusive", () => {
   assert.deepEqual(dates, ["2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15"]);
 });
 
+// ========================= notification categories =========================
+const { NOTIFICATION_CATEGORIES, CATEGORY_KEYS, categoryForType, classifiedTypes } = await import(
+  "@/server/notifications/categories"
+);
+const { decide } = await import("@/server/notifications/preferences");
+
+check("no notification type belongs to two categories", () => {
+  /*
+   * The bug this prevents is silent: the registry builds a type -> category
+   * map, so a duplicate means the later entry wins and somebody's preference
+   * for one category quietly governs the other.
+   */
+  const seen = classifiedTypes();
+  assert.equal(seen.length, new Set(seen).size, `duplicates: ${seen.filter((t, i) => seen.indexOf(t) !== i)}`);
+});
+
+check("category keys are unique and every category claims at least one type", () => {
+  assert.equal(CATEGORY_KEYS.length, new Set(CATEGORY_KEYS).size);
+  for (const category of NOTIFICATION_CATEGORIES) {
+    assert.ok(category.types.length > 0, `${category.key} claims nothing`);
+    assert.ok(category.label && category.description, `${category.key} is missing its words`);
+  }
+});
+
+check("the types the order handlers actually send are all classified", () => {
+  // Named rather than derived, so adding a producer without a category fails
+  // here instead of quietly defaulting to "always on" forever.
+  for (const type of [
+    "order.placed",
+    "order.status_changed",
+    "order.cancelled",
+    "order.course_added",
+    "payment.captured",
+    "refund.completed",
+    "delivery.assigned",
+    "delivery.status_changed",
+    "creator.video_published",
+    "creator.video_rejected",
+    "inventory.low_stock",
+    "order.bill_requested",
+  ]) {
+    assert.ok(categoryForType(type), `${type} belongs to no category`);
+  }
+});
+
+check("an unclassified type is delivered rather than swallowed", () => {
+  /*
+   * Fail open, deliberately. An unclassified notification is a gap in the
+   * registry; delivering it means somebody sees it on a screen and notices,
+   * while suppressing it means silence — which is the one failure nobody ever
+   * reports.
+   */
+  const decided = decide({ type: "nothing.claims_this", preferences: new Map() });
+  assert.deepEqual(decided, { inApp: true, push: true, category: null });
+});
+
+check("a stored choice is what decides", () => {
+  const preferences = new Map([["order", { inApp: true, push: false }]]);
+  const decided = decide({ type: "order.status_changed", preferences });
+
+  assert.equal(decided.category, "order");
+  assert.equal(decided.inApp, true, "the record survives");
+  assert.equal(decided.push, false, "the interruption does not");
+});
+
+check("a category with no stored row falls back to being on", () => {
+  // `decide` is handed an already-resolved map, so a missing entry means the
+  // resolver had nothing — which must not read as "they opted out".
+  const decided = decide({ type: "payment.captured", preferences: new Map() });
+  assert.deepEqual(decided, { inApp: true, push: true, category: "payment" });
+});
+
+check("marketing is the only category that may be silenced completely", () => {
+  const optional = NOTIFICATION_CATEGORIES.filter((category) => !category.transactional).map((c) => c.key);
+  assert.deepEqual(optional, ["marketing"]);
+});
+
 // ============================ realtime channels ============================
 /*
  * The security boundary of the live channel, tested here rather than over HTTP

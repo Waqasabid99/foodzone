@@ -81,6 +81,34 @@ model Notification {
   @@index([status])
 }
 
+/// What one person wants to be told about, and how.
+///
+/// A row per person per **category** — never per notification type. The
+/// categories are defined in `server/notifications/categories.js`, which also
+/// decides what each one permits: for anything transactional the in-app row is
+/// the record and only the push can be silenced, so `inApp` is ignored there.
+///
+/// Absent means the default, which is why nothing is written when somebody
+/// signs up. A missing row is "everything on" for a transactional category and
+/// "off unless the operator says otherwise" for marketing.
+model NotificationPreference {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  /// A key from the category registry. Not a raw notification type.
+  category  String
+  /// Whether the row is written at all. Honoured only for marketing; a
+  /// transactional record cannot be opted out of, only its interruption.
+  inApp     Boolean  @default(true)
+  /// Whether their devices are woken.
+  push      Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, category])
+  @@index([userId])
+}
+
 /// Uploaded files (product photos, wastage evidence, receipts, and later the
 /// customer videos).
 model MediaAsset {

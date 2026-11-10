@@ -338,6 +338,127 @@ async function main() {
   const deleted = await api(`/me/notifications/${feed.body.data[0].id}`, { method: "DELETE", token: custToken });
   check("a notification can be dismissed", deleted.status === 204);
 
+  // ===================== NOTIFICATION PREFERENCES =====================
+  /*
+   * The rule being defended: **the in-app row is the record, the push is the
+   * interruption.** Somebody may stop their phone going off about an order;
+   * they may not make the cancellation of one leave no trace, because an order
+   * that vanished without a record is a support call nobody can answer.
+   *
+   * Marketing is the exception that makes the distinction worth having — an
+   * offer records nothing, so opting out of it silences it completely.
+   */
+  const prefs = await api("/me/notification-preferences", { token: custToken });
+  check("preferences list every category, not only the ones touched", prefs.status === 200 && prefs.body.data.length >= 5, prefs.body?.data?.length);
+
+  const orderPref = prefs.body.data.find((row) => row.key === "order");
+  check("order updates are on by default", orderPref?.inApp === true && orderPref?.push === true, orderPref);
+  check(
+    "and the screen is told their record cannot be silenced",
+    orderPref?.canMuteInApp === false,
+    orderPref,
+  );
+
+  const marketingPref = prefs.body.data.find((row) => row.key === "marketing");
+  check("marketing is off until somebody opts in", marketingPref?.inApp === false && marketingPref?.push === false, marketingPref);
+  check("and is the one category that can be silenced outright", marketingPref?.canMuteInApp === true, marketingPref);
+
+  // Staff categories are not offered to a customer who could never receive one.
+  check(
+    "a customer is not offered the staff category",
+    !prefs.body.data.some((row) => row.audience === "staff"),
+    prefs.body.data.map((row) => row.key),
+  );
+
+  const muteRecord = await api("/me/notification-preferences", {
+    method: "PUT",
+    token: custToken,
+    body: { categories: { order: { inApp: false } } },
+  });
+  check(
+    "switching off the record of a transactional category is refused",
+    muteRecord.status === 400,
+    { status: muteRecord.status, body: muteRecord.body?.error },
+  );
+  check(
+    "and refused in words that say what to do instead",
+    /alerts/i.test(JSON.stringify(muteRecord.body?.error?.details ?? {})),
+    muteRecord.body?.error?.details,
+  );
+
+  const mutePush = await api("/me/notification-preferences", {
+    method: "PUT",
+    token: custToken,
+    body: { categories: { order: { push: false } } },
+  });
+  check("but switching off the alert is allowed", mutePush.status === 200, mutePush.body?.error);
+  check(
+    "and leaves the record on",
+    mutePush.body?.data?.find((row) => row.key === "order")?.inApp === true,
+    mutePush.body?.data?.find((row) => row.key === "order"),
+  );
+
+  // Only the named category moves. A screen that shows a subset must not wipe
+  // what it does not know about.
+  check(
+    "saving one category leaves the others alone",
+    mutePush.body?.data?.find((row) => row.key === "payment")?.push === true,
+    mutePush.body?.data?.find((row) => row.key === "payment"),
+  );
+
+  const invented = await api("/me/notification-preferences", {
+    method: "PUT",
+    token: custToken,
+    body: { categories: { "not-a-category": { push: false } } },
+  });
+  check("a category cannot be invented by posting a string", invented.status === 400, invented.status);
+
+  const nothing = await api("/me/notification-preferences", { method: "PUT", token: custToken, body: { categories: {} } });
+  check("and saving nothing is an error rather than a no-op", nothing.status === 400, nothing.status);
+
+  /*
+   * Marketing suppressed end to end: an opted-out person gets no row at all,
+   * which is the only category where that is true. Sent through the admin
+   * endpoint so it travels the same path a real campaign would.
+   */
+  const campaign = await api("/admin/notifications", {
+    method: "POST",
+    token: adminToken,
+    body: { userIds: [custId], type: "marketing.campaign", title: "Two for one Tuesdays" },
+  });
+  check("a marketing send to an opted-out person creates nothing", campaign.body?.data?.created === 0, campaign.body?.data);
+  check("and says how many it suppressed rather than reporting success", campaign.body?.data?.suppressed === 1, campaign.body?.data);
+
+  const optIn = await api("/me/notification-preferences", {
+    method: "PUT",
+    token: custToken,
+    body: { categories: { marketing: { inApp: true, push: true } } },
+  });
+  check("opting in is a single switch", optIn.status === 200, optIn.body?.error);
+
+  const campaignAgain = await api("/admin/notifications", {
+    method: "POST",
+    token: adminToken,
+    body: { userIds: [custId], type: "marketing.campaign", title: "Two for one Tuesdays" },
+  });
+  check("after which the same campaign lands", campaignAgain.body?.data?.created === 1, campaignAgain.body?.data);
+
+  /*
+   * A type no category claims is delivered. An unclassified notification is a
+   * gap in the registry, and the right behaviour for a gap is to deliver and
+   * let somebody notice it on a screen — silence is the one failure nobody
+   * reports. `admin.message` above is exactly that case and arrived.
+   */
+  const unclassified = await api("/admin/notifications", {
+    method: "POST",
+    token: adminToken,
+    body: { userIds: [custId], type: "nothing.claims_this", title: "Still gets through" },
+  });
+  check("a type no category claims is still delivered", unclassified.body?.data?.created === 1, unclassified.body?.data);
+
+  const prefsDenied = await api("/me/notification-preferences", { token: null });
+  check("preferences need a session", prefsDenied.status === 401, prefsDenied.status);
+
   // ===================== DEVICES =====================
   const badToken = await api("/me/devices", { method: "POST", token: custToken, body: { pushToken: "fcm-style-token", platform: "ANDROID" } });
   check("a non-Expo push token is rejected", badToken.status === 400 && !!badToken.body?.error?.details?.pushToken, badToken.body?.error);
@@ -408,6 +529,7 @@ async function cleanup() {
 
   await prisma.outboxEvent.deleteMany({ where: { OR: [{ id: { in: [...created.outboxIds] } }, { eventType: "does.not.exist" }] } });
   await prisma.userDevice.deleteMany({ where: { userId: { in: ids } } });
+  await prisma.notificationPreference.deleteMany({ where: { userId: { in: ids } } });
   await prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await prisma.mediaAsset.deleteMany({ where: { OR: [{ uploadedById: { in: ids } }, { storageKey: { in: [...created.assetKeys] } }] } });
   await prisma.auditLog.deleteMany({ where: { OR: [{ actorId: { in: ids } }, { entityId: { in: [...created.branchIds] } }] } });

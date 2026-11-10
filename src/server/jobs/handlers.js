@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { enqueue, registerHandler } from "@/server/jobs/outbox";
 import { sendPush, sendPushToUser } from "@/server/notifications/push";
+import { notifyUser, notifyUsers } from "@/server/services/notification.service";
 import { reverseJournalEntry } from "@/server/services/journal.service";
 import {
   postBillPayment,
@@ -32,6 +33,13 @@ import { logger } from "@/lib/logger";
  *
  * Throwing schedules a retry with backoff. Return normally — even for "nothing
  * to do" — when retrying could not possibly help.
+ *
+ * Notifications go through `notifyUser` and `notifyUsers`, never
+ * `prisma.notification.create`. These handlers used to write the rows directly,
+ * which looked harmless and meant none of them ever reached the push queue —
+ * a food app whose customers' phones stayed silent about their own orders. The
+ * service is also where a person's preferences are applied, so writing a row
+ * straight to the table bypasses their choice as well as their devices.
  */
 let registered = false;
 
@@ -147,16 +155,14 @@ export function registerJobHandlers() {
     // Deleted before delivery: nothing to retry.
     if (!order?.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: order.userId,
-        type: "order.placed",
-        title: `Order ${order.orderNumber} received`,
-        body: `${order.branch.name} has your order and will confirm it shortly.`,
-        data: { orderId, orderNumber: order.orderNumber },
-        referenceType: "Order",
-        referenceId: orderId,
-      },
+    await notifyUser({
+      userId: order.userId,
+      type: "order.placed",
+      title: `Order ${order.orderNumber} received`,
+      body: `${order.branch.name} has your order and will confirm it shortly.`,
+      data: { orderId, orderNumber: order.orderNumber },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 
@@ -227,16 +233,14 @@ export function registerJobHandlers() {
     }[toStatus];
     if (!message) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: order.userId,
-        type: "order.status_changed",
-        title: `Order ${order.orderNumber}`,
-        body: `Your order ${message}`,
-        data: { orderId, orderNumber: order.orderNumber, status: toStatus },
-        referenceType: "Order",
-        referenceId: orderId,
-      },
+    await notifyUser({
+      userId: order.userId,
+      type: "order.status_changed",
+      title: `Order ${order.orderNumber}`,
+      body: `Your order ${message}`,
+      data: { orderId, orderNumber: order.orderNumber, status: toStatus },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 
@@ -281,16 +285,14 @@ export function registerJobHandlers() {
     const toTell = userIds.filter((id) => !told.has(id));
     if (!toTell.length) return;
 
-    await prisma.notification.createMany({
-      data: toTell.map((userId) => ({
-        userId,
-        type: "order.bill_requested",
-        title: `${where} is asking for the bill`,
-        body: `${order.orderNumber} — ${order.currency ?? "PKR"} ${order.grandTotal}`,
-        data: { orderId, orderNumber: order.orderNumber },
-        referenceType: "Order",
-        referenceId: orderId,
-      })),
+    await notifyUsers({
+      userIds: toTell,
+      type: "order.bill_requested",
+      title: `${where} is asking for the bill`,
+      body: `${order.orderNumber} — ${order.currency ?? "PKR"} ${order.grandTotal}`,
+      data: { orderId, orderNumber: order.orderNumber },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 
@@ -309,16 +311,14 @@ export function registerJobHandlers() {
     });
     if (!order?.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: order.userId,
-        type: "order.course_added",
-        title: `More added to ${order.orderNumber}`,
-        body: `Your bill is now ${order.currency ?? "PKR"} ${order.grandTotal}.`,
-        data: { orderId, orderNumber: order.orderNumber, course },
-        referenceType: "Order",
-        referenceId: orderId,
-      },
+    await notifyUser({
+      userId: order.userId,
+      type: "order.course_added",
+      title: `More added to ${order.orderNumber}`,
+      body: `Your bill is now ${order.currency ?? "PKR"} ${order.grandTotal}.`,
+      data: { orderId, orderNumber: order.orderNumber, course },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 
@@ -352,16 +352,14 @@ export function registerJobHandlers() {
 
     if (!order.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: order.userId,
-        type: "order.cancelled",
-        title: `Order ${order.orderNumber} cancelled`,
-        body: reason ? `Reason: ${reason}` : "Your order has been cancelled.",
-        data: { orderId, orderNumber: order.orderNumber },
-        referenceType: "Order",
-        referenceId: orderId,
-      },
+    await notifyUser({
+      userId: order.userId,
+      type: "order.cancelled",
+      title: `Order ${order.orderNumber} cancelled`,
+      body: reason ? `Reason: ${reason}` : "Your order has been cancelled.",
+      data: { orderId, orderNumber: order.orderNumber },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 
@@ -380,16 +378,14 @@ export function registerJobHandlers() {
     });
     if (!payment?.order?.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: payment.order.userId,
-        type: "payment.captured",
-        title: `Payment received for ${payment.order.orderNumber}`,
-        body: `We have received ${payment.order.currency} ${payment.amount}. Thank you.`,
-        data: { orderId, paymentId, amount: String(payment.amount) },
-        referenceType: "Order",
-        referenceId: orderId,
-      },
+    await notifyUser({
+      userId: payment.order.userId,
+      type: "payment.captured",
+      title: `Payment received for ${payment.order.orderNumber}`,
+      body: `We have received ${payment.order.currency} ${payment.amount}. Thank you.`,
+      data: { orderId, paymentId, amount: String(payment.amount) },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 
@@ -409,18 +405,16 @@ export function registerJobHandlers() {
     });
     if (!refund?.order?.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: refund.order.userId,
-        type: "refund.completed",
-        title: `Refund issued for ${refund.order.orderNumber}`,
-        // How long the money takes to appear is the bank's business, not ours,
-        // so the message says what we did rather than promising a date.
-        body: `${refund.order.currency} ${refund.amount} has been refunded to your original payment method.`,
-        data: { orderId, refundId, amount: String(refund.amount) },
-        referenceType: "Order",
-        referenceId: orderId,
-      },
+    await notifyUser({
+      userId: refund.order.userId,
+      type: "refund.completed",
+      title: `Refund issued for ${refund.order.orderNumber}`,
+      // How long the money takes to appear is the bank's business, not ours,
+      // so the message says what we did rather than promising a date.
+      body: `${refund.order.currency} ${refund.amount} has been refunded to your original payment method.`,
+      data: { orderId, refundId, amount: String(refund.amount) },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 
@@ -431,16 +425,14 @@ export function registerJobHandlers() {
     });
     if (!delivery?.order?.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: delivery.order.userId,
-        type: "delivery.assigned",
-        title: `A driver is on the way for ${delivery.order.orderNumber}`,
-        body: "Your order has been assigned to a driver.",
-        data: { orderId, deliveryId },
-        referenceType: "Order",
-        referenceId: orderId,
-      },
+    await notifyUser({
+      userId: delivery.order.userId,
+      type: "delivery.assigned",
+      title: `A driver is on the way for ${delivery.order.orderNumber}`,
+      body: "Your order has been assigned to a driver.",
+      data: { orderId, deliveryId },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 
@@ -551,16 +543,14 @@ export function registerJobHandlers() {
     });
     if (!video?.creator?.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: video.creator.userId,
-        type: "creator.video_published",
-        title: "Your video is live",
-        body: `It is now on the ${video.product?.name ?? "product"} page.`,
-        data: { videoId },
-        referenceType: "CreatorVideo",
-        referenceId: videoId,
-      },
+    await notifyUser({
+      userId: video.creator.userId,
+      type: "creator.video_published",
+      title: "Your video is live",
+      body: `It is now on the ${video.product?.name ?? "product"} page.`,
+      data: { videoId },
+      referenceType: "CreatorVideo",
+      referenceId: videoId,
     });
   });
 
@@ -577,18 +567,16 @@ export function registerJobHandlers() {
     });
     if (!video?.creator?.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: video.creator.userId,
-        type: "creator.video_rejected",
-        title: video.isLocked ? "Your video could not be approved" : "Your video needs another take",
-        body: video.isLocked
-          ? "This item has used all its attempts."
-          : video.lastRejectionNote || "Have a look at the reason and try again.",
-        data: { videoId, reason, isLocked: video.isLocked },
-        referenceType: "CreatorVideo",
-        referenceId: videoId,
-      },
+    await notifyUser({
+      userId: video.creator.userId,
+      type: "creator.video_rejected",
+      title: video.isLocked ? "Your video could not be approved" : "Your video needs another take",
+      body: video.isLocked
+        ? "This item has used all its attempts."
+        : video.lastRejectionNote || "Have a look at the reason and try again.",
+      data: { videoId, reason, isLocked: video.isLocked },
+      referenceType: "CreatorVideo",
+      referenceId: videoId,
     });
   });
 
@@ -608,16 +596,14 @@ export function registerJobHandlers() {
     });
     if (!delivery?.order?.userId) return;
 
-    await prisma.notification.create({
-      data: {
-        userId: delivery.order.userId,
-        type: "delivery.status_changed",
-        title: `Order ${delivery.order.orderNumber}`,
-        body: message,
-        data: { orderId, deliveryId, status },
-        referenceType: "Order",
-        referenceId: orderId,
-      },
+    await notifyUser({
+      userId: delivery.order.userId,
+      type: "delivery.status_changed",
+      title: `Order ${delivery.order.orderNumber}`,
+      body: message,
+      data: { orderId, deliveryId, status },
+      referenceType: "Order",
+      referenceId: orderId,
     });
   });
 

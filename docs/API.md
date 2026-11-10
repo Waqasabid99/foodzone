@@ -328,6 +328,7 @@ one customer's receipt URL cannot be guessed from another's.
 | `GET` | `/me/notifications/unread-count` | `self.manage_notifications` | For a badge |
 | `POST` | `/me/notifications/read` | `self.manage_notifications` | `{ ids? }` — omit to read all |
 | `DELETE` | `/me/notifications/{id}` | `self.manage_notifications` | |
+| `GET`/`PUT` | `/me/notification-preferences` | `self.manage_notifications` | `{ categories: { order: { push: false } } }` |
 | `GET`/`POST` | `/me/devices` | `self.manage_devices` | Expo push token registry |
 | `DELETE` | `/me/devices/{id}` | `self.manage_devices` | |
 | `POST` | `/admin/notifications` | `notifications.send` | `{ userIds[] \| roleKey, branchId?, title, body?, data? }` |
@@ -335,6 +336,70 @@ one customer's receipt URL cannot be guessed from another's.
 The in-app row is written synchronously — it is the record. Push copies go
 through the outbox, so a push provider having a bad minute can never fail the
 order that triggered the notification.
+
+**Everything goes through `notifyUser` / `notifyUsers`.** That is load-bearing
+rather than tidy: it is where preferences are applied, so a producer added
+later inherits the rule instead of having to remember it. The alternative was
+real — the order, payment, delivery and creator handlers each wrote
+`prisma.notification.create` directly, which meant none of them ever reached
+the push queue. A food app whose customers' phones stayed silent about their
+own orders.
+
+### Preferences
+
+Expressed per **category**, never per notification type. There are already a
+dozen types and there will be thirty; a screen with thirty switches is one
+nobody reads, and a type added later would default to "on" with nothing
+admitting it. A category is a promise about a kind of message, and new types
+join an existing one. The registry is
+`server/notifications/categories.js` — defined in code, stored in the
+database, never invented at runtime by a client posting a string.
+
+The rule that shapes all of it: **the in-app row is the record, the push is the
+interruption.**
+
+| Category | Types | What can be switched off |
+| --- | --- | --- |
+| `order` | placed, status, cancelled, course added | the push only |
+| `payment` | captured, refunded | the push only |
+| `delivery` | assigned, status | the push only |
+| `creator` | video published, rejected | the push only |
+| `operations` | low stock, bill requested, fiscal runway | the push only |
+| `marketing` | campaigns | **everything** |
+
+For anything transactional the row is written whatever the person chose, and an
+attempt to mute it is a **400** rather than being accepted and quietly ignored
+— which would leave a switch showing "off" while the notifications kept
+arriving, and the person reasonably concluding the feature is broken. An order
+that was cancelled and left no trace is a support call nobody can answer, and
+for staff alerts it is worse: a low-stock warning that was never recorded
+cannot be found afterwards to explain why nothing was ordered.
+
+`marketing` is the exception that makes the distinction worth having. An offer
+records nothing, so opting out silences it entirely — and it is the one
+category that is **off unless somebody opts in**, which is what
+`notifications.marketing_optin_default` has always been for and never been read
+by.
+
+A `PUT` changes only the categories it names, so a screen showing a subset
+cannot wipe the rest. `canMuteInApp` comes back per category rather than being
+inferred client-side, so a UI cannot draw a switch that does nothing. Categories
+nobody could receive are left out of the listing and refused on save: the
+`operations` category needs one of `purchase_orders.create`,
+`payments.capture` or `accounting.manage_periods`, because those are the grants
+its producers actually notify.
+
+**A type no category claims is delivered.** Fail open, deliberately: an
+unclassified notification is a gap in the registry, and the right behaviour for
+a gap is to deliver so somebody sees it on a screen and notices. Silence is the
+one failure mode nobody ever reports.
+
+**Email is deliberately absent.** Nothing in the system sends a notification by
+email — `sendMail` is reached only by verification, password reset and
+invitations, which are transactional security mail that must not be switchable
+off by anybody, including its recipient. An email toggle here would control
+nothing, and a preference that controls nothing is worse than a missing one,
+because the first is believed.
 
 Push is Expo. `pushToken` is globally unique because it identifies a device
 installation rather than a person: registering a token that belongs to someone

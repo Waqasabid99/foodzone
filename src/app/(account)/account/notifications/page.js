@@ -3,10 +3,12 @@ import { Bell } from "lucide-react";
 import PageHeader from "@/components/dashboard/PageHeader";
 import EmptyState from "@/components/dashboard/inventory/EmptyState";
 import NotificationList from "@/components/account/NotificationList";
+import NotificationPreferences from "@/components/account/NotificationPreferences";
 import { getAuthContext } from "@/lib/api/auth";
 import { grantedPermissionKeys } from "@/lib/api/permissions";
 import { serialize } from "@/lib/api/serialize";
 import { listNotifications } from "@/server/services/notification.service";
+import { listPreferences } from "@/server/notifications/preferences";
 import { hasPermission } from "@/lib/dashboard-nav";
 import { loginHref } from "@/lib/redirects";
 import { getSiteIdentity } from "@/server/content/site";
@@ -21,8 +23,13 @@ export default async function MyNotificationsPage() {
   const permissions = grantedPermissionKeys(principal);
   if (!hasPermission(permissions, "self.manage_notifications")) redirect("/account");
 
-  const page = await listNotifications({ userId: principal.userId, limit: 50 });
+  const [page, preferences] = await Promise.all([
+    listNotifications({ userId: principal.userId, limit: 50 }),
+    listPreferences(principal),
+  ]);
   const notifications = serialize(page.items ?? []);
+
+  const shown = serialize(preferences);
 
   return (
     <div className="flex max-w-3xl flex-col gap-6">
@@ -35,6 +42,8 @@ export default async function MyNotificationsPage() {
           Order updates will appear here.
         </EmptyState>
       )}
+
+      <NotificationPreferences initial={shown} />
     </div>
   );
 }

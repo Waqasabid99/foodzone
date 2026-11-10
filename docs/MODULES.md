@@ -103,7 +103,16 @@ seeded baseline.
 - [x] **Orphaned upload sweep** — `sweepOrphanedUploads` deletes objects uploaded
       but never confirmed, run from the job scheduler or `POST /admin/media/sweep`
 - [ ] **SMS / WhatsApp channels** — provider not chosen yet
-- [ ] **Notification preferences** — per-user, per-type opt-outs
+- [x] **Notification preferences** — per-user, per **category**, because a
+      screen with thirty switches is one nobody reads. `GET`/`PUT
+      /me/notification-preferences`, enforced in `notifyUser`/`notifyUsers`,
+      which every producer now goes through — the order, payment, delivery and
+      creator handlers wrote rows directly and so never pushed at all. The
+      rule: the in-app row is the record and is written whatever was chosen,
+      the push is the interruption and is theirs to silence; `marketing` is the
+      exception, is opt-in, and finally reads
+      `notifications.marketing_optin_default`. An unclassified type is
+      delivered rather than swallowed
 - [ ] **Distributed rate-limit store** — needed before running several instances
 
 ## Phase 3 — Catalog & Menu

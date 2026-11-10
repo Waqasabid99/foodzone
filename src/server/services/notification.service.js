@@ -3,6 +3,7 @@ import { ApiError, cursorArgs, toPage } from "@/lib/api";
 import { enqueue } from "@/server/jobs/outbox";
 import { isPushEnabled } from "@/server/notifications/push";
 import { getSetting } from "@/server/services/setting.service";
+import { decide, preferencesFor, preferencesForMany } from "@/server/notifications/preferences";
 
 /**
  * Notifications.
@@ -12,6 +13,21 @@ import { getSetting } from "@/server/services/setting.service";
  * go through the outbox: enqueued in the same transaction as the row, delivered
  * by the worker, retried on failure. A push provider having a bad minute must
  * never fail the order that triggered the notification.
+ *
+ * ## Everything goes through here
+ *
+ * `notifyUser` and `notifyUsers` are the only ways a notification is created,
+ * and that is load-bearing rather than tidy. They are where a person's
+ * preferences are applied, so a producer added later inherits the rule instead
+ * of having to remember it — and the alternative was real: the order, payment,
+ * delivery and creator handlers each wrote `notification.create` directly,
+ * which meant none of them ever reached `sendPushToUser`. A food app whose
+ * customers' phones never buzzed about their own orders.
+ *
+ * What a preference governs is in `notifications/preferences.js`. The short
+ * version: the row is the record and is written for anything transactional
+ * whatever the person chose; the push is the interruption and is theirs to
+ * switch off.
  */
 
 function notificationView(row) {
@@ -47,6 +63,18 @@ export async function notifyUser({
   push = true,
   db = prisma,
 }) {
+  if (!userId) return null;
+
+  /*
+   * What this person wants, before anything is written.
+   *
+   * `wanted.inApp` is false only for a category that may be silenced entirely
+   * — marketing — so this is where an opted-out offer stops. Everything
+   * transactional resolves to true however the row reads.
+   */
+  const wanted = decide({ type, preferences: await preferencesFor(userId) });
+  if (!wanted.inApp) return null;
+
   const notification = await db.notification.create({
     data: {
       userId,
@@ -62,7 +90,9 @@ export async function notifyUser({
     },
   });
 
-  if (push && isPushEnabled()) {
+  // `push` is the caller saying this one is not worth interrupting anybody
+  // about; `wanted.push` is the person saying so. Either is enough.
+  if (push && wanted.push && isPushEnabled()) {
     await enqueue({ eventType: "notification.push", payload: { notificationId: notification.id }, db });
   }
 
@@ -74,8 +104,22 @@ export async function notifyUsers({ userIds, push = true, db = prisma, ...rest }
   const unique = [...new Set(userIds)].filter(Boolean);
   if (!unique.length) return { created: 0 };
 
+  /*
+   * Resolved for everybody in one query rather than per recipient. A low-stock
+   * alert goes to whoever can raise a purchase order, which on a chain is a
+   * list, and a preference lookup each would turn one fan-out into dozens of
+   * round trips.
+   */
+  const byUser = await preferencesForMany(unique);
+  const decided = unique.map((userId) => ({ userId, ...decide({ type: rest.type, preferences: byUser.get(userId) }) }));
+
+  const toWrite = decided.filter((row) => row.inApp).map((row) => row.userId);
+  const toPush = decided.filter((row) => row.inApp && row.push).map((row) => row.userId);
+
+  if (!toWrite.length) return { created: 0, suppressed: unique.length };
+
   await db.notification.createMany({
-    data: unique.map((userId) => ({
+    data: toWrite.map((userId) => ({
       userId,
       type: rest.type,
       title: rest.title,
@@ -89,11 +133,11 @@ export async function notifyUsers({ userIds, push = true, db = prisma, ...rest }
     })),
   });
 
-  if (push && isPushEnabled()) {
-    await enqueue({ eventType: "notification.push_bulk", payload: { userIds: unique, ...rest }, db });
+  if (push && toPush.length && isPushEnabled()) {
+    await enqueue({ eventType: "notification.push_bulk", payload: { userIds: toPush, ...rest }, db });
   }
 
-  return { created: unique.length };
+  return { created: toWrite.length, suppressed: unique.length - toWrite.length };
 }
 
 /** Everyone holding a role, optionally only at one branch — "tell the managers". */

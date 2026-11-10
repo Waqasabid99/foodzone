@@ -79,6 +79,7 @@ model User {
   orders              Order[]
   reviews             Review[]
   notifications       Notification[]
+  notificationPreferences NotificationPreference[]
   auditLogs           AuditLog[]
   employee            Employee?
   creatorProfile      CreatorProfile?

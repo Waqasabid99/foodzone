@@ -60599,6 +60599,170 @@
         "x-source": "src/app/api/v1/me/driver/shift/route.js"
       }
     },
+    "/api/v1/me/notification-preferences": {
+      "get": {
+        "operationId": "getMeNotificationPreferences",
+        "summary": "List my notification preferences",
+        "description": "Every category, this person's effective answer, and whether the in-app record may be silenced. Transactional categories may have their push switched off but not their record.\n\nRequires an authenticated caller. Requires the permission `self.manage_notifications`.",
+        "tags": [
+          "Notifications"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "data"
+                  ],
+                  "properties": {
+                    "success": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-permissions": [
+          "self.manage_notifications"
+        ],
+        "x-source": "src/app/api/v1/me/notification-preferences/route.js"
+      },
+      "put": {
+        "operationId": "putMeNotificationPreferences",
+        "summary": "Update my notification preferences",
+        "description": "Only the categories named are changed. Switching off the in-app record of a transactional category is refused rather than silently ignored.\n\nRequires an authenticated caller. Requires the permission `self.manage_notifications`. Rate limit: 60 requests per 1m (`write` class). Audited as `notification_preferences.update`.",
+        "tags": [
+          "Notifications"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "categories": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "enum": [
+                        "order",
+                        "payment",
+                        "delivery",
+                        "creator",
+                        "operations",
+                        "marketing"
+                      ]
+                    },
+                    "additionalProperties": {
+                      "type": "object",
+                      "properties": {
+                        "inApp": {
+                          "type": "boolean"
+                        },
+                        "push": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "categories"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "success",
+                    "data"
+                  ],
+                  "properties": {
+                    "success": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-permissions": [
+          "self.manage_notifications"
+        ],
+        "x-rate-limit": {
+          "limit": 60,
+          "window": "1m"
+        },
+        "x-audit-action": "notification_preferences.update",
+        "x-source": "src/app/api/v1/me/notification-preferences/route.js"
+      }
+    },
     "/api/v1/me/notifications": {
       "get": {
         "operationId": "getMeNotifications",
