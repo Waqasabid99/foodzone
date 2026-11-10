@@ -9,6 +9,7 @@ import { pruneTrackPoints } from "@/server/services/driver.service";
 import { flagExpiredBatches } from "@/server/services/stock.service";
 import { alertLowStock } from "@/server/services/inventory-item.service";
 import { sweepStaleReservations } from "@/server/services/reservation.service";
+import { pruneRateLimitCounters } from "@/lib/api/rate-limit-store";
 import { warnAboutFiscalRunway } from "@/server/services/fiscal.service";
 import { creditDueEarnings } from "@/server/services/creator-earning.service";
 import { expireAttributions } from "@/server/services/creator-attribution.service";
@@ -39,8 +40,15 @@ export async function runOutboxCycle(options) {
 export async function runMaintenanceCycle() {
   registerJobHandlers();
 
-  const [outbox, availabilityRestored, qrScansPruned, cartsPruned, trackPointsPruned, batchesExpired] =
-    await Promise.all([
+  const [
+    outbox,
+    availabilityRestored,
+    qrScansPruned,
+    cartsPruned,
+    trackPointsPruned,
+    rateLimitsPruned,
+    batchesExpired,
+  ] = await Promise.all([
     pruneOutbox(),
     // Timed 86s whose deadline has passed. Reads already treat an expired
     // deadline as available, so this only keeps the stored column honest for
@@ -56,6 +64,12 @@ export async function runMaintenanceCycle() {
     // Delivery breadcrumbs are evidence for disputes, not history to keep
     // forever — a row every 30 seconds per active driver adds up quickly.
     pruneTrackPoints(),
+    // Request counters, when this deployment shares them through the database.
+    // Housekeeping rather than correctness: nothing reads an expired row,
+    // because the upsert resets a finished window in place. A row left behind
+    // is wasted space, and on a busy public endpoint keyed by IP that is a row
+    // per address per window.
+    pruneRateLimitCounters(),
     // Passed-expiry batches stop being handed out by FIFO. Deliberately not
     // written off: expired stock still physically exists and has to be counted
     // and disposed of by a person, and silently removing it would destroy the
@@ -136,6 +150,7 @@ export async function runMaintenanceCycle() {
     qrScansPruned,
     cartsPruned,
     trackPointsPruned,
+    rateLimitsPruned,
     batchesExpired,
     uploadsSwept,
     lowStock,

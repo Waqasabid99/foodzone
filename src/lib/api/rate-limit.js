@@ -5,11 +5,26 @@ import { getClientIp } from "@/lib/api/request";
 /**
  * Fixed-window rate limiting.
  *
- * The default store is an in-process Map, which means limits are PER SERVER
- * INSTANCE: two instances behind a load balancer each allow the full quota. For
- * a single deployment that is fine, and it is far better than nothing on the
- * login endpoint. Before scaling out, call `setRateLimitStore()` with a Redis
- * (or Upstash) backed implementation — everything else here stays the same.
+ * Two stores, chosen by `RATE_LIMIT_STORE`:
+ *
+ *   * **`memory`** (the default) — an in-process Map. Limits are per instance,
+ *     which is correct for one long-lived server and costs nothing.
+ *   * **`postgres`** — counters shared across instances, incremented in one
+ *     atomic statement. See `rate-limit-store.js` for why that is one
+ *     statement and why a refusal is then cached in this process.
+ *
+ * The default stays in memory rather than following the deployment, because
+ * the wrong one here fails in opposite directions. Defaulting to `postgres`
+ * would put a database write on the hot path of every endpoint of every
+ * deployment, including the ones that never need it — and would make a unit
+ * test that calls `enforceRateLimit` reach for a database. Defaulting to
+ * `memory` on a multi-instance deployment doubles a quota silently, which is
+ * worse but is also a deliberate scaling step somebody is taking on purpose.
+ * So the one that costs nothing is the default and the one that costs a round
+ * trip is asked for.
+ *
+ * `setRateLimitStore()` overrides both, for a test or an implementation that is
+ * not here yet.
  */
 
 const memory = new Map();
@@ -32,12 +47,44 @@ const memoryStore = {
   async reset(key) {
     memory.delete(key);
   },
+  stats() {
+    return { driver: "memory", keys: memory.size };
+  },
 };
 
-let store = memoryStore;
+let store = null;
+let injected = false;
 
 export function setRateLimitStore(customStore) {
   store = customStore ?? memoryStore;
+  injected = true;
+}
+
+/**
+ * The store this deployment asked for, built once.
+ *
+ * Resolved lazily rather than at import, so the memory path never loads Prisma
+ * — `rate-limit.js` is pulled in by every route through `@/lib/api`, and a
+ * database client imported there for a deployment that does not use it is a
+ * cost paid by everybody for nobody.
+ */
+async function activeStore() {
+  if (store) return store;
+
+  if (env().RATE_LIMIT_STORE === "postgres") {
+    const { postgresRateLimitStore } = await import("@/lib/api/rate-limit-store");
+    store = postgresRateLimitStore();
+  } else {
+    store = memoryStore;
+  }
+
+  return store;
+}
+
+/** Which store is in use, for the health endpoint and the test suite. */
+export async function rateLimitDriver() {
+  const active = await activeStore();
+  return active.stats?.() ?? { driver: injected ? "custom" : "memory" };
 }
 
 let lastSweep = 0;
@@ -92,11 +139,21 @@ export async function checkRateLimit(key, { limit, windowMs }) {
     return { allowed: true, limit, remaining: limit, resetAt: Date.now() + windowMs };
   }
 
-  const entry = await store.increment(key, windowMs);
+  const active = await activeStore();
+  const entry = await active.increment(key, windowMs);
   const remaining = Math.max(0, limit - entry.count);
+  const allowed = entry.count <= limit;
+
+  /*
+   * Tell the store it refused this key, so the rest of the window is answered
+   * from memory instead of from the database. Only on the transition — a store
+   * that already shed this request has nothing to learn — and only where the
+   * store keeps such a cache at all.
+   */
+  if (!allowed && !entry.shed) active.remember?.(key, entry.resetAt);
 
   return {
-    allowed: entry.count <= limit,
+    allowed,
     limit,
     remaining,
     resetAt: entry.resetAt,
@@ -134,5 +191,6 @@ export function rateLimitHeaders(result) {
 
 /** Clears a caller's counter — call after a successful login. */
 export async function resetRateLimit(key) {
-  await store.reset(key);
+  const active = await activeStore();
+  await active.reset(key);
 }

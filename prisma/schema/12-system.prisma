@@ -81,6 +81,29 @@ model Notification {
   @@index([status])
 }
 
+/// A fixed-window request counter, shared across app instances.
+///
+/// Only used when `RATE_LIMIT_STORE=postgres`. The default is an in-process
+/// map, which is correct for a single instance and costs nothing; this exists
+/// so a second instance does not silently double every quota.
+///
+/// `key` is the primary key because it is the only thing ever looked up, and
+/// the whole operation is one `INSERT .. ON CONFLICT DO UPDATE .. RETURNING` —
+/// read-then-write would let two instances both see "4 of 5" and both allow.
+///
+/// Rows outlive their window and are pruned nightly. Nothing reads an expired
+/// row: the upsert resets a counter whose `resetAt` has passed in the same
+/// statement, so a stale row is wasted space rather than a wrong answer.
+model RateLimitCounter {
+  /// `scope:identity`, exactly as the limiter composes it — "auth:ip:1.2.3.4".
+  key     String   @id
+  count   Int      @default(0)
+  resetAt DateTime
+
+  /// How the nightly prune finds what is finished.
+  @@index([resetAt])
+}
+
 /// What one person wants to be told about, and how.
 ///
 /// A row per person per **category** — never per notification type. The

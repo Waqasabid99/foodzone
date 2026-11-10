@@ -25,6 +25,19 @@ const schema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  /**
+   * Where request counters live.
+   *
+   * `memory` is per instance, which is correct for one long-lived server and
+   * costs nothing. It is also silently wrong for two: each allows the full
+   * quota, so a cap of 20 login attempts becomes 40 and nothing reports it.
+   *
+   * `postgres` shares them, in one atomic statement against the database that
+   * is already there. A refusal is then cached in-process for the rest of its
+   * window, so a flood is shed locally instead of becoming a write storm on
+   * the database serving orders.
+   */
+  RATE_LIMIT_STORE: z.enum(["memory", "postgres"]).default("memory"),
   /// How long a resolved permission set is cached in memory, in seconds.
   PERMISSION_CACHE_TTL_SECONDS: z.coerce.number().int().min(0).default(30),
 

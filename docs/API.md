@@ -74,6 +74,46 @@ Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and
 `RateLimit-Remaining` reaches 0 rather than waiting for the 429. A `RATE_LIMITED`
 response also carries `Retry-After`.
 
+Counters are keyed by the route's own scope plus the caller — `auth:login:ip:1.2.3.4`
+for an anonymous caller, `auth:login:user:ckx…` once signed in. Per user rather
+than per address wherever possible, because an office or a mobile carrier NAT
+is one IP for hundreds of people.
+
+**Where the counters live** is `RATE_LIMIT_STORE`:
+
+- **`memory`** (the default) — an in-process map. Correct for one long-lived
+  server and costs nothing. Silently wrong for two: each instance allows the
+  full quota, so the login cap of 20 becomes 40 and nothing reports it.
+- **`postgres`** — shared across instances, in one
+  `INSERT .. ON CONFLICT DO UPDATE .. RETURNING`. Read-then-write would lose
+  the race it exists to win: two instances both see "4 of 5", both decide there
+  is room, and both allow — which under the concurrency that produces a flood
+  is the normal case, not a rare interleaving.
+
+The default stays in memory because the wrong choice fails in opposite
+directions. Defaulting to `postgres` would put a database write on the hot path
+of every endpoint of every deployment, including those that never need it.
+Defaulting to `memory` on several instances doubles a quota silently, which is
+worse — but is also a scaling step somebody takes deliberately. So the one that
+costs nothing is the default and the one that costs a round trip is asked for.
+
+**A refusal is then cached in-process.** A rate limiter has to be cheap exactly
+when it is working hardest, and backed only by Postgres a brute-force becomes a
+write storm on the same database serving orders — the limiter amplifying the
+attack it exists to absorb. Once the shared store has refused a key, the rest
+of that window is answered from memory with no round trip, which bounds the
+cost at `limit` writes per key per window per instance and then nothing. It is
+a cache of *refusals* rather than a second counter, so it cannot produce a
+false one: nothing lands in it that the authoritative store did not itself
+refuse, and each entry expires at the `resetAt` that store returned. A shed
+refusal is indistinguishable from a fresh one — same 429, same headers.
+
+If the shared store is unreachable the limiter **fails open** and logs at error
+level. Every endpoint behind it needs the database to answer at all, so
+refusing traffic there protects nothing and only replaces a useful error with a
+misleading one. Expired counters are pruned by the nightly maintenance job;
+nothing reads one, because the upsert resets a finished window in place.
+
 ### Request tracing
 
 Every response carries `x-request-id`. Send your own `x-request-id` on a request

@@ -62,6 +62,13 @@ const env = {
   // The live channel is in-process, and so is this single test server, which
   // is exactly the deployment the flag is an assertion about.
   REALTIME_ENABLED: process.env.E2E_REALTIME ?? "true",
+  /*
+   * The shared store, not the in-process default — so every phase's rate
+   * limiting goes through the Postgres path over real HTTP. The default is
+   * `memory` precisely because it costs nothing, which also means nothing
+   * would ever exercise the other one.
+   */
+  RATE_LIMIT_STORE: process.env.E2E_RATE_LIMIT_STORE ?? "postgres",
   SMTP_HOST: "",
   NEXT_TELEMETRY_DISABLED: "1",
 };

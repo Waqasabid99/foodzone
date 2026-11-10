@@ -113,7 +113,15 @@ seeded baseline.
       exception, is opt-in, and finally reads
       `notifications.marketing_optin_default`. An unclassified type is
       delivered rather than swallowed
-- [ ] **Distributed rate-limit store** — needed before running several instances
+- [x] **Distributed rate-limit store** — `RATE_LIMIT_STORE=postgres` shares
+      counters across instances in one atomic upsert, through the database that
+      is already there rather than a new service. A refusal is then cached
+      in-process for the rest of its window, so a flood is shed locally instead
+      of becoming a write storm on the database serving orders — a cache of
+      refusals, not a second counter, so it cannot produce a false one. Fails
+      open if the store is unreachable, since every endpoint behind it needs
+      the database anyway. Default stays `memory`, which costs nothing and is
+      right for one instance
 
 ## Phase 3 — Catalog & Menu
 

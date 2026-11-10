@@ -338,6 +338,188 @@ async function main() {
   const deleted = await api(`/me/notifications/${feed.body.data[0].id}`, { method: "DELETE", token: custToken });
   check("a notification can be dismissed", deleted.status === 204);
 
+  // ===================== SHARED RATE LIMIT STORE =====================
+  /*
+   * The limiter's default store is an in-process map, which is correct for one
+   * instance and silently wrong for two: each allows the full quota, so a cap
+   * of 20 login attempts becomes 40 and nothing anywhere reports it. This
+   * server runs with `RATE_LIMIT_STORE=postgres`, and what follows proves the
+   * counters are genuinely shared rather than quietly falling back.
+   *
+   * Driven through `/auth/login` with a wrong password from one fixed IP: it is
+   * keyed by IP for anonymous callers, and `RateLimits.auth` is the tightest
+   * cap in the system at 20 per fifteen minutes.
+   */
+  const limitIp = `10.99.${(stamp >> 8) & 255}.${stamp & 255}`;
+  const knock = () =>
+    api("/auth/login", {
+      method: "POST",
+      ip: limitIp,
+      body: { email: emailOf("nobody"), password: "wrong-passphrase-entirely" },
+    });
+
+  await knock();
+
+  // The scope is the route's own (`scope: "auth:login"`), not the name of the
+  // limit preset it uses — so the key is the scope plus the caller's identity.
+  const counterKey = `auth:login:ip:${limitIp}`;
+  const firstRow = await prisma.rateLimitCounter.findUnique({ where: { key: counterKey } });
+  check("a counted request writes a shared counter", Boolean(firstRow), { counterKey, firstRow });
+  check("keyed by scope and identity, so two scopes do not share a quota", firstRow?.key === counterKey, firstRow?.key);
+  check("with a window end in the future", firstRow && new Date(firstRow.resetAt) > new Date(), firstRow?.resetAt);
+
+  await knock();
+  const secondRow = await prisma.rateLimitCounter.findUnique({ where: { key: counterKey } });
+  check("a second request increments the same row rather than adding one", secondRow?.count === 2, secondRow);
+  check(
+    "and does not move the window, so the quota cannot be extended by using it",
+    secondRow && new Date(secondRow.resetAt).getTime() === new Date(firstRow.resetAt).getTime(),
+    { first: firstRow?.resetAt, second: secondRow?.resetAt },
+  );
+
+  // Past the cap. 20 is the `auth` limit; a few extra to be sure of crossing it.
+  let sawLimit = false;
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const result = await knock();
+    if (result.status === 429) {
+      sawLimit = true;
+      break;
+    }
+  }
+  check("the shared counter refuses once the quota is spent", sawLimit);
+
+  /*
+   * The local shed, observed from the outside.
+   *
+   * A limiter has to be cheap exactly when it is working hardest — backed only
+   * by the database, a brute-force becomes a write storm on the same database
+   * serving orders. Once the shared store has refused a key, this process
+   * answers the rest of that window from memory.
+   *
+   * Which is visible here: the stored count stops rising even though the
+   * requests keep coming and keep being refused. If it kept climbing, every
+   * request in a flood would still be a write.
+   */
+  const atRefusal = await prisma.rateLimitCounter.findUnique({ where: { key: counterKey } });
+  // Guarded, because the interesting assertion below compares two counts and
+  // would pass on a pair of undefineds if the key were ever wrong again.
+  check("the counter is there to compare against", (atRefusal?.count ?? 0) > 0, atRefusal);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const result = await knock();
+    check(`request ${attempt + 1} past the cap is still refused`, result.status === 429, result.status);
+  }
+  const afterFlood = await prisma.rateLimitCounter.findUnique({ where: { key: counterKey } });
+  check(
+    "a flood past the cap is shed in-process rather than written to the database",
+    Boolean(atRefusal) && afterFlood?.count === atRefusal.count,
+    { atRefusal: atRefusal?.count, afterFlood: afterFlood?.count },
+  );
+
+  /*
+   * A shed refusal still has to carry the same headers as one the database
+   * produced. The whole point of answering from memory is that the caller
+   * cannot tell — and `Retry-After` is the one header a client throttling
+   * itself actually needs.
+   */
+  const refusedAgain = await knock();
+  check("a shed refusal is still a 429", refusedAgain.status === 429, refusedAgain.status);
+  check(
+    "and still says when to come back",
+    Number(refusedAgain.headers.get("retry-after")) > 0,
+    refusedAgain.headers.get("retry-after"),
+  );
+  check(
+    "and still carries the reading, from memory as from the database",
+    refusedAgain.headers.get("ratelimit-limit") === "20" && refusedAgain.headers.get("ratelimit-remaining") === "0",
+    {
+      limit: refusedAgain.headers.get("ratelimit-limit"),
+      remaining: refusedAgain.headers.get("ratelimit-remaining"),
+    },
+  );
+
+  // A different identity is unaffected: the key is the scope plus the caller,
+  // so one address exhausting its quota must not lock out everybody else.
+  const otherIp = `10.98.${(stamp >> 8) & 255}.${stamp & 255}`;
+  const otherCaller = await api("/auth/login", {
+    method: "POST",
+    ip: otherIp,
+    body: { email: emailOf("nobody"), password: "wrong-passphrase-entirely" },
+  });
+  check("another caller has their own quota", otherCaller.status !== 429, otherCaller.status);
+
+  /*
+   * The prune. Housekeeping rather than correctness — nothing reads an expired
+   * row, because the upsert resets a finished window in place — but on a public
+   * endpoint keyed by IP it is a row per address per window, so it does have to
+   * happen.
+   */
+  await prisma.rateLimitCounter.create({
+    data: { key: `stale:${stamp}`, count: 99, resetAt: new Date(Date.now() - 48 * 3_600_000) },
+  });
+  const pruneRun = await fetch(`${BASE}/api/internal/jobs/maintenance`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${CRON_SECRET}` },
+  });
+  const maintained = pruneRun.ok ? (await pruneRun.json().catch(() => null))?.data : null;
+  check("the maintenance job reports on counters pruned", typeof maintained?.rateLimitsPruned?.pruned === "number", maintained?.rateLimitsPruned);
+
+  const stale = await prisma.rateLimitCounter.findUnique({ where: { key: `stale:${stamp}` } });
+  check("a counter whose window ended a day ago is pruned", stale === null, stale);
+
+  const live = await prisma.rateLimitCounter.findUnique({ where: { key: counterKey } });
+  check("while a live counter is left alone", Boolean(live), live);
+
+  /*
+   * Three behaviours of the store itself, which no request can reach.
+   *
+   * Rolling a window over means backdating a row and asking again; shedding
+   * means proving a call did *not* reach the database. Both are invisible from
+   * the outside, and the first is where the real bug was: `resetAt` is a
+   * `timestamp without time zone` holding UTC, `now()` is a `timestamptz`, and
+   * comparing them makes Postgres reinterpret the column in the session's zone.
+   * This database runs in the branch's zone, so every window read as five
+   * hours older than it was — every counter reset to 1 on every request, and
+   * the limiter counted to one forever while reporting success. It would have
+   * passed on a UTC machine.
+   */
+  const { postgresRateLimitStore, pruneRateLimitCounters } = await import("@/lib/api/rate-limit-store");
+  const store = postgresRateLimitStore();
+  const storeKey = `unit:${stamp}`;
+
+  const firstHit = await store.increment(storeKey, 60_000);
+  const secondHit = await store.increment(storeKey, 60_000);
+  check("the shared store counts up", firstHit.count === 1 && secondHit.count === 2, { firstHit, secondHit });
+  check(
+    "and holds the window, so a caller cannot extend their quota by spending it",
+    firstHit.resetAt === secondHit.resetAt,
+    { firstHit, secondHit },
+  );
+
+  await prisma.rateLimitCounter.update({ where: { key: storeKey }, data: { resetAt: new Date(Date.now() - 1_000) } });
+  const rolled = await store.increment(storeKey, 60_000);
+  check("a window that has ended starts again at one", rolled.count === 1, rolled);
+  check("with a new end, in the same statement that counted", rolled.resetAt > secondHit.resetAt, { secondHit, rolled });
+
+  store.remember(storeKey, Date.now() + 60_000);
+  const beforeShed = await prisma.rateLimitCounter.findUnique({ where: { key: storeKey } });
+  const shedHit = await store.increment(storeKey, 60_000);
+  const afterShed = await prisma.rateLimitCounter.findUnique({ where: { key: storeKey } });
+  check("a remembered refusal is answered from memory", shedHit.shed === true, shedHit);
+  check("without a database write", beforeShed.count === afterShed.count, { beforeShed: beforeShed.count, afterShed: afterShed.count });
+
+  await store.reset(storeKey);
+  check("a reset clears the row", (await prisma.rateLimitCounter.findUnique({ where: { key: storeKey } })) === null);
+  const afterReset = await store.increment(storeKey, 60_000);
+  check("and the local shed with it, so a successful login is not still refused", afterReset.count === 1 && !afterReset.shed, afterReset);
+
+  await prisma.rateLimitCounter.create({
+    data: { key: `unit-stale:${stamp}`, count: 9, resetAt: new Date(Date.now() - 48 * 3_600_000) },
+  });
+  const prunedDirect = await pruneRateLimitCounters();
+  check("pruning removes a finished window", prunedDirect.pruned >= 1, prunedDirect);
+  check("and leaves a live one", Boolean(await prisma.rateLimitCounter.findUnique({ where: { key: storeKey } })));
+  await prisma.rateLimitCounter.deleteMany({ where: { key: { contains: String(stamp) } } });
+
   // ===================== NOTIFICATION PREFERENCES =====================
   /*
    * The rule being defended: **the in-app row is the record, the push is the
@@ -529,6 +711,7 @@ async function cleanup() {
 
   await prisma.outboxEvent.deleteMany({ where: { OR: [{ id: { in: [...created.outboxIds] } }, { eventType: "does.not.exist" }] } });
   await prisma.userDevice.deleteMany({ where: { userId: { in: ids } } });
+  await prisma.rateLimitCounter.deleteMany({ where: { OR: [{ key: { contains: String(stamp) } }, { key: { startsWith: "auth:login:ip:10.9" } }] } });
   await prisma.notificationPreference.deleteMany({ where: { userId: { in: ids } } });
   await prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await prisma.mediaAsset.deleteMany({ where: { OR: [{ uploadedById: { in: ids } }, { storageKey: { in: [...created.assetKeys] } }] } });

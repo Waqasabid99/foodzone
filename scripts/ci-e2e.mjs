@@ -113,7 +113,16 @@ for (const phase of PHASES) {
 
   const drain = await drainOutbox();
   if (!drain.drained) process.stdout.write(`  (outbox not drained first: ${drain.reason})\n`);
-  const run = spawnSync("node", [file], {
+  /*
+   * Run with the alias loader, so a suite may import `@/server/...` directly.
+   *
+   * Almost everything here is asserted over HTTP, which is the point — but a
+   * few behaviours have no endpoint that can reach them. Rolling a rate-limit
+   * window over means backdating a row and calling the store again, and there
+   * is no request that does that. Without this, such a test could only live in
+   * the unit suite, which runs against whatever `.env` points at.
+   */
+  const run = spawnSync("node", ["--import", "./tests/register-loader.mjs", file], {
     encoding: "utf8",
     env: { ...process.env, E2E_MAIL: process.env.E2E_MAIL ?? "console" },
     // 10 minutes. A suite that hangs should fail the build, not run until the
