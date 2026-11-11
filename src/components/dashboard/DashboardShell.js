@@ -85,16 +85,35 @@ export default function DashboardShell({ nav, user, storeName = "FoodZone", home
     </Link>
   );
 
-  // `min-h-dvh`, not `min-h-full`: a percentage min-height resolves to nothing
-  // when the parent's height is auto, as <body> here is, so the shell was only
-  // ever as tall as its content and the sidebar's border stopped partway down
-  // any short page — which the account area, with its small pages, showed up.
+  /*
+   * `min-h-dvh`, not `min-h-full`: a percentage min-height resolves to nothing
+   * when the parent's height is auto, as <body> here is, so the shell was only
+   * ever as tall as its content and the sidebar's border stopped partway down
+   * any short page — which the account area, with its small pages, showed up.
+   *
+   * The rail is `sticky` at exactly `h-dvh`, which is what stops it setting the
+   * height of the document. Seventy links are taller than any screen, and as an
+   * ordinary stretched flex item the rail made the *page* that tall: the nav's
+   * own `overflow-y-auto` never engaged, because `flex-1` had been handed all
+   * the height it asked for. The result was a scrollbar belonging to the
+   * sidebar scrolling the content pane as well, and a short page scrolling
+   * through empty space beside a list of links.
+   *
+   * Pinned rather than making the content pane its own scroll container,
+   * deliberately. The page keeps the document's scrollbar, so the sticky header
+   * below goes on working untouched and printing stays exactly as it was — a
+   * receipt inside an `overflow` container prints only the part that happens to
+   * be on screen.
+   *
+   * `self-start` because a stretched flex item has no room left to move in, and
+   * sticky then silently does nothing.
+   */
   return (
     <div className="flex min-h-dvh">
       {/* --- desktop rail ------------------------------------------------- */}
       <aside
         data-print="hide"
-        className={`hidden shrink-0 border-r border-outline-variant bg-surface-container-lowest lg:flex lg:flex-col ${
+        className={`hidden shrink-0 border-r border-outline-variant bg-surface-container-lowest lg:sticky lg:top-0 lg:flex lg:h-dvh lg:flex-col lg:self-start ${
           collapsed ? "lg:w-20" : "lg:w-72"
         }`}
       >
