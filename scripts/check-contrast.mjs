@@ -114,9 +114,35 @@ const PAIRS = [
   ["on-background", "background", 4.5],
   ["inverse-on-surface", "inverse-surface", 4.5],
 
-  // Boundaries: UI components, not text.
+  /*
+   * Boundaries: UI components, not text.
+   *
+   * `outline` is what a form field is drawn with, and a field is a UI
+   * component — so WCAG 1.4.11 wants 3:1 against whatever it sits on. Every
+   * surface a field can land on is listed, because a field is placed on all of
+   * them: on a card, on a panel inside a card, on the page itself. These used
+   * to be transparent borders, which meant a field on a panel of its own fill
+   * was invisible until focused.
+   */
   ["outline", "surface", 3],
   ["outline", "surface-container", 3],
+  ["outline", "surface-container-lowest", 3],
+  ["outline", "surface-container-low", 3],
+  ["outline", "surface-container-high", 3],
+
+  /*
+   * `outline-variant` draws card edges, table rules and panel dividers.
+   *
+   * Held to 2 rather than 3 deliberately. It separates and groups, it does not
+   * identify a control, so 1.4.11's 3:1 does not apply — and taking it there
+   * turns a dense table into a grid of heavy grey rules. 2:1 is the floor at
+   * which the hairline is actually visible: the value before this was 1.71:1
+   * against a white card, which is why cards looked like text floating on an
+   * empty page.
+   */
+  ["outline-variant", "surface", 2],
+  ["outline-variant", "surface-container-lowest", 2],
+  ["outline-variant", "surface-container-low", 2],
 
   // Brand roles.
   ["on-primary", "primary", 4.5],

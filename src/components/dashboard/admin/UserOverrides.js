@@ -113,7 +113,7 @@ export default function UserOverrides({ user, overrides, modules, branches, canA
                 id="override-permission"
                 value={permissionKey}
                 onChange={(event) => setPermissionKey(event.target.value)}
-                className="w-full rounded-field border border-transparent bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+                className="w-full rounded-field border border-outline bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
               >
                 <option value="">Choose a permission</option>
                 {modules.map((module) => (

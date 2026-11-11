@@ -45,7 +45,7 @@ export default function BranchFilters({ q = "", status = "all" }) {
             type="search"
             defaultValue={q}
             placeholder="Name, code or city"
-            className="w-full rounded-field border border-transparent bg-surface-container-low py-2.5 pl-9 pr-3 text-body-md text-on-surface placeholder:text-on-surface-variant/70 focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+            className="w-full rounded-field border border-outline bg-surface-container-low py-2.5 pl-9 pr-3 text-body-md text-on-surface placeholder:text-on-surface-variant/70 focus:outline-2 focus:outline-offset-2 focus:outline-ring"
           />
         </div>
       </div>
@@ -61,7 +61,7 @@ export default function BranchFilters({ q = "", status = "all" }) {
           // With JavaScript the select applies itself, which is what people
           // expect of a dropdown; without it the button below still works.
           onChange={() => form.current?.requestSubmit()}
-          className="rounded-field border border-transparent bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+          className="rounded-field border border-outline bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
         >
           {STATUS_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>

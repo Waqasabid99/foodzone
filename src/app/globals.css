@@ -45,7 +45,19 @@
 
   /* Outlines */
   --outline: #8e7164;
-  --outline-variant: #e2bfb0;
+  /*
+   * Strengthened from #e2bfb0, which measured 1.71:1 against a white card and
+   * 1.63:1 against the page — a hairline nobody could see. Every card edge,
+   * table rule and panel divider in the workspace is drawn with this, so a
+   * value that faint meant none of them registered: cards read as floating
+   * text on an empty page, which is exactly what it looked like.
+   *
+   * 2.36:1 now. Deliberately short of the 3:1 that WCAG 1.4.11 asks of a UI
+   * *component* — that bar belongs to `--outline`, which is what a form field
+   * is drawn with. This is grouping and separation, and taking it to 3:1 turns
+   * a dense table into a grid of heavy grey rules.
+   */
+  --outline-variant: #c9a08f;
 
   /* Primary — Energetic Orange */
   --surface-tint: #a04100;
@@ -155,7 +167,10 @@
   --scrim: #000000;
 
   --outline: #a88b7d;
-  --outline-variant: #5a4136;
+  /* 2.64:1 against the dark card, up from 2.07. Matched to the light theme by
+     how visible the hairline is rather than by tone, since the two grounds are
+     nothing alike. */
+  --outline-variant: #6b5043;
 
   --surface-tint: #ffb693;
   --primary: #ffb693;
@@ -358,6 +373,30 @@
 
   button {
     cursor: pointer;
+  }
+
+  /*
+   * Cards get an edge.
+   *
+   * A white card on a near-white page is a 1.05:1 difference — measurably
+   * nothing. No page background can fix that: the gap between `surface` and
+   * `surface-container-lowest` is the whole available range, and moving
+   * `surface` far enough to matter collides with `surface-container-low`, so
+   * every panel drawn on a card would vanish instead. Fill cannot carry a
+   * boundary between two large light surfaces; a line can.
+   *
+   * Written here rather than added to 252 call sites for the obvious reason,
+   * and matched on *both* classes so it only reaches containers that are
+   * actually cards — `rounded-card bg-warning-container` is a notice and keeps
+   * its own colour, untouched.
+   *
+   * In `base` on purpose. Utilities sit in a later layer and win regardless of
+   * specificity, so any card that states its own border — the ten that already
+   * do, or a future `border-0` — overrides this without an `!important` war.
+   */
+  .rounded-card.bg-surface-container-lowest,
+  .rounded-card.bg-surface-container-low {
+    border: 1px solid var(--outline-variant);
   }
 }
 /* ------------------------------------------------------------------

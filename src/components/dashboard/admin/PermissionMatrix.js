@@ -46,7 +46,7 @@ export default function PermissionMatrix({ modules, selected, onChange, canEdit 
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="e.g. refund, stock, payroll"
-            className="w-full rounded-field border border-transparent bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+            className="w-full rounded-field border border-outline bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
           />
         </div>
         <p className="text-body-md text-on-surface-variant" aria-live="polite">{selected.length} selected</p>

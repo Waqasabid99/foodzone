@@ -64,7 +64,7 @@ export default function IssueMaterialForm({ run, items }) {
                   value={line.quantity}
                   onChange={(event) => change(line.key, { quantity: event.target.value })}
                   aria-invalid={problems.quantity ? "true" : undefined}
-                  className={`w-full rounded-field bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${problems.quantity ? "border border-error" : "border border-transparent"}`}
+                  className={`w-full rounded-field bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${problems.quantity ? "border border-error" : "border border-outline"}`}
                 />
                 {problems.quantity ? <p className="text-label-bold text-error">{problems.quantity}</p> : null}
               </div>

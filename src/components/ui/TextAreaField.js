@@ -18,7 +18,7 @@ export default function TextAreaField({ id, label, value, onChange, error = null
         aria-invalid={error ? "true" : undefined}
         aria-describedby={describedBy(errorId, hintId)}
         className={`w-full resize-y rounded-field bg-surface-container-low px-4 py-3 text-body-md text-on-surface placeholder:text-on-surface-variant/70 focus:outline-2 focus:outline-offset-2 focus:outline-ring ${
-          error ? "border border-error" : "border border-transparent"
+          error ? "border border-error" : "border border-outline"
         }`}
         {...props}
       />

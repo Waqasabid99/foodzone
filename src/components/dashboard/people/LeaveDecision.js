@@ -62,7 +62,7 @@ export default function LeaveDecision({ request, canApprove, canReject, canCance
           value={note}
           onChange={(event) => setNote(event.target.value)}
           placeholder="Optional — kept with the decision"
-          className="w-full rounded-field border border-transparent bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+          className="w-full rounded-field border border-outline bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
         />
       </div>
 

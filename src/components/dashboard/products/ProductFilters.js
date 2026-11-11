@@ -16,7 +16,7 @@ export default function ProductFilters({ q = "", category = "", status = "all", 
   const submit = () => form.current?.requestSubmit();
 
   const control =
-    "w-full rounded-field border border-transparent bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring";
+    "w-full rounded-field border border-outline bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring";
 
   return (
     <form ref={form} method="get" className="flex flex-wrap items-end gap-3 rounded-card bg-surface-container-lowest p-4">

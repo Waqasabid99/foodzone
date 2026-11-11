@@ -49,7 +49,7 @@ export default async function ModifiersPage({ searchParams }) {
           <label htmlFor="modifier-search" className="text-label-bold text-on-surface">Search</label>
           <div className="relative">
             <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-on-surface-variant" />
-            <input id="modifier-search" name="q" type="search" defaultValue={q} placeholder="Name or internal name" className="w-full rounded-field border border-transparent bg-surface-container-low py-2.5 pl-9 pr-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring" />
+            <input id="modifier-search" name="q" type="search" defaultValue={q} placeholder="Name or internal name" className="w-full rounded-field border border-outline bg-surface-container-low py-2.5 pl-9 pr-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring" />
           </div>
         </div>
         <button type="submit" className="rounded-field bg-surface-container-high px-5 py-2.5 text-label-bold text-on-surface hover:bg-surface-container-highest">Search</button>

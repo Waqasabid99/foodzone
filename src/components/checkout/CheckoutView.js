@@ -395,7 +395,7 @@ export default function CheckoutView({ currency = "PKR", tableId = null, tableNa
             rows={3}
             maxLength={500}
             placeholder="No onions, please."
-            className="w-full rounded-field border border-transparent bg-surface-container-low px-4 py-3 text-body-md text-on-surface placeholder:text-on-surface-variant/70 focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+            className="w-full rounded-field border border-outline bg-surface-container-low px-4 py-3 text-body-md text-on-surface placeholder:text-on-surface-variant/70 focus:outline-2 focus:outline-offset-2 focus:outline-ring"
           />
         </Section>
 

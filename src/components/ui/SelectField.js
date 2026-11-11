@@ -34,7 +34,7 @@ export default function SelectField({
         aria-invalid={error ? "true" : undefined}
         aria-describedby={describedBy(errorId, hintId)}
         className={`w-full rounded-field bg-surface-container-low px-4 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring disabled:cursor-not-allowed disabled:opacity-60 ${
-          error ? "border border-error" : "border border-transparent"
+          error ? "border border-error" : "border border-outline"
         }`}
         {...selectProps}
       >

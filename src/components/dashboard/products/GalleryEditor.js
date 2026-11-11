@@ -81,7 +81,7 @@ export default function GalleryEditor({ productId, images, productName, canUploa
                       current.map((row, position) => (position === index ? { ...row, altText: event.target.value } : row)),
                     )
                   }
-                  className="w-full rounded-field border border-transparent bg-surface-container-lowest px-3 py-2 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+                  className="w-full rounded-field border border-outline bg-surface-container-lowest px-3 py-2 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
                 />
                 <div className="flex gap-1">
                   <IconButton label={`Move photo ${index + 1} earlier`} icon={ArrowUp} disabled={index === 0} onClick={() => move(index, -1)} />

@@ -71,7 +71,7 @@ export default function TipPicker({ subtotal, currency, value, custom, onChange,
           aria-invalid={customInvalid ? "true" : undefined}
           aria-describedby={customInvalid ? "tip-custom-error" : undefined}
           className={`w-full rounded-field bg-surface-container-low px-4 py-3 text-body-md text-on-surface placeholder:text-on-surface-variant/70 focus:outline-2 focus:outline-offset-2 focus:outline-ring sm:max-w-56 ${
-            customInvalid ? "border border-error" : "border border-transparent"
+            customInvalid ? "border border-error" : "border border-outline"
           }`}
         />
         {customInvalid ? (

@@ -43,7 +43,7 @@ export default function ReplanForm({ run }) {
           value={value}
           onChange={(event) => setValue(event.target.value)}
           aria-invalid={error ? "true" : undefined}
-          className={`w-full rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${error ? "border border-error" : "border border-transparent"}`}
+          className={`w-full rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${error ? "border border-error" : "border border-outline"}`}
         />
       </div>
       <button type="submit" disabled={pending || unchanged} className="rounded-field bg-surface-container-high px-5 py-2.5 text-label-bold text-on-surface hover:bg-surface-container-highest disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">

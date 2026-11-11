@@ -143,7 +143,7 @@ export default function OtpInput({
             onPaste={handlePaste}
             onFocus={() => handleFocus(index)}
             className={`size-12 rounded-field border-2 bg-surface-container-low text-center font-display text-headline-md text-on-surface transition-colors focus:outline-2 focus:outline-offset-2 focus:outline-ring disabled:cursor-not-allowed disabled:opacity-60 sm:size-14 ${
-              error ? "border-error" : digit ? "border-primary-container" : "border-transparent"
+              error ? "border-error" : digit ? "border-primary-container" : "border-outline"
             }`}
           />
         ))}

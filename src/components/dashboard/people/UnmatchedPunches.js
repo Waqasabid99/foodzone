@@ -86,7 +86,7 @@ export default function UnmatchedPunches({ groups, employees, canClaim }) {
                     id={`claim-${group.biometricId}`}
                     value={choice[group.biometricId] ?? ""}
                     onChange={(event) => setChoice({ ...choice, [group.biometricId]: event.target.value })}
-                    className="w-full rounded-field border border-transparent bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+                    className="w-full rounded-field border border-outline bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
                   >
                     <option value="">Choose someone</option>
                     {employees.map((employee) => (

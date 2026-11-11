@@ -127,7 +127,7 @@ export default function RosterGrid({ employees, shifts, assignments, days, canMa
                           value={value}
                           disabled={cellBusy || !options.length}
                           onChange={(event) => setCell(employee, day, event.target.value)}
-                          className={`w-full min-w-28 rounded-field border border-transparent px-2 py-2 text-body-md focus:outline-2 focus:outline-offset-2 focus:outline-ring disabled:opacity-60 ${
+                          className={`w-full min-w-28 rounded-field border border-outline px-2 py-2 text-body-md focus:outline-2 focus:outline-offset-2 focus:outline-ring disabled:opacity-60 ${
                             value === "OFF"
                               ? "bg-surface-container-high text-on-surface-variant"
                               : value

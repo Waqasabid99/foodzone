@@ -16,7 +16,7 @@ import ItemSelect from "@/components/dashboard/inventory/ItemSelect";
 import { Section } from "@/components/dashboard/products/ProductDetailsForm";
 
 const control = (invalid) =>
-  `w-full rounded-field bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${invalid ? "border border-error" : "border border-transparent"}`;
+  `w-full rounded-field bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${invalid ? "border border-error" : "border border-outline"}`;
 
 /** The first plain message in an API error's details, to say which box is wrong. */
 function detailOf(failure) {

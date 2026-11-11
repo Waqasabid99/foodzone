@@ -490,7 +490,7 @@ export default function CounterOrder({
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Search the menu"
             aria-label="Search the menu"
-            className="w-full rounded-field border border-transparent bg-surface-container-low py-3 pl-9 pr-4 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+            className="w-full rounded-field border border-outline bg-surface-container-low py-3 pl-9 pr-4 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
           />
         </div>
 

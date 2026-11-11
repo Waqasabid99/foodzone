@@ -4,7 +4,7 @@ import { useRef } from "react";
 import { Search } from "lucide-react";
 
 const control =
-  "w-full rounded-field border border-transparent bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring";
+  "w-full rounded-field border border-outline bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring";
 
 /**
  * The filter bar every inventory list shares, held in the URL.

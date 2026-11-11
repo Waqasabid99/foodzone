@@ -93,7 +93,7 @@ export default function MenuItemsEditor({ menuId, items, sections, branch, curre
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
                 placeholder="Product name"
-                className="w-full rounded-field border border-transparent bg-surface-container-low py-2.5 pl-9 pr-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+                className="w-full rounded-field border border-outline bg-surface-container-low py-2.5 pl-9 pr-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
               />
             </div>
           </div>
@@ -208,7 +208,7 @@ function ProductCard({ entry, context, canMoveUp, canMoveDown, onMove }) {
                   const name = sections.find((section) => section.id === sectionId)?.name ?? "No section";
                   run(() => api.patch(base, { sectionId }), `${product.name} moved to ${name}.`);
                 }}
-                className="rounded-field border border-transparent bg-surface-container-lowest px-3 py-2 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+                className="rounded-field border border-outline bg-surface-container-lowest px-3 py-2 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
               >
                 <option value="">No section</option>
                 {sections.map((section) => (
@@ -321,7 +321,7 @@ function PriceControl({ row, basePrice, override, currency, label, context }) {
           }}
           aria-invalid={error ? "true" : undefined}
           aria-describedby={error ? `${inputId}-error` : `${inputId}-hint`}
-          className={`w-28 rounded-field bg-surface-container-low px-3 py-2 text-right text-body-md tabular-nums text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${error ? "border border-error" : "border border-transparent"}`}
+          className={`w-28 rounded-field bg-surface-container-low px-3 py-2 text-right text-body-md tabular-nums text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${error ? "border border-error" : "border border-outline"}`}
         />
       </div>
       <span id={`${inputId}-hint`} className="text-body-md text-on-surface-variant">
@@ -485,7 +485,7 @@ function AddProducts({ menuId, items, sections, categories, currency, onClose })
     }
   }
 
-  const control = "w-full rounded-field border border-transparent bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring";
+  const control = "w-full rounded-field border border-outline bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring";
 
   return (
     <div role="region" aria-label="Add products" className="flex flex-col gap-4 rounded-field border border-outline-variant bg-surface-container-low p-4">

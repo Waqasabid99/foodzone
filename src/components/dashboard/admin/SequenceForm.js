@@ -53,7 +53,7 @@ export default function SequenceForm({ sequence, canManage }) {
           disabled={!canManage}
           onChange={(event) => setForm({ ...form, prefix: event.target.value })}
           aria-invalid={errors.prefix ? "true" : undefined}
-          className={`w-full rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface disabled:opacity-60 focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors.prefix ? "border border-error" : "border border-transparent"}`}
+          className={`w-full rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface disabled:opacity-60 focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors.prefix ? "border border-error" : "border border-outline"}`}
         />
         {errors.prefix ? <p className="text-label-bold text-error">{errors.prefix}</p> : null}
       </div>
@@ -66,7 +66,7 @@ export default function SequenceForm({ sequence, canManage }) {
           disabled={!canManage}
           onChange={(event) => setForm({ ...form, padding: event.target.value })}
           aria-invalid={errors.padding ? "true" : undefined}
-          className={`w-20 rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface disabled:opacity-60 focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors.padding ? "border border-error" : "border border-transparent"}`}
+          className={`w-20 rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface disabled:opacity-60 focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors.padding ? "border border-error" : "border border-outline"}`}
         />
       </div>
       {canManage ? (

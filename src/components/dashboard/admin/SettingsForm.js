@@ -121,7 +121,7 @@ export default function SettingsForm({ group, settings, branchId = null, canEdit
 }
 
 const inputClass =
-  "w-full rounded-field border border-transparent bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface disabled:opacity-60 focus:outline-2 focus:outline-offset-2 focus:outline-ring";
+  "w-full rounded-field border border-outline bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface disabled:opacity-60 focus:outline-2 focus:outline-offset-2 focus:outline-ring";
 
 function Control({ setting, value, onChange, disabled }) {
   const id = `setting-${setting.key}`;

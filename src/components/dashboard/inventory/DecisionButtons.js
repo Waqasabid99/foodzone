@@ -50,7 +50,7 @@ export default function DecisionButtons({ approveEndpoint, rejectEndpoint, appro
             value={reason}
             onChange={(event) => setReason(event.target.value)}
             placeholder="Optional, but the person who raised it will want to know"
-            className="w-full rounded-field border border-transparent bg-surface-container-low px-4 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+            className="w-full rounded-field border border-outline bg-surface-container-low px-4 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
           />
           <div className="flex flex-wrap gap-2">
             <button type="button" disabled={Boolean(pending)} onClick={() => run("reject")} className="rounded-field border border-error px-5 py-2.5 text-label-bold text-error hover:bg-error-container disabled:opacity-60">

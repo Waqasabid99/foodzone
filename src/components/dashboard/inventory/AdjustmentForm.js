@@ -17,7 +17,7 @@ let nextKey = 0;
 const blankLine = (itemId = "") => ({ key: `line-${(nextKey += 1)}`, itemId, direction: "add", quantity: "", unitCost: "", note: "", batchNumber: "", expiryDate: "" });
 
 const inputClass = (invalid) =>
-  `w-full rounded-field bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${invalid ? "border border-error" : "border border-transparent"}`;
+  `w-full rounded-field bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${invalid ? "border border-error" : "border border-outline"}`;
 
 function Field({ id, label, error, hint, children }) {
   return (
@@ -217,7 +217,7 @@ export default function AdjustmentForm({ type = "CORRECTION", locations, items, 
                       value={line.note}
                       onChange={(event) => change(line.key, { note: event.target.value })}
                       placeholder="Optional"
-                      className="w-full rounded-field border border-transparent bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+                      className="w-full rounded-field border border-outline bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
                     />
                   </div>
                 </div>

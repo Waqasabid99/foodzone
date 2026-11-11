@@ -88,7 +88,7 @@ export default function TransferForm({ sources, destinations, items, levels, def
               value={toLocationId}
               onChange={(event) => setTo(event.target.value)}
               aria-invalid={errors.toLocationId ? "true" : undefined}
-              className={`w-full rounded-field bg-surface-container-low px-4 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors.toLocationId ? "border border-error" : "border border-transparent"}`}
+              className={`w-full rounded-field bg-surface-container-low px-4 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors.toLocationId ? "border border-error" : "border border-outline"}`}
             >
               <option value="">Choose where it is going</option>
               {[...destinationGroups.entries()].map(([branch, locations]) => (
@@ -120,7 +120,7 @@ export default function TransferForm({ sources, destinations, items, levels, def
                     value={line.quantity}
                     onChange={(event) => change(line.key, { quantity: event.target.value })}
                     aria-invalid={problems.quantity ? "true" : undefined}
-                    className={`w-full rounded-field bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${problems.quantity ? "border border-error" : "border border-transparent"}`}
+                    className={`w-full rounded-field bg-surface-container-lowest px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${problems.quantity ? "border border-error" : "border border-outline"}`}
                   />
                   {problems.quantity ? (
                     <p className="text-label-bold text-error">{problems.quantity}</p>

@@ -71,7 +71,7 @@ export default function ReceiveTransferForm({ transfer }) {
                 value={received[line.id]}
                 onChange={(event) => setReceived((current) => ({ ...current, [line.id]: event.target.value }))}
                 aria-invalid={errors[line.id] ? "true" : undefined}
-                className={`w-full rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors[line.id] ? "border border-error" : "border border-transparent"}`}
+                className={`w-full rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors[line.id] ? "border border-error" : "border border-outline"}`}
               />
               {errors[line.id] ? <p className="text-label-bold text-error">{errors[line.id]}</p> : null}
             </div>

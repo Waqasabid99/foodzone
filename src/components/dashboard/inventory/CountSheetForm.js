@@ -97,7 +97,7 @@ export default function CountSheetForm({ count }) {
                 value={entries[line.itemId]?.counted ?? ""}
                 onChange={(event) => setEntry(line.itemId, { counted: event.target.value })}
                 aria-invalid={errors[line.itemId] ? "true" : undefined}
-                className={`w-full rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors[line.itemId] ? "border border-error" : "border border-transparent"}`}
+                className={`w-full rounded-field bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${errors[line.itemId] ? "border border-error" : "border border-outline"}`}
               />
               {errors[line.itemId] ? <p className="text-label-bold text-error">{errors[line.itemId]}</p> : null}
             </div>
@@ -108,7 +108,7 @@ export default function CountSheetForm({ count }) {
                 value={entries[line.itemId]?.reason ?? ""}
                 onChange={(event) => setEntry(line.itemId, { reason: event.target.value })}
                 placeholder="Optional — torn bag, found in the walk-in"
-                className="w-full rounded-field border border-transparent bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+                className="w-full rounded-field border border-outline bg-surface-container-lowest px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
               />
             </div>
           </li>
@@ -124,7 +124,7 @@ export default function CountSheetForm({ count }) {
             setNotes(event.target.value);
             save(entries, event.target.value);
           }}
-          className="w-full rounded-field border border-transparent bg-surface-container-low px-4 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+          className="w-full rounded-field border border-outline bg-surface-container-low px-4 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
         />
       </div>
       <button type="submit" disabled={pending} className="w-fit rounded-field bg-primary-container px-5 py-2.5 text-label-bold text-on-primary-container hover:shadow-e2 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">

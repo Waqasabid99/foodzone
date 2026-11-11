@@ -24,7 +24,7 @@ export default function ItemSelect({ id, label, value, onChange, items, error = 
         onChange={onChange}
         aria-invalid={error ? "true" : undefined}
         aria-describedby={errorId}
-        className={`w-full rounded-field bg-surface-container-low px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${error ? "border border-error" : "border border-transparent"}`}
+        className={`w-full rounded-field bg-surface-container-low px-3 py-3 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring ${error ? "border border-error" : "border border-outline"}`}
       >
         <option value="">{placeholder}</option>
         {ordered.length === 1

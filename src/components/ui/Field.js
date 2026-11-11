@@ -49,9 +49,12 @@ export default function Field({
           className={`w-full rounded-field bg-surface-container-low px-4 py-3 text-body-md text-on-surface placeholder:text-on-surface-variant/70 focus:outline-2 focus:outline-offset-2 focus:outline-ring disabled:cursor-not-allowed disabled:opacity-60 ${
             Icon || trailing ? "pr-12" : ""
           } ${
-            // A transparent border on the neutral state rather than none, so
-            // the field does not change size when an error puts one there.
-            error ? "border border-error" : "border border-transparent"
+            // `outline`, not `outline-variant`: a form field is a UI component,
+            // so WCAG 1.4.11 wants 3:1 against whatever it sits on. This clears
+            // 4:1 in both themes. It used to be transparent, which made a field
+            // on a panel of the same fill — the cashier's "Handed over" box —
+            // literally invisible until you clicked it.
+            error ? "border border-error" : "border border-outline"
           }`}
           {...inputProps}
         />

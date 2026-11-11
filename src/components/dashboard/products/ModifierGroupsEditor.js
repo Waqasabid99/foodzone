@@ -125,7 +125,7 @@ export default function ModifierGroupsEditor({ productId, attached, available, c
                 id="attach-group"
                 value={choice}
                 onChange={(event) => setChoice(event.target.value)}
-                className="rounded-field border border-transparent bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
+                className="rounded-field border border-outline bg-surface-container-low px-3 py-2.5 text-body-md text-on-surface focus:outline-2 focus:outline-offset-2 focus:outline-ring"
               >
                 <option value="">Choose a group</option>
                 {attachable.map((group) => (
